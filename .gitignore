@@ -1,0 +1,5 @@
+# Build/coverage artifacts
+*.profraw
+
+# Local sample file used to validate the Word importer — not for the repo
+Ch01-TheOnset.docx
