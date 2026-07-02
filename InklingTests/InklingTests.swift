@@ -65,6 +65,52 @@ struct InklingTests {
         #expect(RichTextCodec.decode(rtf)?.string == "Existing chapter")
     }
 
+    @Test @MainActor func decodeBackfillsDefaultParagraphSpacingOnPlainText() throws {
+        // A chapter written before paragraph spacing existed: separate
+        // paragraphs joined by a plain "\n", no paragraphStyle at all.
+        let original = NSAttributedString(string: "First paragraph.\nSecond paragraph.")
+        let rtf = try #require(original.rtf(
+            from: NSRange(location: 0, length: original.length),
+            documentAttributes: [:]
+        ))
+
+        let decoded = try #require(RichTextCodec.decode(rtf))
+        for location in [0, decoded.string.count - 1] {
+            let style = try #require(
+                decoded.attribute(.paragraphStyle, at: location, effectiveRange: nil) as? NSParagraphStyle
+            )
+            #expect(style.paragraphSpacing == RichTextCodec.defaultParagraphSpacing)
+        }
+    }
+
+    @Test @MainActor func decodePreservesAnExplicitNonDefaultParagraphSpacing() throws {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.paragraphSpacing = 20
+        let original = NSAttributedString(
+            string: "Custom spacing.",
+            attributes: [.paragraphStyle: paragraph]
+        )
+        let rtf = try #require(original.rtf(
+            from: NSRange(location: 0, length: original.length),
+            documentAttributes: [:]
+        ))
+
+        let decoded = try #require(RichTextCodec.decode(rtf))
+        let style = try #require(decoded.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle)
+        #expect(style.paragraphSpacing == 20)
+    }
+
+    @Test @MainActor func paragraphSpacingRoundTripsThroughEncodeAndDecode() throws {
+        let original = NSAttributedString(
+            string: "Round trips.",
+            attributes: [.paragraphStyle: RichTextCodec.defaultParagraphStyle]
+        )
+        let encoded = try #require(RichTextCodec.encode(original))
+        let decoded = try #require(RichTextCodec.decode(encoded))
+        let style = try #require(decoded.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle)
+        #expect(style.paragraphSpacing == RichTextCodec.defaultParagraphSpacing)
+    }
+
     @Test @MainActor func richTextCodecEmbedsAndRestoresAnImage() throws {
         let image = NSImage(size: NSSize(width: 40, height: 20), flipped: false) { rect in
             NSColor.systemBlue.setFill()

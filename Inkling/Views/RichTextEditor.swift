@@ -48,7 +48,10 @@ struct RichTextEditor: NSViewRepresentable {
         textView.isSelectable = true
         textView.usesAdaptiveColorMappingForDarkAppearance = presentation == .continuous
         textView.font = RichTextController.defaultBodyFont
-        textView.typingAttributes = [.font: RichTextController.defaultBodyFont]
+        textView.typingAttributes = [
+            .font: RichTextController.defaultBodyFont,
+            .paragraphStyle: RichTextCodec.defaultParagraphStyle,
+        ]
 
         if let pagedTextView = textView as? PagedTextView {
             pagedTextView.textColor = .black
@@ -92,7 +95,10 @@ struct RichTextEditor: NSViewRepresentable {
                 textView.string = ""
             }
             (textView as? PagedTextView)?.prepareFloatingImages()
-            textView.typingAttributes = [.font: RichTextController.defaultBodyFont]
+            textView.typingAttributes = [
+            .font: RichTextController.defaultBodyFont,
+            .paragraphStyle: RichTextCodec.defaultParagraphStyle,
+        ]
             (textView as? PagedTextView)?.updatePageLayout()
             loadedID = documentID
         }

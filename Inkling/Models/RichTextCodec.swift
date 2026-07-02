@@ -11,6 +11,18 @@ import AppKit
 enum RichTextCodec {
     private static let attachmentMetadataFilename = "__inkling_attachment_sizes.json"
 
+    /// Space after a paragraph, in points, so a plain "\n" between paragraphs
+    /// reads as a paragraph break rather than a line break. Applied to newly
+    /// typed text (via typing attributes) and backfilled on decode for
+    /// chapters written before this existed, including Word imports.
+    static let defaultParagraphSpacing: CGFloat = 6
+
+    static var defaultParagraphStyle: NSParagraphStyle {
+        let style = NSMutableParagraphStyle()
+        style.paragraphSpacing = defaultParagraphSpacing
+        return style
+    }
+
     private struct AttachmentSizeRecord: Codable {
         let location: Int
         let width: Double
@@ -30,7 +42,25 @@ enum RichTextCodec {
         else { return nil }
         let mutable = NSMutableAttributedString(attributedString: attributed)
         restoreAttachmentSizes(in: mutable, from: data)
+        applyDefaultParagraphSpacing(in: mutable)
         return mutable
+    }
+
+    /// Backfills the default paragraph spacing onto any paragraph that
+    /// doesn't already carry non-zero spacing, preserving any other
+    /// paragraph-style properties (alignment, etc.) already present. Safe to
+    /// run on every decode: a paragraph that already has spacing (from a
+    /// prior save, once this exists) is left untouched.
+    private static func applyDefaultParagraphSpacing(in attributedString: NSMutableAttributedString) {
+        guard attributedString.length > 0 else { return }
+        let fullRange = NSRange(location: 0, length: attributedString.length)
+        attributedString.enumerateAttribute(.paragraphStyle, in: fullRange) { value, range, _ in
+            let existing = value as? NSParagraphStyle
+            guard (existing?.paragraphSpacing ?? 0) == 0 else { return }
+            let updated = (existing?.mutableCopy() as? NSMutableParagraphStyle) ?? NSMutableParagraphStyle()
+            updated.paragraphSpacing = defaultParagraphSpacing
+            attributedString.addAttribute(.paragraphStyle, value: updated, range: range)
+        }
     }
 
     static func encode(_ attributedString: NSAttributedString) -> Data? {
