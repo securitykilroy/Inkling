@@ -124,13 +124,22 @@ final class InklingDocument: NSPersistentDocument {
             let rootView = ProjectNotesView(project: project)
                 .environment(\.managedObjectContext, context)
             let hosting = NSHostingController(rootView: rootView)
-            let window = NSWindow(contentViewController: hosting)
+            // A plain NSWindow that becomes key also becomes the app's *main*
+            // window. This window has no NSWindowController, so the document
+            // isn't reachable through its responder chain — while it was
+            // frontmost, document-targeted menu commands (Hide Project Notes,
+            // Save, Print…) would grey out. Refusing "main" keeps the project
+            // window as main, so AppKit still resolves those against the
+            // document; this window can still be key and take typing.
+            let window = ProjectNotesWindow(contentViewController: hosting)
             window.isReleasedWhenClosed = false
             window.setContentSize(NSSize(width: 480, height: 600))
             window.minSize = NSSize(width: 320, height: 240)
-            window.title = "Project Notes — \(bookTitle())"
             projectNotesWindow = window
         }
+        // Refresh each time so the title isn't stale if the project was
+        // renamed after the window was first created.
+        projectNotesWindow?.title = "Project Notes — \(bookTitle())"
         projectNotesWindow?.makeKeyAndOrderFront(nil)
     }
 

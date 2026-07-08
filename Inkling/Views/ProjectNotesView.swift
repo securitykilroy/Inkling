@@ -13,7 +13,17 @@
 //
 
 import SwiftUI
+import AppKit
 import CoreData
+
+/// The window that hosts `ProjectNotesView`. It refuses to become the app's
+/// *main* window so that, while it's focused, AppKit keeps resolving nil-target
+/// menu commands against the project window's `InklingDocument` rather than
+/// dead-ending in this satellite window's (controller-less) responder chain.
+/// It can still be key, so its editor accepts typing normally.
+final class ProjectNotesWindow: NSWindow {
+    override var canBecomeMain: Bool { false }
+}
 
 struct ProjectNotesView: View {
     @ObservedObject var project: Project
