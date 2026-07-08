@@ -21,12 +21,20 @@ public final class Project: NSManagedObject {
     @NSManaged public var subtitle: String?
     @NSManaged public var author: String?
     @NSManaged public var createdAt: Date?
+    @NSManaged public var bodyFontFamily: String?
+    @NSManaged public var projectNotesData: Data?
     @NSManaged public var chapters: Set<Chapter>?
+    @NSManaged public var shelfEntries: Set<ShelfEntry>?
 }
 
 extension Project {
     /// Chapters in display order (by `sortIndex`).
     var orderedChapters: [Chapter] {
         (chapters ?? []).sorted { $0.sortIndex < $1.sortIndex }
+    }
+
+    /// Shelf entries in display order (by `sortIndex`).
+    var orderedShelfEntries: [ShelfEntry] {
+        (shelfEntries ?? []).sorted { $0.sortIndex < $1.sortIndex }
     }
 }

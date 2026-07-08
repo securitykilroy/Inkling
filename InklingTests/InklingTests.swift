@@ -38,6 +38,16 @@ struct InklingTests {
         #expect(scale == 1)
     }
 
+    @Test @MainActor func pagedEditorZoomsAboveActualSizeOnCommand() {
+        let scrollView = PagedTextView.makePagedScrollView()
+        scrollView.frame = NSRect(x: 0, y: 0, width: 900, height: 792)
+        scrollView.layoutSubtreeIfNeeded()
+
+        scrollView.zoomIn(nil)
+
+        #expect(scrollView.magnification > 1)
+    }
+
     @Test @MainActor func emptyPagedEditorInsertionPointStartsInsideTopMargin() throws {
         let scrollView = PagedTextView.makePagedScrollView()
         scrollView.frame = NSRect(x: 0, y: 0, width: 676, height: 792)
@@ -53,6 +63,119 @@ struct InklingTests {
 
         #expect(abs(localOrigin.x - textView.textContainerOrigin.x) < 0.5)
         #expect(localOrigin.y >= textView.textContainerOrigin.y + textView.pageLayout.topMargin - 0.5)
+    }
+
+    @Test @MainActor func pagedEditorResetsNewParagraphAfterHeadingToBodyFont() throws {
+        let scrollView = PagedTextView.makePagedScrollView()
+        let textView = try #require(scrollView.documentView as? PagedTextView)
+        textView.textStorage?.setAttributedString(NSAttributedString(
+            string: "Coming Home",
+            attributes: [.font: TextStyle.heading.font]
+        ))
+        textView.setSelectedRange(NSRange(location: textView.string.count, length: 0))
+
+        textView.insertNewline(nil)
+        textView.insertText("Body text.", replacementRange: textView.selectedRange())
+
+        let bodyRange = (textView.string as NSString).range(of: "Body text.")
+        let font = try #require(textView.textStorage?.attribute(.font, at: bodyRange.location, effectiveRange: nil) as? NSFont)
+        #expect(font.pointSize == TextStyle.body.font.pointSize)
+        #expect(!font.fontDescriptor.symbolicTraits.contains(.bold))
+    }
+
+    @Test @MainActor func typewriterScrollingHoldsTheCaretAtAFixedFractionOfTheViewport() throws {
+        let scrollView = PagedTextView.makePagedScrollView()
+        let textView = try #require(scrollView.documentView as? PagedTextView)
+        scrollView.frame = NSRect(x: 0, y: 0, width: 900, height: 400)
+        scrollView.layoutSubtreeIfNeeded()
+        textView.isTypewriterScrollingEnabled = true
+
+        let manyLines = Array(repeating: "A line of text.", count: 60).joined(separator: "\n")
+        textView.textStorage?.setAttributedString(NSAttributedString(string: manyLines))
+        textView.updatePageLayout()
+        textView.setSelectedRange(NSRange(location: textView.string.count, length: 0))
+
+        let glyphIndex = try #require(
+            textView.layoutManager?.glyphIndexForCharacter(at: textView.selectedRange().location - 1)
+        )
+        let lineRect = try #require(textView.layoutManager?.lineFragmentRect(forGlyphAt: glyphIndex, effectiveRange: nil))
+        let caretMidY = lineRect.midY + textView.textContainerOrigin.y
+
+        let visibleHeight = scrollView.contentView.bounds.height
+        let expectedOriginY = caretMidY - visibleHeight * 0.42
+        #expect(abs(scrollView.contentView.bounds.origin.y - expectedOriginY) < 1)
+    }
+
+    @Test @MainActor func typewriterScrollingDoesNothingWhenDisabled() throws {
+        let scrollView = PagedTextView.makePagedScrollView()
+        let textView = try #require(scrollView.documentView as? PagedTextView)
+        scrollView.frame = NSRect(x: 0, y: 0, width: 900, height: 400)
+        scrollView.layoutSubtreeIfNeeded()
+        textView.isTypewriterScrollingEnabled = false
+
+        let manyLines = Array(repeating: "A line of text.", count: 60).joined(separator: "\n")
+        textView.textStorage?.setAttributedString(NSAttributedString(string: manyLines))
+        let originBeforeSelection = scrollView.contentView.bounds.origin.y
+
+        textView.setSelectedRange(NSRange(location: textView.string.count, length: 0))
+
+        #expect(scrollView.contentView.bounds.origin.y == originBeforeSelection)
+    }
+
+    @Test @MainActor func currentStyleClassifiesTheFontAtTheCursor() throws {
+        let scrollView = PagedTextView.makePagedScrollView()
+        let textView = try #require(scrollView.documentView as? PagedTextView)
+        let controller = RichTextController()
+        controller.textView = textView
+
+        textView.textStorage?.setAttributedString(NSAttributedString(
+            string: "My Heading",
+            attributes: [.font: TextStyle.heading.font]
+        ))
+        textView.setSelectedRange(NSRange(location: 0, length: 0))
+        controller.selectionDidChange()
+        #expect(controller.currentStyle == .heading)
+
+        textView.textStorage?.setAttributedString(NSAttributedString(
+            string: "Plain body text",
+            attributes: [.font: TextStyle.body.font]
+        ))
+        textView.setSelectedRange(NSRange(location: 0, length: 0))
+        controller.selectionDidChange()
+        #expect(controller.currentStyle == .body)
+    }
+
+    @Test @MainActor func applyStyleImmediatelyUpdatesCurrentStyle() throws {
+        let scrollView = PagedTextView.makePagedScrollView()
+        let textView = try #require(scrollView.documentView as? PagedTextView)
+        let controller = RichTextController()
+        controller.textView = textView
+
+        textView.textStorage?.setAttributedString(NSAttributedString(string: "Some text"))
+        textView.setSelectedRange(NSRange(location: 0, length: 0))
+        controller.selectionDidChange()
+        #expect(controller.currentStyle == .body)
+
+        controller.applyStyle(.heading)
+        #expect(controller.currentStyle == .heading)
+    }
+
+    @Test @MainActor func applyStyleRespectsTheControllersFontFamily() throws {
+        let scrollView = PagedTextView.makePagedScrollView()
+        let textView = try #require(scrollView.documentView as? PagedTextView)
+        let controller = RichTextController()
+        controller.textView = textView
+        controller.fontFamilyName = "Georgia"
+
+        textView.textStorage?.setAttributedString(NSAttributedString(string: "Some text"))
+        textView.setSelectedRange(NSRange(location: 0, length: 0))
+
+        controller.applyStyle(.heading)
+
+        let font = try #require(textView.textStorage?.attribute(.font, at: 0, effectiveRange: nil) as? NSFont)
+        #expect(font.familyName == "Georgia")
+        #expect(font.pointSize == TextStyle.heading.pointSize)
+        #expect(font.fontDescriptor.symbolicTraits.contains(.bold))
     }
 
     @Test @MainActor func richTextCodecReadsExistingRTF() throws {
@@ -211,6 +334,28 @@ struct InklingTests {
         let rect = PagedEditorLayout.letter.exclusionRect(forImageRect: imageRect)
 
         #expect(rect.maxY == PagedEditorLayout.letter.contentBottom(forPage: 0))
+    }
+
+    /// An image anchored to the first line of a page *other than page 0* has
+    /// its top edge translated back into TextKit's pre-page-break "proposed"
+    /// coordinate space (see the big comment on `exclusionRect`). The bottom
+    /// edge must shift by that same amount, or the rect's height balloons by
+    /// a full page margin/gap: on a real manuscript this produced a tall,
+    /// bogus exclusion straddling the page break, which made TextKit collapse
+    /// everything after it into one degenerate zero-size line for the rest of
+    /// the chapter (11,654 characters in the reproduction case).
+    @Test func floatingImageExclusionHeightIsUnaffectedByFirstLineTranslation() {
+        let layout = PagedEditorLayout.letter
+        let page1Top = layout.contentTop(forPage: 1)
+        let imageRect = NSRect(x: 0, y: page1Top, width: 240, height: 150)
+        let rect = layout.exclusionRect(forImageRect: imageRect)
+
+        // Height must match the un-translated image height + gutter, exactly
+        // as it would for the same image sitting mid-page (not inflated by
+        // the page's margins/gap just because it happens to anchor the
+        // page's first line).
+        #expect(rect.height == 158)
+        #expect(rect.maxY == rect.minY + 158)
     }
 
     @Test @MainActor func imageInsertionReplacesTheCurrentSelection() {
@@ -1493,6 +1638,98 @@ struct InklingTests {
         #expect(line.width > layout.contentWidth - 20)
     }
 
+    /// Diagnostic reproduction: dragging a floating image several pages away
+    /// (not just to an adjacent page) reportedly makes surrounding text stop
+    /// rendering. Dumps per-line geometry before and after the move so a
+    /// regression shows exactly which lines lost width/visibility.
+    @Test @MainActor func movingAFloatingImageAcrossSeveralPagesKeepsAllTextVisible() throws {
+        let scrollView = PagedTextView.makePagedScrollView()
+        scrollView.frame = NSRect(x: 0, y: 0, width: 676, height: 792)
+        scrollView.layoutSubtreeIfNeeded()
+        let textView = try #require(scrollView.documentView as? PagedTextView)
+        let layout = textView.pageLayout
+
+        // Enough text to span several pages.
+        let para = String(repeating: "Lorem ipsum dolor sit amet consectetur adipiscing elit. ", count: 400)
+        textView.textStorage?.setAttributedString(NSAttributedString(
+            string: para,
+            attributes: [.font: NSFont.systemFont(ofSize: 12)]
+        ))
+
+        let image = NSImage(size: NSSize(width: 200, height: 120), flipped: false) { r in
+            NSColor.systemBrown.setFill(); r.fill(); return true
+        }
+        RichTextImageInserter.insert(
+            image, into: textView, at: NSRange(location: 0, length: 0),
+            maximumWidth: layout.contentWidth
+        )
+        textView.prepareFloatingImages()
+
+        let floating = try #require(textView.textStorage?.attribute(
+            .attachment, at: 0, effectiveRange: nil) as? FloatingImageAttachment)
+        floating.position = FloatingImagePosition(page: 0, origin: CGPoint(x: 72, y: 100))
+        textView.updatePageLayout()
+
+        let lm = try #require(textView.layoutManager)
+        let tc = try #require(textView.textContainer)
+        lm.ensureLayout(for: tc)
+
+        struct LineDump: Equatable {
+            let range: NSRange
+            let rect: NSRect
+        }
+
+        func dumpLines() -> [LineDump] {
+            var glyph = 0
+            let n = lm.numberOfGlyphs
+            var lines: [LineDump] = []
+            while glyph < n {
+                var lineRange = NSRange()
+                let rect = lm.lineFragmentUsedRect(forGlyphAt: glyph, effectiveRange: &lineRange)
+                lines.append(LineDump(range: lineRange, rect: rect))
+                glyph = max(NSMaxRange(lineRange), glyph + 1)
+            }
+            return lines
+        }
+
+        let before = dumpLines()
+        let glyphsBefore = lm.numberOfGlyphs
+
+        // Simulate the drop at the end of a drag that carried the image several
+        // pages further down the document — the same state transition
+        // `setFloatingPosition` commits on mouseUp.
+        floating.position = FloatingImagePosition(page: 3, origin: CGPoint(x: 72, y: 100))
+        textView.updatePageLayout()
+        lm.ensureLayout(for: tc)
+
+        let after = dumpLines()
+        let glyphsAfter = lm.numberOfGlyphs
+
+        #expect(glyphsAfter == glyphsBefore)
+
+        // Every line must have positive width (a zero/negative-width line
+        // fragment renders no visible glyphs even though the characters are
+        // still present in the text storage — the "did it disappear or just
+        // stop rendering" symptom).
+        let collapsedLines = after.filter { $0.rect.width <= 0.5 && $0.range.length > 0 }
+        #expect(collapsedLines.isEmpty, "collapsed line rects after move: \(collapsedLines)")
+
+        // Every line must land within some page's printable band, not in the
+        // inter-page gutter (which would place it behind/between pages).
+        let misplacedLines = after.filter { line in
+            let page = layout.pageIndex(atY: line.rect.minY)
+            return line.rect.minY < layout.contentTop(forPage: page) - 0.5
+                || line.rect.maxY > layout.contentBottom(forPage: page) + 0.5
+        }
+        #expect(misplacedLines.isEmpty, "lines outside their page's printable band: \(misplacedLines)")
+
+        // The set of covered characters (by line ranges) must match before and
+        // after — no character should fall between two line fragments.
+        let coveredBefore = before.reduce(0) { $0 + $1.range.length }
+        let coveredAfter = after.reduce(0) { $0 + $1.range.length }
+        #expect(coveredAfter == coveredBefore)
+    }
+
     // MARK: - Find
 
     @Test @MainActor func pagedEditorEnablesTheFindBar() throws {
@@ -1721,12 +1958,256 @@ struct InklingTests {
         }
     }
 
+    // MARK: - WordDocumentExporter
+
+    @Test @MainActor func wordExporterMapsInklingTextStylesToWordStyles() throws {
+        let body = NSMutableAttributedString()
+        body.append(NSAttributedString(string: "My Title\n", attributes: [.font: TextStyle.title.font]))
+        body.append(NSAttributedString(string: "My Heading\n", attributes: [.font: TextStyle.heading.font]))
+        body.append(NSAttributedString(string: "My Subheading\n", attributes: [.font: TextStyle.subheading.font]))
+        body.append(NSAttributedString(string: "Body text.", attributes: [.font: TextStyle.body.font]))
+        let data = try #require(RichTextCodec.encode(body))
+
+        let docx = try WordDocumentExporter.docxData(for: PrintableChapter(title: "Chapter", bodyData: data))
+        let reader = try MinimalZipReader(data: docx)
+        let documentXML = try #require(String(data: reader.contents(of: "word/document.xml"), encoding: .utf8))
+
+        #expect(documentXML.contains(#"<w:pStyle w:val="Title"/>"#))
+        #expect(documentXML.contains(#"<w:pStyle w:val="Heading1"/>"#))
+        #expect(documentXML.contains(#"<w:pStyle w:val="Heading2"/>"#))
+        #expect(documentXML.contains(#"<w:t xml:space="preserve">Body text.</w:t>"#))
+    }
+
+    @Test @MainActor func wordExporterEmbedsImagesInTheDocumentPackage() throws {
+        let imageData = testPNGData()
+        let attachment = NSTextAttachment(data: imageData, ofType: "public.png")
+        attachment.image = NSImage(data: imageData)
+        let body = NSMutableAttributedString(string: "Before ")
+        body.append(NSAttributedString(attachment: attachment))
+        body.append(NSAttributedString(string: " after."))
+        let data = try #require(RichTextCodec.encode(body))
+
+        let docx = try WordDocumentExporter.docxData(for: PrintableChapter(title: "Chapter", bodyData: data))
+        let reader = try MinimalZipReader(data: docx)
+        let documentXML = try #require(String(data: reader.contents(of: "word/document.xml"), encoding: .utf8))
+
+        #expect(documentXML.contains(#"r:embed="rId1""#))
+        #expect(try reader.contents(of: "word/media/image1.png").isEmpty == false)
+    }
+
     private func writeTempFile(_ data: Data) throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
             .appendingPathExtension("docx")
         try data.write(to: url)
         return url
+    }
+
+    // MARK: - ProjectSearch
+
+    private func searchableChapter(id: UUID = UUID(), title: String, text: String) -> SearchableChapter {
+        SearchableChapter(id: id, title: title, bodyData: RichTextCodec.encode(NSAttributedString(string: text)))
+    }
+
+    @Test func projectSearchFindsMatchesAcrossMultipleChapters() {
+        let chapters = [
+            searchableChapter(title: "One", text: "The cat sat."),
+            searchableChapter(title: "Two", text: "No match here."),
+            searchableChapter(title: "Three", text: "A cat and another cat."),
+        ]
+
+        let matches = ProjectSearch.findMatches(in: chapters, query: "cat", caseSensitive: true)
+
+        #expect(matches.count == 3)
+        #expect(matches.filter { $0.chapterTitle == "One" }.count == 1)
+        #expect(matches.filter { $0.chapterTitle == "Two" }.count == 0)
+        #expect(matches.filter { $0.chapterTitle == "Three" }.count == 2)
+    }
+
+    @Test func projectSearchIsCaseSensitiveByDefault() {
+        let chapters = [searchableChapter(title: "One", text: "Cat cat CAT")]
+
+        let sensitive = ProjectSearch.findMatches(in: chapters, query: "cat", caseSensitive: true)
+        let insensitive = ProjectSearch.findMatches(in: chapters, query: "cat", caseSensitive: false)
+
+        #expect(sensitive.count == 1)
+        #expect(insensitive.count == 3)
+    }
+
+    @Test func projectSearchReturnsNothingForAnEmptyQuery() {
+        let chapters = [searchableChapter(title: "One", text: "Some text.")]
+        #expect(ProjectSearch.findMatches(in: chapters, query: "", caseSensitive: true).isEmpty)
+    }
+
+    @Test func projectSearchSnippetIncludesSurroundingContextWithEllipsesWhenTruncated() {
+        let padding = String(repeating: "x", count: 60)
+        let chapters = [searchableChapter(title: "One", text: "\(padding) MATCH \(padding)")]
+
+        let match = try! #require(
+            ProjectSearch.findMatches(in: chapters, query: "MATCH", caseSensitive: true).first
+        )
+
+        #expect(match.snippetMatch == "MATCH")
+        #expect(match.snippetBefore.hasPrefix("…"))
+        #expect(match.snippetAfter.hasSuffix("…"))
+        #expect(match.snippetBefore.contains("x"))
+        #expect(match.snippetAfter.contains("x"))
+    }
+
+    @Test func projectSearchSnippetHasNoEllipsisNearDocumentEdges() {
+        let chapters = [searchableChapter(title: "One", text: "MATCH at the very start.")]
+        let match = try! #require(
+            ProjectSearch.findMatches(in: chapters, query: "MATCH", caseSensitive: true).first
+        )
+        #expect(!match.snippetBefore.hasPrefix("…"))
+        #expect(match.snippetBefore.isEmpty)
+    }
+
+    @Test func projectSearchReplaceAllReplacesEveryOccurrenceAcrossAffectedChapters() throws {
+        let idOne = UUID()
+        let idTwo = UUID()
+        let idThree = UUID()
+        let chapters = [
+            searchableChapter(id: idOne, title: "One", text: "The cat sat on the cat mat."),
+            searchableChapter(id: idTwo, title: "Two", text: "Untouched chapter."),
+            searchableChapter(id: idThree, title: "Three", text: "One cat here."),
+        ]
+
+        let results = ProjectSearch.replaceAll(
+            in: chapters, query: "cat", replacement: "dog", caseSensitive: true
+        )
+
+        #expect(results.count == 2)
+        #expect(results[idTwo] == nil)
+
+        let decodedOne = try #require(RichTextCodec.decode(results[idOne]))
+        #expect(decodedOne.string == "The dog sat on the dog mat.")
+        let decodedThree = try #require(RichTextCodec.decode(results[idThree]))
+        #expect(decodedThree.string == "One dog here.")
+    }
+
+    @Test func projectSearchReplaceAllPreservesFormattingAroundTheReplacement() throws {
+        let id = UUID()
+        let boldFont = NSFont.boldSystemFont(ofSize: 14)
+        let original = NSMutableAttributedString(string: "before ")
+        original.append(NSAttributedString(string: "cat", attributes: [.font: boldFont]))
+        original.append(NSAttributedString(string: " after"))
+        let chapters = [SearchableChapter(id: id, title: "One", bodyData: RichTextCodec.encode(original))]
+
+        let results = ProjectSearch.replaceAll(
+            in: chapters, query: "cat", replacement: "dog", caseSensitive: true
+        )
+
+        let decoded = try #require(RichTextCodec.decode(results[id]))
+        #expect(decoded.string == "before dog after")
+        let range = (decoded.string as NSString).range(of: "dog")
+        let font = try #require(decoded.attribute(.font, at: range.location, effectiveRange: nil) as? NSFont)
+        // RTF round-tripping doesn't preserve the exact system-font identity
+        // (same as elsewhere in this suite) — check the bold trait survived,
+        // not literal font equality.
+        #expect(font.fontDescriptor.symbolicTraits.contains(.bold))
+    }
+
+    // MARK: - ProjectFontStyler
+
+    @Test func withFamilyPreservesSizeAndBoldWhileChangingTypeface() {
+        let heading = TextStyle.heading.font
+        let restyled = heading.withFamily("Georgia")
+
+        #expect(restyled.familyName == "Georgia")
+        #expect(restyled.pointSize == heading.pointSize)
+        #expect(restyled.fontDescriptor.symbolicTraits.contains(.bold))
+    }
+
+    @Test func withFamilyFallsBackToTheOriginalFontForAnUnknownFamily() {
+        let body = TextStyle.body.font
+        let restyled = body.withFamily("Definitely Not An Installed Font Name")
+        #expect(restyled == body)
+    }
+
+    @Test func withFamilyNilRestoresSystemDefault() {
+        let georgiaHeading = TextStyle.heading.font(familyName: "Georgia")
+        let restored = georgiaHeading.withFamily(nil)
+        #expect(restored == georgiaHeading)
+    }
+
+    @Test func projectFontStylerRestyledRewritesEveryFontRunToTheNewFamily() throws {
+        let mixed = NSMutableAttributedString()
+        mixed.append(NSAttributedString(string: "Heading\n", attributes: [.font: TextStyle.heading.font]))
+        mixed.append(NSAttributedString(string: "Body text.", attributes: [.font: TextStyle.body.font]))
+
+        let restyled = ProjectFontStyler.restyled(mixed, familyName: "Georgia")
+
+        let headingFont = try #require(restyled.attribute(.font, at: 0, effectiveRange: nil) as? NSFont)
+        #expect(headingFont.familyName == "Georgia")
+        #expect(headingFont.pointSize == TextStyle.heading.pointSize)
+        #expect(headingFont.fontDescriptor.symbolicTraits.contains(.bold))
+
+        let bodyRange = (restyled.string as NSString).range(of: "Body text.")
+        let bodyFont = try #require(restyled.attribute(.font, at: bodyRange.location, effectiveRange: nil) as? NSFont)
+        #expect(bodyFont.familyName == "Georgia")
+        #expect(bodyFont.pointSize == TextStyle.body.pointSize)
+        #expect(!bodyFont.fontDescriptor.symbolicTraits.contains(.bold))
+    }
+
+    @Test func projectFontStylerRestyledChaptersUpdatesBodyAndNotesForEveryChapter() throws {
+        let id = UUID()
+        let body = NSAttributedString(string: "Body", attributes: [.font: TextStyle.body.font])
+        let notes = NSAttributedString(string: "Notes", attributes: [.font: TextStyle.body.font])
+        let chapter = FontStyledChapter(
+            id: id,
+            bodyData: RichTextCodec.encode(body),
+            notesData: RichTextCodec.encode(notes)
+        )
+
+        let results = ProjectFontStyler.restyledChapters([chapter], familyName: "Georgia")
+
+        let newBody = try #require(RichTextCodec.decode(results[id]?.bodyData))
+        let newBodyFont = try #require(newBody.attribute(.font, at: 0, effectiveRange: nil) as? NSFont)
+        #expect(newBodyFont.familyName == "Georgia")
+
+        let newNotes = try #require(RichTextCodec.decode(results[id]?.notesData))
+        let newNotesFont = try #require(newNotes.attribute(.font, at: 0, effectiveRange: nil) as? NSFont)
+        #expect(newNotesFont.familyName == "Georgia")
+    }
+
+    @Test func projectFontStylerRestyledChaptersSkipsChaptersWithNoDecodableRichText() {
+        let chapter = FontStyledChapter(id: UUID(), bodyData: nil, notesData: nil)
+        let results = ProjectFontStyler.restyledChapters([chapter], familyName: "Georgia")
+        #expect(results.isEmpty)
+    }
+
+    // MARK: - ShelfDropParser
+
+    @Test func shelfDropParserDecodesDroppedRTFData() throws {
+        let original = NSAttributedString(string: "A dropped line.", attributes: [.font: TextStyle.heading.font])
+        let rtfData = try #require(original.rtf(
+            from: NSRange(location: 0, length: original.length),
+            documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf]
+        ))
+
+        let decoded = try #require(ShelfDropParser.attributedString(rtfData: rtfData))
+        #expect(decoded.string == "A dropped line.")
+    }
+
+    @Test func shelfDropParserReturnsNilForGarbageRTFData() {
+        let garbage = Data("not rtf at all".utf8)
+        #expect(ShelfDropParser.attributedString(rtfData: garbage) == nil)
+    }
+
+    @Test func shelfDropParserWrapsDroppedPlainTextInTheGivenFont() throws {
+        let data = Data("A stray idea.".utf8)
+        let font = TextStyle.body.font
+
+        let decoded = try #require(ShelfDropParser.attributedString(plainTextData: data, font: font))
+        #expect(decoded.string == "A stray idea.")
+        let appliedFont = try #require(decoded.attribute(.font, at: 0, effectiveRange: nil) as? NSFont)
+        #expect(appliedFont.pointSize == font.pointSize)
+    }
+
+    @Test func shelfDropParserReturnsNilForEmptyPlainText() {
+        let data = Data("".utf8)
+        #expect(ShelfDropParser.attributedString(plainTextData: data, font: TextStyle.body.font) == nil)
     }
 }
 

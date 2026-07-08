@@ -26,13 +26,40 @@ enum TextStyle: String, CaseIterable, Identifiable {
         }
     }
 
-    var font: NSFont {
+    var pointSize: CGFloat {
         switch self {
-        case .title: return .boldSystemFont(ofSize: 28)
-        case .heading: return .boldSystemFont(ofSize: 22)
-        case .subheading: return .boldSystemFont(ofSize: 17)
-        case .body: return .systemFont(ofSize: 14)
+        case .title: return 28
+        case .heading: return 22
+        case .subheading: return 17
+        case .body: return 14
         }
+    }
+
+    var isBold: Bool { self != .body }
+
+    var font: NSFont {
+        isBold ? .boldSystemFont(ofSize: pointSize) : .systemFont(ofSize: pointSize)
+    }
+
+    /// This style's font in a specific typeface (nil = system default),
+    /// keeping the style's point size and weight. Falls back to the system
+    /// font if `familyName` can't be resolved (e.g. a project font that's no
+    /// longer installed).
+    func font(familyName: String?) -> NSFont {
+        font.withFamily(familyName)
+    }
+}
+
+extension NSFont {
+    /// This font re-created in a different family, preserving point size and
+    /// bold/italic traits. `nil` means "system default". Falls back to `self`
+    /// if the family can't resolve a matching font.
+    func withFamily(_ familyName: String?) -> NSFont {
+        guard let familyName else { return self }
+        var traits: NSFontTraitMask = []
+        if fontDescriptor.symbolicTraits.contains(.bold) { traits.insert(.boldFontMask) }
+        if fontDescriptor.symbolicTraits.contains(.italic) { traits.insert(.italicFontMask) }
+        return NSFontManager.shared.font(withFamily: familyName, traits: traits, weight: 5, size: pointSize) ?? self
     }
 }
 
@@ -43,6 +70,23 @@ final class RichTextController: ObservableObject {
     weak var textView: NSTextView?
 
     static let defaultBodyFont = NSFont.systemFont(ofSize: 14)
+
+    /// The project's chosen typeface (nil = system default). Set by
+    /// ChapterDetailView from `Project.bodyFontFamily`; every font this
+    /// controller applies goes through it so typed/styled text matches the
+    /// project-wide font.
+    var fontFamilyName: String?
+
+    /// The style the cursor (or the start of the selection) is currently in —
+    /// drives the checkmark in the Style menu. `@Published` (not just a plain
+    /// method) because nothing else about this controller changes when the
+    /// cursor merely moves within the text view: without a published property
+    /// to trigger it, SwiftUI has no signal to ever recompute FormatToolbar,
+    /// so the checkmark would just freeze at whatever it was on first render.
+    /// Kept up to date by `RichTextEditor.Coordinator.textViewDidChangeSelection`.
+    @Published private(set) var currentStyle: TextStyle = .body
+
+    private var bodyFont: NSFont { TextStyle.body.font(familyName: fontFamilyName) }
 
     // MARK: - Images
 
@@ -85,14 +129,16 @@ final class RichTextController: ObservableObject {
     // MARK: - Navigation
 
     /// Scrolls the editor to a character range (used by the outline to jump to
-    /// a heading) and places the cursor there.
+    /// a heading, and by project-wide Find to jump to a match) and selects it,
+    /// so the destination text is actually visible/highlighted rather than
+    /// just placing a collapsed cursor at its start.
     func scroll(to range: NSRange) {
         guard let textView, range.location != NSNotFound else { return }
         let length = textView.textStorage?.length ?? 0
         guard range.location <= length else { return }
         let clamped = NSRange(location: range.location, length: min(range.length, length - range.location))
         textView.scrollRangeToVisible(clamped)
-        textView.setSelectedRange(NSRange(location: range.location, length: 0))
+        textView.setSelectedRange(clamped)
         textView.window?.makeFirstResponder(textView)
     }
 
@@ -107,7 +153,7 @@ final class RichTextController: ObservableObject {
 
         // No selection: flip the trait for newly typed text.
         if range.length == 0 {
-            let current = (textView.typingAttributes[.font] as? NSFont) ?? Self.defaultBodyFont
+            let current = (textView.typingAttributes[.font] as? NSFont) ?? bodyFont
             let isOn = current.fontDescriptor.symbolicTraits.contains(trait)
             textView.typingAttributes[.font] = font(current, setting: trait, on: !isOn)
             return
@@ -119,14 +165,14 @@ final class RichTextController: ObservableObject {
         // If every run already has the trait, turn it off; otherwise turn it on.
         var allHaveTrait = true
         storage.enumerateAttribute(.font, in: range, options: []) { value, _, _ in
-            let runFont = (value as? NSFont) ?? Self.defaultBodyFont
+            let runFont = (value as? NSFont) ?? bodyFont
             if !runFont.fontDescriptor.symbolicTraits.contains(trait) { allHaveTrait = false }
         }
         let turnOn = !allHaveTrait
 
         storage.beginEditing()
         storage.enumerateAttribute(.font, in: range, options: []) { value, subRange, _ in
-            let runFont = (value as? NSFont) ?? Self.defaultBodyFont
+            let runFont = (value as? NSFont) ?? bodyFont
             storage.addAttribute(.font, value: font(runFont, setting: trait, on: turnOn), range: subRange)
         }
         storage.endEditing()
@@ -142,14 +188,43 @@ final class RichTextController: ObservableObject {
 
     // MARK: - Paragraph styles (headings)
 
+    /// Recomputes `currentStyle` from the font at the cursor (or the start of
+    /// the selection), classified the same way `WordDocumentExporter` maps
+    /// fonts back to Word heading styles: bold size bands, else body. Called
+    /// on every selection change and after applying a style.
+    func selectionDidChange() {
+        guard let textView else {
+            currentStyle = .body
+            return
+        }
+        let location = textView.selectedRange().location
+        let font: NSFont?
+        if location < textView.textStorage?.length ?? 0 {
+            font = textView.textStorage?.attribute(.font, at: location, effectiveRange: nil) as? NSFont
+        } else {
+            font = textView.typingAttributes[.font] as? NSFont
+        }
+        guard let font else {
+            currentStyle = .body
+            return
+        }
+        let bold = font.fontDescriptor.symbolicTraits.contains(.bold)
+        if bold && font.pointSize >= 25 { currentStyle = .title }
+        else if bold && font.pointSize >= 19 { currentStyle = .heading }
+        else if bold && font.pointSize >= 15 { currentStyle = .subheading }
+        else { currentStyle = .body }
+    }
+
     func applyStyle(_ style: TextStyle) {
         guard let textView, let storage = textView.textStorage else { return }
         let paragraphRange = (textView.string as NSString).paragraphRange(for: textView.selectedRange())
         guard textView.shouldChangeText(in: paragraphRange, replacementString: nil) else { return }
 
-        storage.addAttribute(.font, value: style.font, range: paragraphRange)
-        textView.typingAttributes[.font] = style.font
+        let font = style.font(familyName: fontFamilyName)
+        storage.addAttribute(.font, value: font, range: paragraphRange)
+        textView.typingAttributes[.font] = font
         textView.didChangeText()
+        selectionDidChange()
     }
 
     // MARK: - Bullet list
@@ -184,7 +259,7 @@ final class RichTextController: ObservableObject {
             } else {
                 let attributedMarker = NSAttributedString(
                     string: marker,
-                    attributes: [.font: (textView.typingAttributes[.font] as? NSFont) ?? Self.defaultBodyFont]
+                    attributes: [.font: (textView.typingAttributes[.font] as? NSFont) ?? bodyFont]
                 )
                 storage.replaceCharacters(in: NSRange(location: location, length: 0), with: attributedMarker)
             }

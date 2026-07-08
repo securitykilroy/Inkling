@@ -16,13 +16,14 @@ import AppKit
 final class PagedEditorScrollView: NSScrollView {
     let canvasWidth: CGFloat
     private var isFittingPage = false
+    private var userMagnification: CGFloat?
 
     init(canvasWidth: CGFloat) {
         self.canvasWidth = canvasWidth
         super.init(frame: .zero)
         allowsMagnification = true
         minMagnification = 0.2
-        maxMagnification = 1
+        maxMagnification = 2.5
     }
 
     required init?(coder: NSCoder) {
@@ -45,13 +46,14 @@ final class PagedEditorScrollView: NSScrollView {
         defer { isFittingPage = false }
 
         let visibleTop = contentView.bounds.minY
-        let desiredMagnification = max(
+        let fitMagnification = max(
             minMagnification,
             Self.fitMagnification(
                 viewportWidth: contentSize.width,
                 canvasWidth: canvasWidth
             )
         )
+        let desiredMagnification = max(fitMagnification, userMagnification ?? fitMagnification)
         if abs(magnification - desiredMagnification) > 0.001 {
             magnification = desiredMagnification
         }
@@ -59,6 +61,35 @@ final class PagedEditorScrollView: NSScrollView {
         let centeredX = max(0, (documentView.bounds.width - contentView.bounds.width) / 2)
         contentView.scroll(to: NSPoint(x: centeredX, y: visibleTop))
         reflectScrolledClipView(contentView)
+    }
+
+    @objc func zoomIn(_ sender: Any?) {
+        setUserMagnification(magnification * 1.15)
+    }
+
+    @objc func zoomOut(_ sender: Any?) {
+        setUserMagnification(magnification / 1.15)
+    }
+
+    @objc func actualSize(_ sender: Any?) {
+        setUserMagnification(1)
+    }
+
+    @objc func zoomToFit(_ sender: Any?) {
+        userMagnification = nil
+        fitAndCenterPage()
+    }
+
+    private func setUserMagnification(_ value: CGFloat) {
+        let clamped = min(maxMagnification, max(minMagnification, value))
+        userMagnification = clamped
+        magnification = clamped
+        fitAndCenterPage()
+    }
+
+    override func magnify(with event: NSEvent) {
+        super.magnify(with: event)
+        userMagnification = magnification
     }
 }
 
@@ -118,13 +149,35 @@ struct PagedEditorLayout: Equatable {
     /// exclusion path is evaluated in. We therefore translate the top edge back
     /// to proposed space only when the image is anchored to a page's first line.
     /// Translating unconditionally (the previous behaviour) pushed the exclusion
-    /// a full top margin above any mid-page image, leaving a hole over it. The
-    /// bottom edge always falls among later lines, so it needs no translation.
+    /// a full top margin above any mid-page image, leaving a hole over it.
+    ///
+    /// On *page 0* that translated top reaches back to y=0 — before any real
+    /// content exists — so stretching the rect's bottom down to the image's
+    /// real (untranslated) extent is harmless, and is exactly what lets one
+    /// exclusion satisfy both the pre-jump test (evaluated at the translated
+    /// top) and the on-page wrap test for any later lines beside a multi-line
+    /// image (evaluated at the real, untranslated position).
+    ///
+    /// On any *later* page, though, that translated top lands at the
+    /// *previous* page's real trailing content edge (`contentBottom(page -
+    /// 1)`), not at empty space. Stretching the bottom down to the image's
+    /// real extent there inflates the rect by a full page's margins/gap — the
+    /// two edges end up expressed in different coordinate systems within one
+    /// rectangle, and the result is tall enough to reach back across the
+    /// previous page's trailing content and forward across the page break.
+    /// On a real manuscript that was enough to make TextKit give up on laying
+    /// out the remainder of the document into one degenerate zero-size line.
+    /// So past page 0, shift the bottom by the same translation as the top —
+    /// trading a little wrap precision on the lines below a first-line image
+    /// (rare; most floated images anchor near where the reader dragged them)
+    /// for never emitting a rect that bridges two pages.
     func exclusionRect(forImageRect imageRect: NSRect, gutter: CGFloat = 8) -> NSRect {
         let page = pageIndex(atY: imageRect.minY)
         let anchorsPageFirstLine = imageRect.minY - contentTop(forPage: page) < 0.5
         let top = anchorsPageFirstLine ? proposedY(forLaidOutY: imageRect.minY) : imageRect.minY
-        let bottom = min(imageRect.maxY + gutter, contentBottom(forPage: page))
+        let rawBottom = min(imageRect.maxY + gutter, contentBottom(forPage: page))
+        let bottomShift = (anchorsPageFirstLine && page > 0) ? (top - imageRect.minY) : 0
+        let bottom = rawBottom + bottomShift
         return NSRect(
             x: imageRect.minX,
             y: top,
@@ -212,6 +265,26 @@ final class PagedTextView: NSTextView, NSLayoutManagerDelegate {
     let pageLayout: PagedEditorLayout
     var pageCountDidChange: ((Int) -> Void)?
 
+    /// When on, the caret's line is held at a fixed height in the visible
+    /// scroll area — the "carriage" stays put and the page moves past it,
+    /// like a typewriter — instead of the caret drifting toward the bottom
+    /// edge as you type or wandering wherever you last clicked. Snaps the
+    /// view immediately when switched on, rather than waiting for the next
+    /// selection change — flipping the toggle should be felt right away, not
+    /// silently change behavior for next time.
+    var isTypewriterScrollingEnabled = false {
+        didSet {
+            guard isTypewriterScrollingEnabled, !oldValue else { return }
+            scrollCaretToTypewriterPosition()
+        }
+    }
+
+    /// Fraction of the visible scroll area's height where the caret line is
+    /// held. Slightly above center (rather than dead center) leaves more
+    /// preceding text on screen for context, which suits continuous prose
+    /// better than a perfectly centered line.
+    private static let typewriterAnchorFraction: CGFloat = 0.42
+
     private(set) var pageCount = 1
     private var pageUpdateScheduled = false
     private var selectedImageRange: NSRange?
@@ -286,6 +359,22 @@ final class PagedTextView: NSTextView, NSLayoutManagerDelegate {
             updatePageLayout()
             needsDisplay = true
         }
+    }
+
+    /// After Return, AppKit carries the previous line's font into
+    /// `typingAttributes` by default. If that line was a Title/Heading/
+    /// Subheading (bold, above body size — the same threshold
+    /// `RichTextController.currentStyle()` uses), the new paragraph should
+    /// start in plain body weight/size instead of continuing the heading,
+    /// matching how word processors treat headings as one-line styles.
+    override func insertNewline(_ sender: Any?) {
+        super.insertNewline(sender)
+        guard let font = typingAttributes[.font] as? NSFont,
+              font.fontDescriptor.symbolicTraits.contains(.bold),
+              font.pointSize >= 15
+        else { return }
+        let plainDescriptor = font.fontDescriptor.withSymbolicTraits([])
+        typingAttributes[.font] = NSFont(descriptor: plainDescriptor, size: TextStyle.body.pointSize) ?? TextStyle.body.font
     }
 
     func clearImageSelection() {
@@ -546,6 +635,42 @@ final class PagedTextView: NSTextView, NSLayoutManagerDelegate {
             return
         }
         super.drawInsertionPoint(in: emptyRect, color: color, turnedOn: flag)
+    }
+
+    /// The true bottleneck every selection change funnels through — typing,
+    /// arrow keys, clicks, and drag-selection alike — so it's the one place
+    /// to hook typewriter scrolling. Skipped mid-drag (`stillSelectingFlag`)
+    /// so dragging out a selection doesn't fight the user by re-centering on
+    /// every intermediate point.
+    override func setSelectedRanges(
+        _ ranges: [NSValue],
+        affinity: NSSelectionAffinity,
+        stillSelecting stillSelectingFlag: Bool
+    ) {
+        super.setSelectedRanges(ranges, affinity: affinity, stillSelecting: stillSelectingFlag)
+        guard isTypewriterScrollingEnabled, !stillSelectingFlag else { return }
+        scrollCaretToTypewriterPosition()
+    }
+
+    private func scrollCaretToTypewriterPosition() {
+        guard let scrollView = enclosingScrollView, let caretRect = typewriterCaretRect() else { return }
+        let clipView = scrollView.contentView
+        let visibleHeight = clipView.bounds.height
+        let targetY = caretRect.midY - visibleHeight * Self.typewriterAnchorFraction
+        let maxY = max(0, bounds.height - visibleHeight)
+        let clampedY = min(max(targetY, 0), maxY)
+        clipView.setBoundsOrigin(NSPoint(x: clipView.bounds.origin.x, y: clampedY))
+        scrollView.reflectScrolledClipView(clipView)
+    }
+
+    private func typewriterCaretRect() -> NSRect? {
+        if let emptyRect = emptyDocumentInsertionPointRect() { return emptyRect }
+        guard let layoutManager, let length = textStorage?.length, length > 0 else { return nil }
+        let charIndex = min(selectedRange().location, length - 1)
+        let glyphIndex = layoutManager.glyphIndexForCharacter(at: charIndex)
+        guard glyphIndex < layoutManager.numberOfGlyphs else { return nil }
+        let lineRect = layoutManager.lineFragmentRect(forGlyphAt: glyphIndex, effectiveRange: nil)
+        return lineRect.offsetBy(dx: textContainerOrigin.x, dy: textContainerOrigin.y)
     }
 
     override func firstRect(
@@ -917,7 +1042,7 @@ final class PagedTextView: NSTextView, NSLayoutManagerDelegate {
         return NSRange(location: min(index, textStorage?.length ?? 0), length: 0)
     }
 
-    static func makePagedScrollView(pageLayout: PagedEditorLayout = .letter) -> NSScrollView {
+    static func makePagedScrollView(pageLayout: PagedEditorLayout = .letter) -> PagedEditorScrollView {
         let storage = NSTextStorage()
         let layoutManager = NSLayoutManager()
         let container = NSTextContainer(size: NSSize(

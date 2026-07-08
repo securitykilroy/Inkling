@@ -10,12 +10,16 @@
 //
 
 import SwiftUI
+import CoreData
 
 struct ProjectSettingsView: View {
     @ObservedObject var project: Project
     let documentName: String
 
     @Environment(\.dismiss) private var dismiss
+    @FetchRequest(sortDescriptors: []) private var chapters: FetchedResults<Chapter>
+    @FetchRequest(sortDescriptors: []) private var shelfEntries: FetchedResults<ShelfEntry>
+    @State private var fontPanelController = FontPanelController()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -34,6 +38,24 @@ struct ProjectSettingsView: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
+            Divider()
+
+            HStack {
+                Text("Font")
+                Spacer()
+                Text(project.bodyFontFamily ?? "System Default")
+                    .foregroundStyle(.secondary)
+                if project.bodyFontFamily != nil {
+                    Button("Use System Default") { applyFont(familyName: nil) }
+                }
+                Button("Choose Font…") { chooseFont() }
+            }
+
+            Text("Applies to the whole project — every chapter's body and notes, and everything on the Shelf, are restyled immediately, keeping their existing sizes and bold/italic formatting.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
             HStack {
                 Spacer()
                 Button("Done") { dismiss() }
@@ -42,6 +64,34 @@ struct ProjectSettingsView: View {
         }
         .padding(20)
         .frame(width: 440)
+    }
+
+    private func chooseFont() {
+        let current = TextStyle.body.font(familyName: project.bodyFontFamily)
+        fontPanelController.show(current: current) { newFont in
+            applyFont(familyName: newFont.familyName)
+        }
+    }
+
+    private func applyFont(familyName: String?) {
+        project.bodyFontFamily = familyName
+        let results = ProjectFontStyler.restyledChapters(
+            chapters.compactMap { chapter in
+                guard let id = chapter.id else { return nil }
+                return FontStyledChapter(id: id, bodyData: chapter.bodyData, notesData: chapter.notesData)
+            },
+            familyName: familyName
+        )
+        for chapter in chapters {
+            guard let id = chapter.id, let updated = results[id] else { continue }
+            chapter.bodyData = updated.bodyData
+            chapter.notesData = updated.notesData
+        }
+
+        for entry in shelfEntries {
+            guard let attributed = RichTextCodec.decode(entry.bodyData) else { continue }
+            entry.bodyData = RichTextCodec.encode(ProjectFontStyler.restyled(attributed, familyName: familyName))
+        }
     }
 
     private var derivedTitle: String {
@@ -71,5 +121,31 @@ struct ProjectSettingsView: View {
             get: { project.author ?? "" },
             set: { project.author = $0.isEmpty ? nil : $0 }
         )
+    }
+}
+
+/// Bridges the shared `NSFontPanel`/`NSFontManager` target-action pattern to a
+/// closure, so a SwiftUI button can drive it without adopting the responder
+/// chain. `NSFontManager.shared.target` is a single global slot, so it's
+/// re-pointed at this controller only while its panel session is active.
+@MainActor
+final class FontPanelController: NSObject {
+    private var currentFont: NSFont = TextStyle.body.font
+    private var onChange: ((NSFont) -> Void)?
+
+    func show(current: NSFont, onChange: @escaping (NSFont) -> Void) {
+        self.currentFont = current
+        self.onChange = onChange
+        let panel = NSFontPanel.shared
+        panel.setPanelFont(current, isMultiple: false)
+        NSFontManager.shared.target = self
+        panel.orderFront(nil)
+    }
+
+    @objc func changeFont(_ sender: NSFontManager?) {
+        guard let sender else { return }
+        let newFont = sender.convert(currentFont)
+        currentFont = newFont
+        onChange?(newFont)
     }
 }

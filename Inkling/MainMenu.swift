@@ -73,6 +73,9 @@ enum MainMenu {
         let exportText = item("Export as Plain Text…", "exportProjectAsPlainText:", "e")
         exportText.keyEquivalentModifierMask = [.command, .shift]
 
+        let exportWord = item("Export Word Chapters…", "exportWordChapters:", "e")
+        exportWord.keyEquivalentModifierMask = [.command, .option]
+
         // macOS automatically augments a document app's File menu with a
         // populated "Open Recent" plus Close All / Rename / Move To /
         // Revert To (the version browser) / Share, so we don't add those here —
@@ -90,6 +93,7 @@ enum MainMenu {
             printChapter,
             .separator(),
             item("Import Word Chapters…", "importWordChapters:", ""),
+            exportWord,
             exportText,
         ])
     }
@@ -148,6 +152,10 @@ enum MainMenu {
         let windowItem = submenu("Window", [
             item("Minimize", "performMiniaturize:", "m"),
             item("Zoom", "performZoom:", ""),
+            .separator(),
+            // Title is updated dynamically (Show/Hide) by
+            // InklingDocument.validateUserInterfaceItem(_:).
+            item("Show Project Notes", "toggleProjectNotes:", ""),
             .separator(),
             item("Bring All to Front", "arrangeInFront:", ""),
         ])

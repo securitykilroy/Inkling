@@ -16,7 +16,15 @@ struct FormatToolbar: View {
         HStack(spacing: 12) {
             Menu {
                 ForEach(TextStyle.allCases) { style in
-                    Button(style.label) { controller.applyStyle(style) }
+                    Button {
+                        controller.applyStyle(style)
+                    } label: {
+                        if style == controller.currentStyle {
+                            Label(style.label, systemImage: "checkmark")
+                        } else {
+                            Text(style.label)
+                        }
+                    }
                 }
             } label: {
                 Label("Style", systemImage: "textformat")

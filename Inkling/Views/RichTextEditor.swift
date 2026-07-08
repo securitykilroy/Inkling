@@ -27,6 +27,11 @@ struct RichTextEditor: NSViewRepresentable {
     /// Called with the editor's plain text on every edit (used for live stats).
     var onTextChange: ((String) -> Void)? = nil
     var onPageCountChange: ((Int) -> Void)? = nil
+    /// The project's chosen typeface (nil = system default). Drives both the
+    /// initial/reload typing font and the empty-document display font.
+    var fontFamilyName: String? = nil
+    /// Only meaningful for `.paged` presentation; ignored otherwise.
+    var isTypewriterScrollingEnabled = false
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -47,15 +52,17 @@ struct RichTextEditor: NSViewRepresentable {
         textView.isEditable = true
         textView.isSelectable = true
         textView.usesAdaptiveColorMappingForDarkAppearance = presentation == .continuous
-        textView.font = RichTextController.defaultBodyFont
+        let bodyFont = TextStyle.body.font(familyName: fontFamilyName)
+        textView.font = bodyFont
         textView.typingAttributes = [
-            .font: RichTextController.defaultBodyFont,
+            .font: bodyFont,
             .paragraphStyle: RichTextCodec.defaultParagraphStyle,
         ]
 
         if let pagedTextView = textView as? PagedTextView {
             pagedTextView.textColor = .black
             pagedTextView.insertionPointColor = .black
+            pagedTextView.isTypewriterScrollingEnabled = isTypewriterScrollingEnabled
             pagedTextView.pageCountDidChange = { [weak coordinator = context.coordinator] count in
                 coordinator?.parent.onPageCountChange?(count)
             }
@@ -74,12 +81,19 @@ struct RichTextEditor: NSViewRepresentable {
         // chapter's binding (the struct is recreated on every SwiftUI update).
         context.coordinator.parent = self
         controller?.textView = textView
+        (textView as? PagedTextView)?.isTypewriterScrollingEnabled = isTypewriterScrollingEnabled
         context.coordinator.loadIfChanged(data, documentID: documentID, into: textView)
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: RichTextEditor
         private var loadedID: NSManagedObjectID?
+        /// The data this editor last loaded *or wrote*. Lets `loadIfChanged`
+        /// tell "the binding changed because I just typed" (already reflected
+        /// here, so no reload) apart from "the binding changed because
+        /// something else touched this chapter's bodyData" (e.g. a
+        /// project-wide Replace All), which does need a reload.
+        private var loadedData: Data?
         private var isLoading = false
 
         init(_ parent: RichTextEditor) { self.parent = parent }
@@ -96,15 +110,17 @@ struct RichTextEditor: NSViewRepresentable {
             }
             (textView as? PagedTextView)?.prepareFloatingImages()
             textView.typingAttributes = [
-            .font: RichTextController.defaultBodyFont,
-            .paragraphStyle: RichTextCodec.defaultParagraphStyle,
-        ]
+                .font: TextStyle.body.font(familyName: parent.fontFamilyName),
+                .paragraphStyle: RichTextCodec.defaultParagraphStyle,
+            ]
             (textView as? PagedTextView)?.updatePageLayout()
             loadedID = documentID
+            loadedData = data
+            parent.controller?.selectionDidChange()
         }
 
         func loadIfChanged(_ data: Data?, documentID: NSManagedObjectID, into textView: NSTextView) {
-            guard loadedID != documentID else { return }
+            guard loadedID != documentID || data != loadedData else { return }
             load(data, documentID: documentID, into: textView)
         }
 
@@ -112,9 +128,16 @@ struct RichTextEditor: NSViewRepresentable {
             guard !isLoading, let textView = notification.object as? NSTextView else { return }
             (textView as? PagedTextView)?.prepareFloatingImages()
             let attributed = textView.attributedString()
-            parent.data = RichTextCodec.encode(attributed)
+            let encoded = RichTextCodec.encode(attributed)
+            parent.data = encoded
+            loadedData = encoded
             (textView as? PagedTextView)?.updatePageLayout()
             parent.onTextChange?(textView.string)
+        }
+
+        func textViewDidChangeSelection(_ notification: Notification) {
+            guard !isLoading else { return }
+            parent.controller?.selectionDidChange()
         }
     }
 }

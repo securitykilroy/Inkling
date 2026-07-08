@@ -35,7 +35,7 @@ struct ProjectRootView: View {
                 .navigationSplitViewColumnWidth(min: 200, ideal: 240)
         } detail: {
             if let chapter = selection {
-                ChapterDetailView(chapter: chapter, statistics: statistics, navigator: navigator)
+                ChapterDetailView(chapter: chapter, project: viewModel.project, statistics: statistics, navigator: navigator)
             } else {
                 ContentUnavailableView(
                     "No Chapter Selected",

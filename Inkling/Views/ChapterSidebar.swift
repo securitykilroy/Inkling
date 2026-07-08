@@ -20,6 +20,7 @@ struct ChapterSidebar: View {
 
     @State private var expanded: Set<UUID> = []
     @State private var showingSettings = false
+    @State private var showingFindReplace = false
 
     @FetchRequest(
         sortDescriptors: [NSSortDescriptor(keyPath: \Chapter.sortIndex, ascending: true)],
@@ -79,6 +80,15 @@ struct ChapterSidebar: View {
             }
             ToolbarItem {
                 Button {
+                    showingFindReplace = true
+                } label: {
+                    Label("Find & Replace", systemImage: "magnifyingglass")
+                }
+                .keyboardShortcut("f", modifiers: [.command, .shift])
+                .help("Find & Replace in Project (⇧⌘F)")
+            }
+            ToolbarItem {
+                Button {
                     showingSettings = true
                 } label: {
                     Label("Project Settings", systemImage: "gearshape")
@@ -88,6 +98,9 @@ struct ChapterSidebar: View {
         }
         .sheet(isPresented: $showingSettings) {
             ProjectSettingsView(project: viewModel.project, documentName: documentName)
+        }
+        .sheet(isPresented: $showingFindReplace) {
+            ProjectFindReplaceView(navigator: navigator, selection: $selection)
         }
         .overlay {
             if chapters.isEmpty {

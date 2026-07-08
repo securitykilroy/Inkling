@@ -3,21 +3,31 @@
 //  Inkling
 //
 //  Detail pane for the selected chapter: an editable title, a formatting
-//  toolbar with a notes toggle, the rich-text body editor, and an optional
-//  notes panel alongside it (in a resizable split). The notes-visibility
-//  preference is shared across windows via @AppStorage.
+//  toolbar, the rich-text body editor, and an optional side panel alongside
+//  it (in a resizable split) that switches between per-chapter Notes and the
+//  project-wide Shelf. Both the panel's visibility and which of the two it's
+//  showing are shared across windows via @AppStorage.
 //
 
 import SwiftUI
 import CoreData
 
+/// Which content the resizable side panel shows. Persisted via @AppStorage,
+/// so it needs a String raw value.
+enum SidePanelMode: String {
+    case notes, shelf
+}
+
 struct ChapterDetailView: View {
     @ObservedObject var chapter: Chapter
+    @ObservedObject var project: Project
     @ObservedObject var statistics: StatisticsViewModel
     @ObservedObject var navigator: OutlineNavigator
     @StateObject private var controller = RichTextController()
     @State private var laidOutPageCount = 1
-    @AppStorage("showNotesPanel") private var showNotes = true
+    @AppStorage("showSidePanel") private var showSidePanel = true
+    @AppStorage("sidePanelMode") private var sidePanelMode = SidePanelMode.notes
+    @AppStorage("typewriterScrolling") private var typewriterScrolling = true
 
     var body: some View {
         VStack(spacing: 0) {
@@ -31,12 +41,21 @@ struct ChapterDetailView: View {
             HStack(spacing: 12) {
                 FormatToolbar(controller: controller)
                 Spacer()
-                Button { showNotes.toggle() } label: {
-                    Image(systemName: "note.text")
+                Button { typewriterScrolling.toggle() } label: {
+                    Image(systemName: "align.vertical.center.fill")
                 }
                 .buttonStyle(.borderless)
-                .foregroundStyle(showNotes ? Color.accentColor : Color.secondary)
-                .help(showNotes ? "Hide Notes" : "Show Notes")
+                .foregroundStyle(typewriterScrolling ? Color.accentColor : Color.secondary)
+                .help(typewriterScrolling
+                    ? "Turn Off Typewriter Scrolling"
+                    : "Turn On Typewriter Scrolling — keeps the line you're writing fixed in place as the page scrolls beneath it")
+
+                Button { showSidePanel.toggle() } label: {
+                    Image(systemName: "sidebar.trailing")
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(showSidePanel ? Color.accentColor : Color.secondary)
+                .help(showSidePanel ? "Hide Panel" : "Show Panel")
             }
             .padding(.horizontal, 16)
             .padding(.bottom, 8)
@@ -50,13 +69,32 @@ struct ChapterDetailView: View {
                     controller: controller,
                     presentation: .paged,
                     onTextChange: { statistics.update(chapter, plainText: $0) },
-                    onPageCountChange: { laidOutPageCount = $0 }
+                    onPageCountChange: { laidOutPageCount = $0 },
+                    fontFamilyName: project.bodyFontFamily,
+                    isTypewriterScrollingEnabled: typewriterScrolling
                 )
                 .frame(minWidth: 360)
 
-                if showNotes {
-                    NotesPanel(data: notesBinding, documentID: chapter.objectID)
-                        .frame(minWidth: 220, idealWidth: 300, maxWidth: 520)
+                if showSidePanel {
+                    VStack(spacing: 0) {
+                        Picker("", selection: $sidePanelMode) {
+                            Text("Notes").tag(SidePanelMode.notes)
+                            Text("Shelf").tag(SidePanelMode.shelf)
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .padding(8)
+
+                        Divider()
+
+                        switch sidePanelMode {
+                        case .notes:
+                            NotesPanel(data: notesBinding, documentID: chapter.objectID, fontFamilyName: project.bodyFontFamily)
+                        case .shelf:
+                            ShelfView(project: project)
+                        }
+                    }
+                    .frame(minWidth: 220, idealWidth: 300, maxWidth: 520)
                 }
             }
         }
@@ -77,6 +115,9 @@ struct ChapterDetailView: View {
         .onAppear { applyPendingJump() }
         .onChange(of: chapter) { applyPendingJump() }
         .onChange(of: navigator.target) { applyPendingJump() }
+        .onChange(of: project.bodyFontFamily, initial: true) { _, newValue in
+            controller.fontFamilyName = newValue
+        }
     }
 
     /// If the outline requested a jump into this chapter, scroll to it once the
