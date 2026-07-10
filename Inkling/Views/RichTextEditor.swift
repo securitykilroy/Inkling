@@ -51,6 +51,10 @@ struct RichTextEditor: NSViewRepresentable {
         textView.allowsUndo = true
         textView.isEditable = true
         textView.isSelectable = true
+        // Red squiggles under misspellings, checked as you type. Automatic
+        // correction stays off so typos are flagged, never silently rewritten.
+        textView.isContinuousSpellCheckingEnabled = true
+        textView.isAutomaticSpellingCorrectionEnabled = false
         textView.usesAdaptiveColorMappingForDarkAppearance = presentation == .continuous
         let bodyFont = TextStyle.body.font(familyName: fontFamilyName)
         textView.font = bodyFont

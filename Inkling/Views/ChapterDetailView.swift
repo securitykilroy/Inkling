@@ -46,7 +46,7 @@ struct ChapterDetailView: View {
                 }
                 .buttonStyle(.borderless)
                 .foregroundStyle(typewriterScrolling ? Color.accentColor : Color.secondary)
-                .help(typewriterScrolling
+                .tooltip(typewriterScrolling
                     ? "Turn Off Typewriter Scrolling"
                     : "Turn On Typewriter Scrolling — keeps the line you're writing fixed in place as the page scrolls beneath it")
 
@@ -55,7 +55,7 @@ struct ChapterDetailView: View {
                 }
                 .buttonStyle(.borderless)
                 .foregroundStyle(showSidePanel ? Color.accentColor : Color.secondary)
-                .help(showSidePanel ? "Hide Panel" : "Show Panel")
+                .tooltip(showSidePanel ? "Hide Panel" : "Show Panel")
             }
             .padding(.horizontal, 16)
             .padding(.bottom, 8)
