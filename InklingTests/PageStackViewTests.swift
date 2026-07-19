@@ -410,6 +410,190 @@ struct PageStackViewTests {
         #expect(NSMaxRange(selection) > NSMaxRange(firstPage))
     }
 
+    // MARK: - Milestone 2: floating images
+    //
+    // The reason the rearchitecture exists. In the single-container editor an
+    // image anchored to a page's *first line* produced an exclusion rect whose
+    // edges were expressed in two different coordinate spaces, which made
+    // TextKit either drop the remaining text or stop wrapping it. Per-page
+    // containers remove the translation entirely, so that case should be
+    // unremarkable.
+
+    /// Mirrors `PageStackView.imageGutter`.
+    private static let imageGutter: CGFloat = 8
+
+    /// A blank image of an exact size. Built from a bitmap representation rather
+    /// than `lockFocus()` on purpose: lockFocus mutates the process-wide
+    /// graphics context stack, and Swift Testing runs suites concurrently, so it
+    /// intermittently broke unrelated font tests running at the same time. These
+    /// tests only care about the image's geometry, never its pixels.
+    private static func image(_ size: NSSize) -> NSImage {
+        let image = NSImage(size: size)
+        if let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: max(1, Int(size.width)),
+            pixelsHigh: max(1, Int(size.height)),
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ) {
+            rep.size = size
+            image.addRepresentation(rep)
+        }
+        return image
+    }
+
+    /// Body text with an image attachment anchored at `location`, optionally
+    /// pinned to an explicit page + paper origin.
+    private static func stackWithImage(
+        paragraphs: Int,
+        at location: Int,
+        size: NSSize = NSSize(width: 200, height: 150),
+        position: FloatingImagePosition? = nil
+    ) -> PageStackView {
+        let text = NSMutableAttributedString(attributedString: filler(paragraphs: paragraphs))
+        let attachment = NSTextAttachment()
+        attachment.image = image(size)
+        attachment.bounds = NSRect(origin: .zero, size: size)
+        let piece = NSMutableAttributedString(attachment: attachment)
+        if let position {
+            piece.addAttribute(
+                .inklingFloatingImagePosition,
+                value: position,
+                range: NSRange(location: 0, length: piece.length)
+            )
+        }
+        text.insert(piece, at: min(location, text.length))
+
+        let stack = PageStackView()
+        stack.setAttributedString(text)
+        stack.prepareFloatingImages()
+        return stack
+    }
+
+    /// Total exclusion paths installed across every page.
+    private static func exclusionCount(in stack: PageStackView) -> Int {
+        stack.pageViews.reduce(0) { $0 + ($1.textContainer?.exclusionPaths.count ?? 0) }
+    }
+
+    @Test func aFloatingImageInstallsAnExclusionOnItsOwnPageOnly() {
+        let stack = Self.stackWithImage(paragraphs: 200, at: 40)
+
+        #expect(Self.exclusionCount(in: stack) == 1)
+        let pagesWithExclusions = stack.pageViews.filter {
+            !($0.textContainer?.exclusionPaths.isEmpty ?? true)
+        }
+        #expect(pagesWithExclusions.count == 1)
+        // The image draws on the same page that excludes for it.
+        let excludingPage = try? #require(pagesWithExclusions.first)
+        #expect(excludingPage?.floatingImages.count == 1)
+    }
+
+    @Test func everyExclusionStaysInsideItsOwnPagesCoordinateSpace() {
+        let stack = Self.stackWithImage(paragraphs: 200, at: 40)
+        let layout = PagedEditorLayout.letter
+
+        // An exclusion may poke one gutter outside the content box (the rect is
+        // grown by the gutter so text keeps its gap); TextKit clips it to the
+        // container. Anything beyond that would mean two coordinate spaces in
+        // one rect — the bug being fixed, which produced rects tall enough to
+        // bridge a page break.
+        let slack = Self.imageGutter + 0.5
+
+        for view in stack.pageViews {
+            for path in view.textContainer?.exclusionPaths ?? [] {
+                #expect(path.bounds.minY >= -slack)
+                #expect(path.bounds.maxY <= layout.contentHeight + slack)
+                #expect(path.bounds.height <= layout.contentHeight + 2 * slack)
+                // The decisive one: never as tall as a whole page stride, which
+                // is what a cross-page rect looked like.
+                #expect(path.bounds.height < layout.pageStride)
+            }
+        }
+    }
+
+    /// The original reported failure: an image at the very top of a *later*
+    /// page. Text must neither vanish nor ride under the image.
+    @Test func anImagePinnedToTheTopOfALaterPageKeepsAllTextAndStillWraps() {
+        let layout = PagedEditorLayout.letter
+        // Pin to page 2's top-left content corner — the exact fragile case.
+        let position = FloatingImagePosition(
+            page: 2,
+            origin: CGPoint(x: layout.leftMargin, y: layout.topMargin)
+        )
+        let stack = Self.stackWithImage(
+            paragraphs: 200, at: 40, position: position
+        )
+
+        // 1. No text was lost: every glyph is still laid out on some page.
+        let manager = stack.sharedLayoutManager
+        var laidOut = 0
+        for view in stack.pageViews {
+            laidOut += manager.glyphRange(for: view.textContainer!).length
+        }
+        #expect(laidOut == manager.numberOfGlyphs)
+        #expect(manager.numberOfGlyphs > 0)
+
+        // 2. No degenerate collapsed final line (the vanishing signature).
+        let lastLine = manager.lineFragmentRect(
+            forGlyphAt: manager.numberOfGlyphs - 1, effectiveRange: nil
+        )
+        #expect(lastLine.height > 3)
+
+        // 3. The exclusion really is on page 2, at that page's top.
+        let page2 = stack.pageViews[2]
+        let paths = page2.textContainer?.exclusionPaths ?? []
+        #expect(paths.count == 1)
+        #expect((paths.first?.bounds.minY ?? .infinity) < 10)
+    }
+
+    @Test func textOnThatPageWrapsBesideTheImageRatherThanUnderIt() {
+        let layout = PagedEditorLayout.letter
+        let imageWidth: CGFloat = 200
+        let position = FloatingImagePosition(
+            page: 2,
+            origin: CGPoint(x: layout.leftMargin, y: layout.topMargin)
+        )
+        let stack = Self.stackWithImage(
+            paragraphs: 200,
+            at: 40,
+            size: NSSize(width: imageWidth, height: 150),
+            position: position
+        )
+
+        let manager = stack.sharedLayoutManager
+        let container = stack.pageViews[2].textContainer!
+        let glyphs = manager.glyphRange(for: container)
+        #expect(glyphs.length > 0)
+
+        // Lines level with the image must start to its right, not under it.
+        var checkedAny = false
+        manager.enumerateLineFragments(forGlyphRange: glyphs) { _, usedRect, _, _, _ in
+            guard usedRect.midY < 150 else { return }   // beside the image
+            guard usedRect.width > 1 else { return }    // skip empty lines
+            checkedAny = true
+            #expect(usedRect.minX >= imageWidth - 0.5)
+        }
+        #expect(checkedAny)
+    }
+
+    @Test func anImageParkedBeyondTheTextKeepsItsPageAlive() {
+        let layout = PagedEditorLayout.letter
+        // Two paragraphs of text (one page), image pinned to page 3.
+        let position = FloatingImagePosition(
+            page: 3,
+            origin: CGPoint(x: layout.leftMargin, y: layout.topMargin)
+        )
+        let stack = Self.stackWithImage(paragraphs: 2, at: 5, position: position)
+
+        #expect(stack.pageCount >= 4)
+        #expect(stack.pageViews[3].floatingImages.count == 1)
+    }
+
     @Test func editingOnAnEarlyPageRepaginatesLaterPages() {
         let stack = Self.makeStack(paragraphs: 200)
         let before = Self.characterRange(ofPage: 1, in: stack)

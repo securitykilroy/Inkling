@@ -172,6 +172,7 @@ struct RichTextEditor: NSViewRepresentable {
             defer { isLoading = false }
 
             stack.setAttributedString(RichTextCodec.decode(data) ?? NSAttributedString())
+            stack.prepareFloatingImages()
             loadedID = documentID
             loadedData = data
             parent.controller?.selectionDidChange()

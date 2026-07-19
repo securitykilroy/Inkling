@@ -91,6 +91,27 @@ final class PageTextView: NSTextView {
         usesFindBar = true
         isIncrementalSearchingEnabled = true
     }
+
+    /// Floating images anchored to this page, in container-local coordinates
+    /// (origin = the text column's top-left).
+    var floatingImages: [(rect: NSRect, image: NSImage)] = [] {
+        didSet { needsDisplay = true }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        let origin = textContainerOrigin
+        for item in floatingImages {
+            item.image.draw(
+                in: item.rect.offsetBy(dx: origin.x, dy: origin.y),
+                from: .zero,
+                operation: .sourceOver,
+                fraction: 1,
+                respectFlipped: true,
+                hints: nil
+            )
+        }
+    }
 }
 
 /// The scrolling document view: a vertical stack of fixed-size page views, all
@@ -223,8 +244,10 @@ final class PageStackView: NSView, NSTextStorageDelegate {
             if sharedLayoutManager.glyphRange(for: added).length == 0 { break }
         }
 
-        // Trim trailing pages that hold no glyphs, always keeping page 1.
-        while pageViews.count > 1, let last = pageViews.last?.textContainer,
+        // Trim trailing pages that hold no glyphs, always keeping page 1 and any
+        // page that exists to hold a floating image rather than text.
+        while pageViews.count > max(1, minimumPageCount),
+              let last = pageViews.last?.textContainer,
               sharedLayoutManager.glyphRange(for: last).length == 0 {
             removeLastPage()
         }
@@ -239,6 +262,10 @@ final class PageStackView: NSView, NSTextStorageDelegate {
     }
 
     private var lastReportedPageCount = 1
+
+    /// Pages that must survive trimming even with no text on them, because a
+    /// floating image is parked there. Set by `rebuildFloatingImageLayout`.
+    var minimumPageCount = 1
 
     /// Upper bound on pages, so a pathological layout can't hang the app.
     private static let maxPages = 5_000
@@ -355,5 +382,199 @@ final class PageStackView: NSView, NSTextStorageDelegate {
             forGlyphAt: glyph, effectiveRange: nil
         ) else { return nil }
         return pageViews.first { $0.textContainer === container }
+    }
+}
+
+// MARK: - Floating images
+//
+// This is the payoff of the whole rearchitecture. Every rectangle below is
+// expressed in one coordinate space — the page's own text container, origin at
+// the text column's top-left — exactly like the printer. There is no
+// pre-pagination "proposed" space and no translation between spaces, so
+// `PagedEditorLayout.exclusionRect` / `proposedY` and the top-of-page special
+// cases they needed have no counterpart here. An image on a page's first line
+// is simply an exclusion at y ≈ 0.
+
+extension PageStackView {
+
+    /// Where one floating image sits: which page, and its rect in that page's
+    /// container coordinates.
+    struct FloatingPlacement {
+        let page: Int
+        let contentRect: NSRect
+        let image: NSImage
+    }
+
+    /// Gutter between an image and the text that wraps around it. Matches the
+    /// printer so screen and paper agree.
+    private static let imageGutter: CGFloat = 8
+
+    /// Converts plain image attachments into `FloatingImageAttachment`s — a tiny
+    /// inline anchor in the text plus an overlay drawn by the page view — then
+    /// lays them out. Mirrors `PagedTextView.prepareFloatingImages`.
+    func prepareFloatingImages() {
+        guard storage.length > 0 else { return }
+
+        var replacements: [(NSRange, FloatingImageAttachment)] = []
+        storage.enumerateAttribute(
+            .attachment, in: NSRange(location: 0, length: storage.length)
+        ) { value, range, _ in
+            guard let attachment = value as? NSTextAttachment,
+                  !(attachment is FloatingImageAttachment),
+                  !(attachment is SidebarAttachment)
+            else { return }
+
+            let size = Self.displaySize(of: attachment)
+            guard size.width > 0, size.height > 0 else { return }
+            let floating = FloatingImageAttachment(copying: attachment, displaySize: size)
+            floating.position = storage.attribute(
+                .inklingFloatingImagePosition, at: range.location, effectiveRange: nil
+            ) as? FloatingImagePosition
+            replacements.append((range, floating))
+        }
+
+        for (range, attachment) in replacements.sorted(by: { $0.0.location > $1.0.location }) {
+            storage.addAttribute(.attachment, value: attachment, range: range)
+        }
+        rebuildFloatingImageLayout()
+    }
+
+    /// Recomputes every floating image's page + rect and installs the resulting
+    /// exclusion paths on the page containers they belong to.
+    func rebuildFloatingImageLayout() {
+        // Start from an unwrapped baseline, so a previous exclusion can't
+        // influence the anchor used to build its replacement.
+        for view in pageViews {
+            view.textContainer?.exclusionPaths = []
+            view.floatingImages = []
+        }
+        minimumPageCount = 1
+        rebuildPages()
+
+        let placements = floatingPlacements()
+
+        // An image may be parked on a page beyond where the text reaches; that
+        // page has to exist, and has to survive trimming.
+        if let lastImagePage = placements.map(\.page).max() {
+            minimumPageCount = max(1, lastImagePage + 1)
+            while pageCount < minimumPageCount { appendPage() }
+        }
+
+        var exclusions: [Int: [NSBezierPath]] = [:]
+        var drawables: [Int: [(rect: NSRect, image: NSImage)]] = [:]
+        for placement in placements {
+            if let rect = FloatingImagePlacement.exclusionRect(
+                contentRect: placement.contentRect,
+                contentWidth: pageLayout.contentWidth,
+                gutter: Self.imageGutter
+            ) {
+                exclusions[placement.page, default: []].append(NSBezierPath(rect: rect))
+            }
+            drawables[placement.page, default: []].append((placement.contentRect, placement.image))
+        }
+
+        for (index, view) in pageViews.enumerated() {
+            view.textContainer?.exclusionPaths = exclusions[index] ?? []
+            view.floatingImages = drawables[index] ?? []
+        }
+        // Wrapping pushes text down, which can need another page.
+        rebuildPages()
+        for (index, view) in pageViews.enumerated() {
+            view.floatingImages = drawables[index] ?? []
+        }
+        needsDisplay = true
+    }
+
+    /// Resolves every floating attachment to a page and a page-local rect.
+    private func floatingPlacements() -> [FloatingPlacement] {
+        var placements: [FloatingPlacement] = []
+        storage.enumerateAttribute(
+            .attachment, in: NSRange(location: 0, length: storage.length)
+        ) { value, range, _ in
+            guard let floating = value as? FloatingImageAttachment,
+                  let image = floating.image,
+                  floating.displaySize.width > 0,
+                  floating.displaySize.height > 0
+            else { return }
+
+            if let position = floating.position {
+                // The user placed this image at a fixed spot on its page. The
+                // paper origin converts straight to container coordinates.
+                placements.append(FloatingPlacement(
+                    page: position.page,
+                    contentRect: FloatingImagePlacement.contentRect(
+                        origin: position.origin,
+                        imageSize: floating.displaySize,
+                        leftMargin: pageLayout.leftMargin,
+                        topMargin: pageLayout.topMargin
+                    ),
+                    image: image
+                ))
+            } else if let anchored = anchoredPlacement(
+                for: floating, at: range.location, image: image
+            ) {
+                placements.append(anchored)
+            }
+        }
+        return placements
+    }
+
+    /// An un-placed image floats beside its anchor character's own line, so it
+    /// lands where the text actually references it. The line's rect is already
+    /// page-local, so this needs no translation — the case the single-container
+    /// editor had to special-case and got wrong.
+    private func anchoredPlacement(
+        for floating: FloatingImageAttachment,
+        at location: Int,
+        image: NSImage
+    ) -> FloatingPlacement? {
+        let glyphRange = sharedLayoutManager.glyphRange(
+            forCharacterRange: NSRange(location: location, length: 1),
+            actualCharacterRange: nil
+        )
+        guard glyphRange.length > 0,
+              let container = sharedLayoutManager.textContainer(
+                  forGlyphAt: glyphRange.location, effectiveRange: nil
+              ),
+              let page = pageViews.firstIndex(where: { $0.textContainer === container })
+        else { return nil }
+
+        let lineRect = sharedLayoutManager.lineFragmentRect(
+            forGlyphAt: glyphRange.location, effectiveRange: nil
+        )
+        // If the image can't fit in what's left of this page, park it at the top
+        // of the next one rather than let it run past the bottom margin.
+        let fits = lineRect.minY + floating.displaySize.height <= pageLayout.contentHeight
+        let targetPage = fits ? page : page + 1
+        let y = fits ? lineRect.minY : 0
+
+        return FloatingPlacement(
+            page: targetPage,
+            contentRect: NSRect(
+                x: 0,
+                y: y,
+                width: min(floating.displaySize.width, pageLayout.contentWidth),
+                height: floating.displaySize.height
+            ),
+            image: image
+        )
+    }
+
+    static func displaySize(of attachment: NSTextAttachment) -> NSSize {
+        let boundsSize = attachment.bounds.size
+        if boundsSize.width > 0, boundsSize.height > 0 { return boundsSize }
+        if let image = attachment.image, image.size.width > 0, image.size.height > 0 {
+            return image.size
+        }
+        if let cell = attachment.attachmentCell as? NSTextAttachmentCell {
+            let cellSize = cell.cellSize()
+            if cellSize.width > 0, cellSize.height > 0 { return cellSize }
+        }
+        if let data = attachment.fileWrapper?.regularFileContents,
+           let image = NSImage(data: data),
+           image.size.width > 0, image.size.height > 0 {
+            return image.size
+        }
+        return .zero
     }
 }
