@@ -49,6 +49,16 @@ extension PagedEditorLayout {
     }
 }
 
+/// Which corner of an image is being dragged to resize it. A near-copy of the
+/// handle enum nested privately inside `PagedTextView`; the two converge when
+/// the shipping editor is retired (plan §8 milestone 5).
+enum PageResizeHandle: CaseIterable {
+    case topLeft, topRight, bottomLeft, bottomRight
+
+    var dragsLeftEdge: Bool { self == .topLeft || self == .bottomLeft }
+    var dragsTopEdge: Bool { self == .topLeft || self == .topRight }
+}
+
 /// One page's editable text area. Fixed size: it never grows to fit text —
 /// overflow is TextKit's cue to continue into the next page's container.
 final class PageTextView: NSTextView {
@@ -125,6 +135,7 @@ final class PageTextView: NSTextView {
                 hints: nil
             )
         }
+        stack?.drawImageSelection(in: self)
         stack?.drawSnapGuide(in: self)
     }
 
@@ -136,16 +147,22 @@ final class PageTextView: NSTextView {
 
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
+        // Handles first: they sit on the image's corners and extend past its
+        // edge, so an image hit test would otherwise swallow them.
+        if stack?.beginImageResize(at: point, in: self) == true { return }
         if stack?.beginImageDrag(at: point, in: self) == true { return }
+        stack?.clearImageSelection()
         super.mouseDown(with: event)
     }
 
     override func mouseDragged(with event: NSEvent) {
+        if stack?.continueImageResize(with: event, in: self) == true { return }
         if stack?.continueImageDrag(with: event) == true { return }
         super.mouseDragged(with: event)
     }
 
     override func mouseUp(with event: NSEvent) {
+        if stack?.endImageResize() == true { return }
         if stack?.endImageDrag() == true { return }
         super.mouseUp(with: event)
     }
@@ -306,6 +323,10 @@ final class PageStackView: NSView, NSTextStorageDelegate {
 
     /// The in-flight image move, if the user is dragging one.
     var moveSession: ImageMoveSession?
+    /// The in-flight image resize, if the user is dragging a corner handle.
+    var resizeSession: ImageResizeSession?
+    /// Character index of the selected image, which shows resize handles.
+    var selectedImageLocation: Int?
     /// The snap guide to draw, and the page to draw it on, during a drag.
     var activeSnapGuide: HorizontalGuide?
     var activeSnapPage: Int?
@@ -641,6 +662,10 @@ extension PageStackView {
             size: attachment.displaySize,
             startPosition: attachment.position
         )
+        // Pressing an image also selects it, which is what reveals the resize
+        // handles for the next gesture.
+        selectedImageLocation = hit.location
+        pageViews.forEach { $0.needsDisplay = true }
         window?.makeFirstResponder(pageView)
         return true
     }
@@ -745,6 +770,170 @@ extension PageStackView {
         path.line(to: NSPoint(x: x, y: pageLayout.paperSize.height - pageLayout.bottomMargin))
         path.lineWidth = 1
         path.stroke()
+    }
+
+    // MARK: - Selecting and resizing an image
+
+    struct ImageResizeSession {
+        let location: Int
+        let handle: PageResizeHandle
+        /// Press point, in the page view's coordinates.
+        let startPoint: NSPoint
+        let originalSize: NSSize
+    }
+
+    /// Clears any image selection and cancels an in-flight gesture.
+    func clearImageSelection() {
+        guard selectedImageLocation != nil || resizeSession != nil || moveSession != nil else {
+            return
+        }
+        selectedImageLocation = nil
+        resizeSession = nil
+        moveSession = nil
+        activeSnapGuide = nil
+        activeSnapPage = nil
+        needsDisplay = true
+        pageViews.forEach { $0.needsDisplay = true }
+    }
+
+    /// The page view showing the image anchored at `location`, and that image's
+    /// rect in the view's coordinates.
+    func selectedImageRect(in pageView: PageTextView) -> NSRect? {
+        guard let location = selectedImageLocation,
+              let item = pageView.floatingImages.first(where: { $0.location == location })
+        else { return nil }
+        return pageView.viewRect(forFloating: item.rect)
+    }
+
+    /// Corner handles for `imageRect`, sized so they stay constant on screen
+    /// regardless of the canvas magnification.
+    func handleRects(for imageRect: NSRect) -> [(PageResizeHandle, NSRect)] {
+        let magnification = enclosingScrollView?.magnification ?? 1
+        let size = 11 / max(magnification, 0.01)
+        let half = size / 2
+        let points: [(PageResizeHandle, NSPoint)] = [
+            (.topLeft, NSPoint(x: imageRect.minX, y: imageRect.minY)),
+            (.topRight, NSPoint(x: imageRect.maxX, y: imageRect.minY)),
+            (.bottomLeft, NSPoint(x: imageRect.minX, y: imageRect.maxY)),
+            (.bottomRight, NSPoint(x: imageRect.maxX, y: imageRect.maxY)),
+        ]
+        return points.map { handle, point in
+            (handle, NSRect(x: point.x - half, y: point.y - half, width: size, height: size))
+        }
+    }
+
+    /// Starts a resize if `point` is on a handle of the selected image.
+    func beginImageResize(at point: NSPoint, in pageView: PageTextView) -> Bool {
+        guard let location = selectedImageLocation,
+              let imageRect = selectedImageRect(in: pageView),
+              let attachment = floatingAttachment(at: location)
+        else { return false }
+
+        // Generous slop so the small corner targets are easy to grab, scaled so
+        // they stay a constant size on screen at any zoom.
+        let slop = 8 / max(enclosingScrollView?.magnification ?? 1, 0.01)
+        guard let handle = handleRects(for: imageRect).first(where: {
+            $0.1.insetBy(dx: -slop, dy: -slop).contains(point)
+        })?.0 else { return false }
+
+        resizeSession = ImageResizeSession(
+            location: location,
+            handle: handle,
+            startPoint: point,
+            originalSize: attachment.displaySize
+        )
+        return true
+    }
+
+    func continueImageResize(with event: NSEvent, in pageView: PageTextView) -> Bool {
+        guard let session = resizeSession else { return false }
+        let point = pageView.convert(event.locationInWindow, from: nil)
+        let size = ImageResizeGeometry.resizedSize(
+            original: session.originalSize,
+            horizontalDelta: point.x - session.startPoint.x,
+            verticalDelta: point.y - session.startPoint.y,
+            draggingLeftEdge: session.handle.dragsLeftEdge,
+            draggingTopEdge: session.handle.dragsTopEdge,
+            minimumWidth: 32,
+            maximumWidth: pageLayout.contentWidth
+        )
+        setImageSize(size, at: session.location)
+        return true
+    }
+
+    func endImageResize() -> Bool {
+        guard let session = resizeSession else { return false }
+        resizeSession = nil
+
+        guard let attachment = floatingAttachment(at: session.location),
+              attachment.displaySize != session.originalSize
+        else { return true }
+
+        // One undo per gesture rather than per drag event.
+        let newSize = attachment.displaySize
+        undoManager?.registerUndo(withTarget: self) { stack in
+            stack.resizeImage(to: session.originalSize, from: newSize, at: session.location)
+        }
+        undoManager?.setActionName("Resize Image")
+        pageViews.first?.didChangeText()
+        return true
+    }
+
+    /// Undo/redo-able resize.
+    private func resizeImage(to size: NSSize, from previous: NSSize, at location: Int) {
+        setImageSize(size, at: location)
+        undoManager?.registerUndo(withTarget: self) { stack in
+            stack.resizeImage(to: previous, from: size, at: location)
+        }
+        undoManager?.setActionName("Resize Image")
+        pageViews.first?.didChangeText()
+    }
+
+    /// Applies a new display size to a floating image and relays it out.
+    func setImageSize(_ size: NSSize, at location: Int) {
+        guard let attachment = floatingAttachment(at: location),
+              location < storage.length
+        else { return }
+
+        attachment.displaySize = size
+        attachment.image?.size = size
+        // The inline anchor stays tiny — the visible image is drawn as an
+        // overlay, not as a glyph.
+        attachment.bounds = NSRect(x: 0, y: 0, width: 0.1, height: 0.1)
+
+        // An attachment's size is measured during glyph generation and cached,
+        // so mutating it in place is invisible until the glyph for this
+        // character is regenerated. Replacing the attachment character (carrying
+        // over its other attributes) forces TextKit to remeasure it.
+        let range = NSRange(location: location, length: 1)
+        var attributes = storage.attributes(at: location, effectiveRange: nil)
+        attributes[.attachment] = attachment
+        storage.replaceCharacters(
+            in: range,
+            with: NSAttributedString(string: "\u{fffc}", attributes: attributes)
+        )
+
+        rebuildFloatingImageLayout()
+    }
+
+    /// Draws the selection outline and corner handles over the selected image.
+    func drawImageSelection(in pageView: PageTextView) {
+        guard let imageRect = selectedImageRect(in: pageView) else { return }
+        let magnification = enclosingScrollView?.magnification ?? 1
+
+        NSColor.controlAccentColor.setStroke()
+        let outline = NSBezierPath(rect: imageRect)
+        outline.lineWidth = 2 / max(magnification, 0.01)
+        outline.stroke()
+
+        for (_, rect) in handleRects(for: imageRect) {
+            NSColor.white.setFill()
+            rect.fill()
+            NSColor.controlAccentColor.setStroke()
+            let handle = NSBezierPath(rect: rect)
+            handle.lineWidth = 1 / max(magnification, 0.01)
+            handle.stroke()
+        }
     }
 
     static func displaySize(of attachment: NSTextAttachment) -> NSSize {

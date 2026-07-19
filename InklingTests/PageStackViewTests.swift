@@ -767,6 +767,169 @@ struct PageStackViewTests {
         #expect(stack.moveSession == nil)
     }
 
+    // MARK: - Image resizing
+
+    /// Selects the image on `page` and returns its page view plus image rect.
+    private static func selectImage(
+        in stack: PageStackView, onPage page: Int
+    ) -> (view: PageTextView, rect: NSRect, location: Int)? {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 900, height: 1100),
+            styleMask: [.titled], backing: .buffered, defer: false
+        )
+        window.contentView = stack
+
+        let pageView = stack.pageViews[page]
+        guard let hit = pageView.floatingImages.first else { return nil }
+        let rect = pageView.viewRect(forFloating: hit.rect)
+        _ = stack.beginImageDrag(at: NSPoint(x: rect.midX, y: rect.midY), in: pageView)
+        _ = stack.endImageDrag()
+        return (pageView, rect, hit.location)
+    }
+
+    private static func dragEvent(_ point: NSPoint, in view: NSView) -> NSEvent {
+        NSEvent.mouseEvent(
+            with: .leftMouseDragged,
+            location: view.convert(point, to: nil),
+            modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: view.window?.windowNumber ?? 0,
+            context: nil, eventNumber: 0, clickCount: 1, pressure: 1
+        )!
+    }
+
+    @Test func pressingAnImageSelectsItSoHandlesAppear() throws {
+        let stack = Self.stackWithImage(paragraphs: 200, at: 40)
+        let selected = try #require(Self.selectImage(in: stack, onPage: 0))
+
+        #expect(stack.selectedImageLocation == selected.location)
+        #expect(stack.selectedImageRect(in: selected.view) != nil)
+        #expect(stack.handleRects(for: selected.rect).count == 4)
+    }
+
+    @Test func handlesSitOnTheImageCorners() throws {
+        let stack = Self.stackWithImage(paragraphs: 200, at: 40)
+        let selected = try #require(Self.selectImage(in: stack, onPage: 0))
+
+        let handles = Dictionary(uniqueKeysWithValues: stack.handleRects(for: selected.rect))
+        #expect(abs(handles[.topLeft]!.midX - selected.rect.minX) < 0.5)
+        #expect(abs(handles[.topLeft]!.midY - selected.rect.minY) < 0.5)
+        #expect(abs(handles[.bottomRight]!.midX - selected.rect.maxX) < 0.5)
+        #expect(abs(handles[.bottomRight]!.midY - selected.rect.maxY) < 0.5)
+    }
+
+    @Test func draggingTheBottomRightHandleOutwardGrowsTheImage() throws {
+        let size = NSSize(width: 200, height: 150)
+        let stack = Self.stackWithImage(paragraphs: 200, at: 40, size: size)
+        let selected = try #require(Self.selectImage(in: stack, onPage: 0))
+
+        let corner = NSPoint(x: selected.rect.maxX, y: selected.rect.maxY)
+        #expect(stack.beginImageResize(at: corner, in: selected.view))
+        #expect(stack.continueImageResize(
+            with: Self.dragEvent(NSPoint(x: corner.x + 60, y: corner.y + 45), in: selected.view),
+            in: selected.view
+        ))
+        #expect(stack.endImageResize())
+
+        let resized = try #require(stack.floatingAttachment(at: selected.location))
+        #expect(resized.displaySize.width > size.width)
+        // Aspect ratio is preserved.
+        let ratio = resized.displaySize.width / resized.displaySize.height
+        #expect(abs(ratio - size.width / size.height) < 0.05)
+    }
+
+    @Test func draggingTheTopLeftHandleInwardShrinksTheImage() throws {
+        let size = NSSize(width: 200, height: 150)
+        let stack = Self.stackWithImage(paragraphs: 200, at: 40, size: size)
+        let selected = try #require(Self.selectImage(in: stack, onPage: 0))
+
+        let corner = NSPoint(x: selected.rect.minX, y: selected.rect.minY)
+        #expect(stack.beginImageResize(at: corner, in: selected.view))
+        #expect(stack.continueImageResize(
+            with: Self.dragEvent(NSPoint(x: corner.x + 50, y: corner.y + 38), in: selected.view),
+            in: selected.view
+        ))
+        #expect(stack.endImageResize())
+
+        let resized = try #require(stack.floatingAttachment(at: selected.location))
+        #expect(resized.displaySize.width < size.width)
+    }
+
+    @Test func resizingNeverExceedsTheColumnOrCollapsesTheImage() throws {
+        let layout = PagedEditorLayout.letter
+        let stack = Self.stackWithImage(
+            paragraphs: 200, at: 40, size: NSSize(width: 200, height: 150)
+        )
+        let selected = try #require(Self.selectImage(in: stack, onPage: 0))
+        let corner = NSPoint(x: selected.rect.maxX, y: selected.rect.maxY)
+
+        // Way too big.
+        #expect(stack.beginImageResize(at: corner, in: selected.view))
+        _ = stack.continueImageResize(
+            with: Self.dragEvent(NSPoint(x: corner.x + 5_000, y: corner.y + 5_000), in: selected.view),
+            in: selected.view
+        )
+        _ = stack.endImageResize()
+        var size = try #require(stack.floatingAttachment(at: selected.location)).displaySize
+        #expect(size.width <= layout.contentWidth + 0.5)
+
+        // Way too small.
+        let now = try #require(stack.selectedImageRect(in: selected.view))
+        let corner2 = NSPoint(x: now.maxX, y: now.maxY)
+        #expect(stack.beginImageResize(at: corner2, in: selected.view))
+        _ = stack.continueImageResize(
+            with: Self.dragEvent(NSPoint(x: corner2.x - 5_000, y: corner2.y - 5_000), in: selected.view),
+            in: selected.view
+        )
+        _ = stack.endImageResize()
+        size = try #require(stack.floatingAttachment(at: selected.location)).displaySize
+        #expect(size.width >= 32 - 0.5)
+    }
+
+    @Test func resizingUpdatesTheExclusionSoTextRewraps() throws {
+        let stack = Self.stackWithImage(
+            paragraphs: 200, at: 40, size: NSSize(width: 120, height: 90)
+        )
+        let selected = try #require(Self.selectImage(in: stack, onPage: 0))
+        let before = try #require(
+            selected.view.textContainer?.exclusionPaths.first?.bounds.width
+        )
+
+        let corner = NSPoint(x: selected.rect.maxX, y: selected.rect.maxY)
+        #expect(stack.beginImageResize(at: corner, in: selected.view))
+        _ = stack.continueImageResize(
+            with: Self.dragEvent(NSPoint(x: corner.x + 120, y: corner.y + 90), in: selected.view),
+            in: selected.view
+        )
+        _ = stack.endImageResize()
+
+        let after = try #require(
+            selected.view.textContainer?.exclusionPaths.first?.bounds.width
+        )
+        #expect(after > before)
+    }
+
+    @Test func pressingAwayFromAnImageClearsTheSelection() throws {
+        let stack = Self.stackWithImage(paragraphs: 200, at: 40)
+        _ = try #require(Self.selectImage(in: stack, onPage: 0))
+        #expect(stack.selectedImageLocation != nil)
+
+        stack.clearImageSelection()
+
+        #expect(stack.selectedImageLocation == nil)
+        #expect(stack.selectedImageRect(in: stack.pageViews[0]) == nil)
+    }
+
+    @Test func pressingAHandleWithNothingSelectedDoesNotResize() {
+        let stack = Self.stackWithImage(paragraphs: 200, at: 40)
+        let pageView = stack.pageViews[0]
+        let rect = pageView.viewRect(forFloating: pageView.floatingImages[0].rect)
+
+        // No selection yet, so the corner is not a handle.
+        #expect(stack.beginImageResize(at: NSPoint(x: rect.maxX, y: rect.maxY), in: pageView) == false)
+        #expect(stack.resizeSession == nil)
+    }
+
     @Test func editingOnAnEarlyPageRepaginatesLaterPages() {
         let stack = Self.makeStack(paragraphs: 200)
         let before = Self.characterRange(ofPage: 1, in: stack)
