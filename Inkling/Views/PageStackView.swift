@@ -17,11 +17,15 @@
 //  backed by its own small NSTextView. TextKit flows text container→container
 //  natively, so pagination is real and every exclusion path is page-local.
 //
-//  Scope is deliberately text-only: no floating images, sidebars, callout
-//  chrome, paper shadows, or typewriter scrolling. The single question this
-//  prototype exists to answer is whether typing, the caret, and selection behave
-//  acceptably across page boundaries when N NSTextViews share one layout
-//  manager. Nothing here is wired into the shipping editor.
+//  Milestone 0 (the selection gate) is passed: N text views sharing one layout
+//  manager keep a single insertion point, selection spans page breaks, the caret
+//  crosses boundaries, and first-responder handoff doesn't fork the selection.
+//
+//  Milestone 1 (here) brings text-only parity with the shipping editor:
+//  repagination driven by editing, the scrolling/magnifying canvas, and the
+//  paper-and-shadow chrome. Still deliberately excluded: floating images,
+//  sidebars, callout chrome, typewriter scrolling. Nothing here is wired into
+//  the shipping editor.
 //
 
 import AppKit
@@ -74,17 +78,28 @@ final class PageTextView: NSTextView {
         isRichText = true
         allowsUndo = true
 
-        drawsBackground = true
-        backgroundColor = .white
+        // The stack draws the paper (with its shadow) beneath every page view,
+        // so the views themselves are transparent — same split as the shipping
+        // editor, which paints paper in `drawBackground(in:)`.
+        drawsBackground = false
         // Pages are paper: keep them light regardless of system appearance,
         // matching the shipping editor.
         appearance = NSAppearance(named: .aqua)
+
+        // Cmd-F drives the standard TextKit find bar, hosted by the enclosing
+        // scroll view.
+        usesFindBar = true
+        isIncrementalSearchingEnabled = true
     }
 }
 
 /// The scrolling document view: a vertical stack of fixed-size page views, all
 /// sharing one text storage and one layout manager.
-final class PageStackView: NSView {
+final class PageStackView: NSView, NSTextStorageDelegate {
+
+    /// Breathing room between the paper edge and the canvas edge, so a page
+    /// doesn't sit flush against the scroll view. Matches `PagedTextView`.
+    static let canvasPadding: CGFloat = 16
 
     let pageLayout: PagedEditorLayout
     let storage: NSTextStorage
@@ -92,11 +107,19 @@ final class PageStackView: NSView {
 
     private(set) var pageViews: [PageTextView] = []
 
+    /// Reports a changed page count (for the editor footer), mirroring
+    /// `PagedTextView.pageCountDidChange`.
+    var pageCountDidChange: ((Int) -> Void)?
+
     /// Guards against `rebuildPages` re-entering itself by way of the layout it
     /// triggers.
     private var isRebuilding = false
+    private var paginationScheduled = false
 
     override var isFlipped: Bool { true }
+
+    /// Full canvas width: paper plus padding on both sides.
+    var canvasWidth: CGFloat { pageLayout.paperSize.width + Self.canvasPadding * 2 }
 
     init(pageLayout: PagedEditorLayout = .letter) {
         self.pageLayout = pageLayout
@@ -108,6 +131,7 @@ final class PageStackView: NSView {
         super.init(frame: NSRect(origin: .zero, size: pageLayout.paperSize))
 
         storage.addLayoutManager(sharedLayoutManager)
+        storage.delegate = self
         appendPage()
         resizeToFitPages()
     }
@@ -121,6 +145,31 @@ final class PageStackView: NSView {
     func setAttributedString(_ text: NSAttributedString) {
         storage.setAttributedString(text)
         rebuildPages()
+    }
+
+    // MARK: - Repagination driven by editing
+
+    func textStorage(
+        _ textStorage: NSTextStorage,
+        didProcessEditing editedMask: NSTextStorageEditActions,
+        range editedRange: NSRange,
+        changeInLength delta: Int
+    ) {
+        guard editedMask.contains(.editedCharacters) else { return }
+        schedulePagination()
+    }
+
+    /// Repaginates on the next pass of the run loop. Adding or removing text
+    /// containers while the storage is still processing an edit re-enters
+    /// TextKit; the shipping editor defers page updates the same way.
+    private func schedulePagination() {
+        guard !paginationScheduled else { return }
+        paginationScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.paginationScheduled = false
+            self.rebuildPages()
+        }
     }
 
     // MARK: - Pagination
@@ -160,8 +209,16 @@ final class PageStackView: NSView {
             removeLastPage()
         }
 
+        let changed = pageViews.count != lastReportedPageCount
         resizeToFitPages()
+        if changed {
+            lastReportedPageCount = pageViews.count
+            pageCountDidChange?(pageViews.count)
+            needsDisplay = true
+        }
     }
+
+    private var lastReportedPageCount = 1
 
     /// Upper bound on pages, so a pathological layout can't hang the app.
     private static let maxPages = 5_000
@@ -178,9 +235,15 @@ final class PageStackView: NSView {
         sharedLayoutManager.addTextContainer(container)
 
         let view = PageTextView(pageIndex: index, container: container, layout: pageLayout)
-        view.frame = pageLayout.paperRect(forPage: index)
+        view.frame = paperFrame(forPage: index)
         addSubview(view)
         pageViews.append(view)
+    }
+
+    /// Where page `page`'s sheet of paper sits in stack coordinates — the pure
+    /// page geometry nudged right by the canvas padding.
+    func paperFrame(forPage page: Int) -> NSRect {
+        pageLayout.paperRect(forPage: page).offsetBy(dx: Self.canvasPadding, dy: 0)
     }
 
     private func removeLastPage() {
@@ -194,15 +257,60 @@ final class PageStackView: NSView {
 
     private func resizeToFitPages() {
         let height = pageLayout.documentHeight(forPageCount: max(1, pageViews.count))
-        let size = NSSize(width: pageLayout.paperSize.width, height: height)
+        // Never shrink below the viewport, or the last page can't scroll to a
+        // comfortable position.
+        let viewportHeight = enclosingScrollView?.contentSize.height ?? 0
+        let size = NSSize(width: canvasWidth, height: max(height, viewportHeight))
         if abs(frame.width - size.width) > 0.5 || abs(frame.height - size.height) > 0.5 {
             setFrameSize(size)
         }
         for (index, view) in pageViews.enumerated() {
             view.pageIndex = index
-            let rect = pageLayout.paperRect(forPage: index)
+            let rect = paperFrame(forPage: index)
             if view.frame != rect { view.frame = rect }
         }
+    }
+
+    // MARK: - Paper
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.underPageBackgroundColor.setFill()
+        dirtyRect.fill()
+
+        for page in 0..<pageCount {
+            let paper = paperFrame(forPage: page)
+            guard paper.intersects(dirtyRect) else { continue }
+
+            NSGraphicsContext.saveGraphicsState()
+            let shadow = NSShadow()
+            shadow.shadowColor = NSColor.black.withAlphaComponent(0.18)
+            shadow.shadowBlurRadius = 5
+            shadow.shadowOffset = NSSize(width: 0, height: -2)
+            shadow.set()
+            NSColor.white.setFill()
+            NSBezierPath(rect: paper).fill()
+            NSGraphicsContext.restoreGraphicsState()
+
+            NSColor.separatorColor.setStroke()
+            NSBezierPath(rect: paper).stroke()
+        }
+    }
+
+    // MARK: - Canvas
+
+    /// Builds the scrolling, magnifying canvas that hosts the page stack —
+    /// the per-page-container counterpart to `PagedTextView.makePagedScrollView`.
+    static func makeScrollView(pageLayout: PagedEditorLayout = .letter) -> PagedEditorScrollView {
+        let stack = PageStackView(pageLayout: pageLayout)
+        let scrollView = PagedEditorScrollView(canvasWidth: stack.canvasWidth)
+        scrollView.documentView = stack
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.drawsBackground = true
+        scrollView.backgroundColor = .underPageBackgroundColor
+        scrollView.contentInsets = NSEdgeInsets(top: 24, left: 0, bottom: 24, right: 0)
+        return scrollView
     }
 
     // MARK: - Selection helpers

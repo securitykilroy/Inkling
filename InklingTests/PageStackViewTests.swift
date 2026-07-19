@@ -250,6 +250,109 @@ struct PageStackViewTests {
         #expect(written == "QQ")
     }
 
+    // MARK: - Milestone 1: canvas, chrome, and edit-driven repagination
+
+    /// Yields the main actor so `schedulePagination`'s deferred rebuild runs,
+    /// the way it would between user keystrokes. Suspending (rather than
+    /// blocking the run loop) is what actually lets the queued block execute.
+    private static func settle() async {
+        try? await Task.sleep(nanoseconds: 100_000_000)
+    }
+
+    @Test func typingEnoughTextAddsAPageWithoutAnExplicitRebuild() async {
+        let stack = Self.makeStack(paragraphs: 2)
+        #expect(stack.pageCount == 1)
+
+        stack.pageViews[0].insertText(
+            String(repeating: "Filler sentence for pagination. ", count: 400),
+            replacementRange: NSRange(location: 0, length: 0)
+        )
+        await Self.settle()
+
+        #expect(stack.pageCount > 1)
+    }
+
+    @Test func deletingTextRemovesPagesWithoutAnExplicitRebuild() async {
+        let stack = Self.makeStack(paragraphs: 200)
+        #expect(stack.pageCount > 1)
+
+        stack.storage.replaceCharacters(
+            in: NSRange(location: 0, length: stack.storage.length),
+            with: "Short."
+        )
+        await Self.settle()
+
+        #expect(stack.pageCount == 1)
+    }
+
+    @Test func pageCountChangesAreReported() {
+        let stack = PageStackView()
+        var reported: [Int] = []
+        stack.pageCountDidChange = { reported.append($0) }
+
+        stack.setAttributedString(Self.filler(paragraphs: 200))
+
+        #expect(reported.last == stack.pageCount)
+        #expect(stack.pageCount > 1)
+    }
+
+    @Test func paperFramesStackVerticallyWithThePageGap() {
+        let stack = Self.makeStack(paragraphs: 200)
+        let layout = PagedEditorLayout.letter
+
+        let first = stack.paperFrame(forPage: 0)
+        let second = stack.paperFrame(forPage: 1)
+
+        #expect(abs(second.minY - first.maxY - layout.pageGap) < 0.5)
+        #expect(first.size == layout.paperSize)
+    }
+
+    @Test func paperIsInsetFromTheCanvasEdgeOnBothSides() {
+        let stack = Self.makeStack(paragraphs: 2)
+        let paper = stack.paperFrame(forPage: 0)
+
+        #expect(abs(paper.minX - PageStackView.canvasPadding) < 0.5)
+        #expect(abs(stack.canvasWidth - paper.maxX - PageStackView.canvasPadding) < 0.5)
+    }
+
+    @Test func scrollViewFactoryHostsAMagnifiablePageStack() throws {
+        let scrollView = PageStackView.makeScrollView()
+
+        let stack = try #require(scrollView.documentView as? PageStackView)
+        #expect(scrollView.allowsMagnification)
+        #expect(abs(scrollView.canvasWidth - stack.canvasWidth) < 0.5)
+    }
+
+    // MARK: - Cross-page drag selection (plan §6 item 1)
+    //
+    // A mouse drag that starts on page 0 and continues below it is tracked by
+    // page 0's text view, which resolves the drag point against *its own*
+    // container. This probes whether that resolution can reach text on page 1 —
+    // i.e. whether cross-page drag selection works natively or needs handling
+    // in PageStackView.
+
+    @Test func draggingBelowAPageResolvesOnlyWithinThatPagesOwnText() {
+        let stack = Self.makeStack(paragraphs: 200)
+        #expect(stack.pageCount > 1)
+        let firstPage = Self.characterRange(ofPage: 0, in: stack)
+
+        // A point far below page 0's paper — where the user's cursor would be
+        // after dragging down onto page 1.
+        let farBelow = NSPoint(x: 200, y: stack.pageViews[0].bounds.maxY + 1_000)
+        let index = stack.pageViews[0].characterIndexForInsertion(at: farBelow)
+
+        // Page 0's view cannot see page 1's glyphs, so the drag clamps at the
+        // end of its own container rather than reaching page 1. Cross-page drag
+        // selection therefore needs explicit handling in the stack (routing the
+        // drag point to whichever page view contains it); it does not come free
+        // from TextKit the way the caret and shared selection do.
+        #expect(index <= NSMaxRange(firstPage))
+        // ...and it really is clamped to the page end, not some arbitrary spot:
+        // the drag reaches the last line of page 0 and stops.
+        #expect(index > firstPage.location)
+        #expect(NSMaxRange(firstPage) - index < 100)
+    }
+
     @Test func editingOnAnEarlyPageRepaginatesLaterPages() {
         let stack = Self.makeStack(paragraphs: 200)
         let before = Self.characterRange(ofPage: 1, in: stack)
