@@ -282,6 +282,10 @@ final class RichTextController: ObservableObject {
 
     /// Inserts a floating margin sidebar at the caret and enters it for typing.
     func insertSidebar() {
+        if let page = textView as? PageTextView {
+            page.pageStack?.insertSidebar()
+            return
+        }
         (textView as? PagedTextView)?.insertSidebar()
     }
 

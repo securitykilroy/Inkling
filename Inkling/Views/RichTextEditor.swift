@@ -174,6 +174,7 @@ struct RichTextEditor: NSViewRepresentable {
             stack.clearImageSelection()
             stack.setAttributedString(RichTextCodec.decode(data) ?? NSAttributedString())
             stack.prepareFloatingImages()
+            stack.prepareSidebars()
             loadedID = documentID
             loadedData = data
             parent.controller?.selectionDidChange()

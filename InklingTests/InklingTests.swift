@@ -2453,7 +2453,11 @@ struct InklingTests {
         #expect(decodedThree.string == "One dog here.")
     }
 
-    @Test func projectSearchReplaceAllPreservesFormattingAroundTheReplacement() throws {
+    // @MainActor because this resolves fonts and round-trips RTF, which is
+    // AppKit work. Without it the test runs on a background thread and can race
+    // main-thread AppKit work in concurrently-running suites, intermittently
+    // resolving a bold font without its bold trait.
+    @Test @MainActor func projectSearchReplaceAllPreservesFormattingAroundTheReplacement() throws {
         let id = UUID()
         let boldFont = NSFont.boldSystemFont(ofSize: 14)
         let original = NSMutableAttributedString(string: "before ")

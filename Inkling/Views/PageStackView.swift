@@ -121,7 +121,11 @@ final class PageTextView: NSTextView {
         floatingImages.reversed().first { viewRect(forFloating: $0.rect).contains(point) }
     }
 
-    private var stack: PageStackView? { superview as? PageStackView }
+    /// The stack hosting this page. Sidebars are child views of a page view, so
+    /// this walks up rather than assuming a direct parent.
+    var pageStack: PageStackView? { superview as? PageStackView }
+
+    private var stack: PageStackView? { pageStack }
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
@@ -136,6 +140,7 @@ final class PageTextView: NSTextView {
             )
         }
         stack?.drawImageSelection(in: self)
+        stack?.drawSidebarSelection(in: self)
         stack?.drawSnapGuide(in: self)
     }
 
@@ -147,8 +152,10 @@ final class PageTextView: NSTextView {
 
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
-        // Handles first: they sit on the image's corners and extend past its
-        // edge, so an image hit test would otherwise swallow them.
+        // Sidebars first (they sit above the text and own their own hit area),
+        // then image handles — handles sit on the image's corners and extend
+        // past its edge, so an image-body hit test would swallow them.
+        if stack?.handleSidebarMouseDown(at: point, in: self, event: event) == true { return }
         if stack?.beginImageResize(at: point, in: self) == true { return }
         if stack?.beginImageDrag(at: point, in: self) == true { return }
         stack?.clearImageSelection()
@@ -156,12 +163,14 @@ final class PageTextView: NSTextView {
     }
 
     override func mouseDragged(with event: NSEvent) {
+        if stack?.continueSidebarDrag(with: event) == true { return }
         if stack?.continueImageResize(with: event, in: self) == true { return }
         if stack?.continueImageDrag(with: event) == true { return }
         super.mouseDragged(with: event)
     }
 
     override func mouseUp(with event: NSEvent) {
+        if stack?.endSidebarDrag() == true { return }
         if stack?.endImageResize() == true { return }
         if stack?.endImageDrag() == true { return }
         super.mouseUp(with: event)
@@ -327,6 +336,17 @@ final class PageStackView: NSView, NSTextStorageDelegate {
     var resizeSession: ImageResizeSession?
     /// Character index of the selected image, which shows resize handles.
     var selectedImageLocation: Int?
+
+    // Sidebars: one child editor per anchor in the storage, hosted by the page
+    // view its box lands on.
+    var sidebarViews: [ObjectIdentifier: SidebarTextView] = [:]
+    var sidebarAttachments: [ObjectIdentifier: SidebarAttachment] = [:]
+    /// Each sidebar's page and its rect in that page's container coordinates.
+    var sidebarPlacements: [ObjectIdentifier: (page: Int, rect: NSRect)] = [:]
+    var selectedSidebar: ObjectIdentifier?
+    var enteredSidebar: ObjectIdentifier?
+    var sidebarMoveSession: SidebarDragSession?
+    var sidebarResizeSession: SidebarDragSession?
     /// The snap guide to draw, and the page to draw it on, during a drag.
     var activeSnapGuide: HorizontalGuide?
     var activeSnapPage: Int?
@@ -517,15 +537,20 @@ extension PageStackView {
         rebuildPages()
 
         let placements = floatingPlacements()
+        syncSidebarViews()
+        let sidebarExclusions = layoutSidebars()
 
-        // An image may be parked on a page beyond where the text reaches; that
-        // page has to exist, and has to survive trimming.
-        if let lastImagePage = placements.map(\.page).max() {
-            minimumPageCount = max(1, lastImagePage + 1)
+        // An image or sidebar may be parked on a page beyond where the text
+        // reaches; that page has to exist, and has to survive trimming.
+        let lastImagePage = placements.map(\.page).max() ?? -1
+        let lastSidebarPage = sidebarPlacements.values.map(\.page).max() ?? -1
+        let lastAnchoredPage = max(lastImagePage, lastSidebarPage)
+        if lastAnchoredPage >= 0 {
+            minimumPageCount = max(1, lastAnchoredPage + 1)
             while pageCount < minimumPageCount { appendPage() }
         }
 
-        var exclusions: [Int: [NSBezierPath]] = [:]
+        var exclusions = sidebarExclusions
         var drawables: [Int: [(location: Int, rect: NSRect, image: NSImage)]] = [:]
         for placement in placements {
             if let rect = FloatingImagePlacement.exclusionRect(
@@ -549,6 +574,7 @@ extension PageStackView {
         for (index, view) in pageViews.enumerated() {
             view.floatingImages = drawables[index] ?? []
         }
+        positionSidebarViews()
         needsDisplay = true
     }
 
@@ -934,6 +960,387 @@ extension PageStackView {
             handle.lineWidth = 1 / max(magnification, 0.01)
             handle.stroke()
         }
+    }
+
+    // MARK: - Floating margin sidebars
+    //
+    // Each sidebar is a child NSTextView hosted by the page view its box lands
+    // on — not by the stack — so it scrolls, magnifies, and clips with its page.
+    // Its exclusion is that page's local rect, the same as a floating image.
+
+    struct SidebarDragSession {
+        let id: ObjectIdentifier
+        /// Press point, in the hosting page view's coordinates.
+        let startPoint: NSPoint
+        let startOrigin: NSPoint
+        let startWidth: CGFloat
+        let startPosition: FloatingImagePosition?
+    }
+
+    /// Resets sidebar hosting for a freshly loaded chapter.
+    func prepareSidebars() {
+        for (_, view) in sidebarViews { view.removeFromSuperview() }
+        sidebarViews.removeAll()
+        sidebarAttachments.removeAll()
+        sidebarPlacements.removeAll()
+        selectedSidebar = nil
+        enteredSidebar = nil
+        rebuildFloatingImageLayout()
+    }
+
+    /// Inserts an empty sidebar at the caret, on the right of its page, and
+    /// enters it for typing.
+    func insertSidebar() {
+        let width = SidebarStyle.defaultWidth
+        let caret = focusedPageView?.selectedRange() ?? NSRange(location: 0, length: 0)
+        let sidebar = SidebarAttachment(
+            contentData: nil,
+            width: width,
+            position: defaultSidebarPosition(width: width, caret: caret.location),
+            contentHeight: SidebarStyle.minContentHeight
+        )
+        let attributed = NSMutableAttributedString(attachment: sidebar)
+        attributed.addAttributes(
+            [.font: TextStyle.body.font, .foregroundColor: NSColor.black],
+            range: NSRange(location: 0, length: attributed.length)
+        )
+        storage.replaceCharacters(in: caret, with: attributed)
+        rebuildFloatingImageLayout()
+        pageViews.first?.didChangeText()
+        enterSidebar(ObjectIdentifier(sidebar))
+    }
+
+    /// Places a new sidebar against the right content edge, level with the
+    /// caret's own line, so it lands beside where the author is writing.
+    private func defaultSidebarPosition(width: CGFloat, caret: Int) -> FloatingImagePosition {
+        var page = 0
+        var y: CGFloat = 0
+        if storage.length > 0, sharedLayoutManager.numberOfGlyphs > 0 {
+            let location = min(caret, storage.length - 1)
+            let glyph = sharedLayoutManager.glyphIndexForCharacter(at: location)
+            if glyph < sharedLayoutManager.numberOfGlyphs,
+               let container = sharedLayoutManager.textContainer(
+                   forGlyphAt: glyph, effectiveRange: nil
+               ),
+               let index = pageViews.firstIndex(where: { $0.textContainer === container }) {
+                page = index
+                y = sharedLayoutManager.lineFragmentRect(
+                    forGlyphAt: glyph, effectiveRange: nil
+                ).minY
+            }
+        }
+        return FloatingImagePosition(
+            page: page,
+            origin: CGPoint(
+                x: pageLayout.leftMargin + max(0, pageLayout.contentWidth - width),
+                y: pageLayout.topMargin + y
+            )
+        )
+    }
+
+    /// Ensures exactly one child editor per sidebar anchor in the storage.
+    func syncSidebarViews() {
+        var present = Set<ObjectIdentifier>()
+        var attachments: [ObjectIdentifier: SidebarAttachment] = [:]
+        storage.enumerateAttribute(
+            .attachment, in: NSRange(location: 0, length: storage.length)
+        ) { value, _, _ in
+            guard let sidebar = value as? SidebarAttachment else { return }
+            let id = ObjectIdentifier(sidebar)
+            present.insert(id)
+            attachments[id] = sidebar
+            if sidebarViews[id] == nil {
+                sidebarViews[id] = makeSidebarView(for: sidebar)
+            }
+        }
+        for (id, view) in sidebarViews where !present.contains(id) {
+            view.removeFromSuperview()
+            sidebarViews[id] = nil
+            sidebarPlacements[id] = nil
+            if selectedSidebar == id { selectedSidebar = nil }
+            if enteredSidebar == id { enteredSidebar = nil }
+        }
+        sidebarAttachments = attachments
+    }
+
+    private func makeSidebarView(for sidebar: SidebarAttachment) -> SidebarTextView {
+        let view = SidebarTextView.make(width: sidebar.width)
+        view.load(sidebar.contentData)
+        view.onEdited = { [weak self, weak sidebar, weak view] in
+            guard let self, let sidebar, let view else { return }
+            sidebar.contentData = view.contentRTF()
+            self.rebuildFloatingImageLayout()
+            self.pageViews.first?.didChangeText()
+        }
+        view.onExit = { [weak self] in
+            self?.enteredSidebar = nil
+            self?.needsDisplay = true
+        }
+        return view
+    }
+
+    /// Resolves each sidebar to a page + page-local rect and returns the
+    /// exclusion paths, keyed by page, for the body text to wrap around.
+    func layoutSidebars() -> [Int: [NSBezierPath]] {
+        var paths: [Int: [NSBezierPath]] = [:]
+        var placements: [ObjectIdentifier: (page: Int, rect: NSRect)] = [:]
+
+        for (id, sidebar) in sidebarAttachments {
+            guard let view = sidebarViews[id] else { continue }
+            view.setBoxWidth(sidebar.width)
+            sidebar.contentHeight = view.fittingTextHeight()
+            let size = sidebar.displaySize
+
+            let page: Int
+            let rect: NSRect
+            if let position = sidebar.position {
+                page = position.page
+                rect = FloatingImagePlacement.contentRect(
+                    origin: position.origin,
+                    imageSize: size,
+                    leftMargin: pageLayout.leftMargin,
+                    topMargin: pageLayout.topMargin
+                )
+            } else {
+                page = 0
+                rect = NSRect(
+                    x: max(0, pageLayout.contentWidth - size.width),
+                    y: 0,
+                    width: size.width,
+                    height: size.height
+                )
+            }
+            placements[id] = (page, rect)
+
+            if let exclusion = FloatingImagePlacement.exclusionRect(
+                contentRect: rect,
+                contentWidth: pageLayout.contentWidth,
+                gutter: Self.imageGutter
+            ) {
+                paths[page, default: []].append(NSBezierPath(rect: exclusion))
+            }
+        }
+        sidebarPlacements = placements
+        return paths
+    }
+
+    /// Parents each sidebar's child view to the page view it belongs on and
+    /// frames it there. Run after pagination settles, so the target page exists.
+    func positionSidebarViews() {
+        for (id, placement) in sidebarPlacements {
+            guard let view = sidebarViews[id],
+                  placement.page < pageViews.count
+            else { continue }
+            let host = pageViews[placement.page]
+            if view.superview !== host {
+                view.removeFromSuperview()
+                host.addSubview(view)
+            }
+            view.frame = host.viewRect(forFloating: placement.rect)
+        }
+    }
+
+    /// The hosting page view and view-space rect for a sidebar.
+    func sidebarViewRect(_ id: ObjectIdentifier) -> (view: PageTextView, rect: NSRect)? {
+        guard let placement = sidebarPlacements[id],
+              placement.page < pageViews.count
+        else { return nil }
+        let host = pageViews[placement.page]
+        return (host, host.viewRect(forFloating: placement.rect))
+    }
+
+    func sidebarResizeHandleRect(_ viewRect: NSRect) -> NSRect {
+        let magnification = enclosingScrollView?.magnification ?? 1
+        let size = 11 / max(magnification, 0.01)
+        return NSRect(
+            x: viewRect.maxX - size / 2,
+            y: viewRect.maxY - size / 2,
+            width: size,
+            height: size
+        )
+    }
+
+    /// The sidebar whose box contains `point` on `pageView`.
+    func sidebarID(at point: NSPoint, in pageView: PageTextView) -> ObjectIdentifier? {
+        sidebarPlacements.first { id, placement in
+            placement.page == pageView.pageIndex
+                && pageView.viewRect(forFloating: placement.rect).contains(point)
+        }?.key
+    }
+
+    /// True when the press was on a sidebar (select / enter / drag) or dismissed
+    /// one; false lets image and text handling proceed.
+    func handleSidebarMouseDown(at point: NSPoint, in pageView: PageTextView, event: NSEvent) -> Bool {
+        if let id = selectedSidebar, enteredSidebar == nil,
+           let sidebar = sidebarAttachments[id],
+           let located = sidebarViewRect(id), located.view === pageView,
+           sidebarResizeHandleRect(located.rect).insetBy(dx: -6, dy: -6).contains(point) {
+            sidebarResizeSession = SidebarDragSession(
+                id: id, startPoint: point, startOrigin: located.rect.origin,
+                startWidth: sidebar.width, startPosition: sidebar.position
+            )
+            return true
+        }
+
+        if let id = sidebarID(at: point, in: pageView), let sidebar = sidebarAttachments[id] {
+            if event.clickCount >= 2 {
+                enterSidebar(id)
+            } else {
+                selectSidebar(id, in: pageView)
+                sidebarMoveSession = SidebarDragSession(
+                    id: id, startPoint: point,
+                    startOrigin: sidebarViewRect(id)?.rect.origin ?? .zero,
+                    startWidth: sidebar.width, startPosition: sidebar.position
+                )
+            }
+            return true
+        }
+
+        if enteredSidebar != nil || selectedSidebar != nil {
+            exitSidebar()
+            selectedSidebar = nil
+            needsDisplay = true
+        }
+        return false
+    }
+
+    private func selectSidebar(_ id: ObjectIdentifier, in pageView: PageTextView) {
+        if let entered = enteredSidebar, entered != id { exitSidebar() }
+        clearImageSelection()
+        selectedSidebar = id
+        window?.makeFirstResponder(pageView)
+        needsDisplay = true
+    }
+
+    func enterSidebar(_ id: ObjectIdentifier) {
+        guard let located = sidebarViewRect(id) else { return }
+        selectSidebar(id, in: located.view)
+        enteredSidebar = id
+        if let view = sidebarViews[id] {
+            view.isEntered = true
+            window?.makeFirstResponder(view)
+        }
+        needsDisplay = true
+    }
+
+    func exitSidebar() {
+        guard let id = enteredSidebar else { return }
+        sidebarViews[id]?.isEntered = false
+        enteredSidebar = nil
+        if window?.firstResponder === sidebarViews[id] {
+            window?.makeFirstResponder(pageViews.first)
+        }
+    }
+
+    /// Moves a dragged sidebar, across pages if the cursor leaves this one.
+    func continueSidebarDrag(with event: NSEvent) -> Bool {
+        if let session = sidebarResizeSession, let sidebar = sidebarAttachments[session.id] {
+            guard let located = sidebarViewRect(session.id) else { return true }
+            let point = located.view.convert(event.locationInWindow, from: nil)
+            let leftX = sidebar.position.map { $0.origin.x - pageLayout.leftMargin } ?? 0
+            let maxWidth = max(SidebarStyle.minWidth, pageLayout.contentWidth - leftX)
+            sidebar.width = min(
+                maxWidth,
+                max(SidebarStyle.minWidth, session.startWidth + (point.x - session.startPoint.x))
+            )
+            rebuildFloatingImageLayout()
+            return true
+        }
+
+        guard let session = sidebarMoveSession,
+              let sidebar = sidebarAttachments[session.id]
+        else { return false }
+
+        autoscroll(with: event)
+        let stackPoint = convert(event.locationInWindow, from: nil)
+        let page = min(max(0, targetPage(forStackY: stackPoint.y)), max(0, pageCount - 1))
+        let paper = paperFrame(forPage: page)
+        // The press point was in the old host page's coordinates, which equal
+        // paper coordinates, so the grab offset carries across pages unchanged.
+        var origin = CGPoint(
+            x: stackPoint.x - paper.minX - (session.startPoint.x - session.startOrigin.x),
+            y: stackPoint.y - paper.minY - (session.startPoint.y - session.startOrigin.y)
+        )
+        let snap = FloatingImagePlacement.horizontalSnap(
+            originX: origin.x,
+            imageWidth: sidebar.width,
+            leftMargin: pageLayout.leftMargin,
+            contentWidth: pageLayout.contentWidth,
+            threshold: Self.snapThreshold
+        )
+        origin.x = snap.x
+        activeSnapGuide = snap.guide
+        activeSnapPage = page
+
+        sidebar.position = FloatingImagePosition(
+            page: page,
+            origin: FloatingImagePlacement.clampedOrigin(
+                origin, imageSize: sidebar.displaySize, paperSize: pageLayout.paperSize
+            )
+        )
+        rebuildFloatingImageLayout()
+        return true
+    }
+
+    func endSidebarDrag() -> Bool {
+        let session = sidebarMoveSession ?? sidebarResizeSession
+        guard let session else { return false }
+        sidebarMoveSession = nil
+        sidebarResizeSession = nil
+        activeSnapGuide = nil
+        activeSnapPage = nil
+        needsDisplay = true
+
+        guard let sidebar = sidebarAttachments[session.id],
+              sidebar.position != session.startPosition || sidebar.width != session.startWidth
+        else { return true }
+
+        applySidebarGeometry(
+            id: session.id, position: sidebar.position, width: sidebar.width,
+            undoPosition: session.startPosition, undoWidth: session.startWidth
+        )
+        return true
+    }
+
+    private func applySidebarGeometry(
+        id: ObjectIdentifier,
+        position: FloatingImagePosition?, width: CGFloat,
+        undoPosition: FloatingImagePosition?, undoWidth: CGFloat
+    ) {
+        guard let sidebar = sidebarAttachments[id] else { return }
+        sidebar.position = position
+        sidebar.width = width
+        undoManager?.registerUndo(withTarget: self) { stack in
+            stack.applySidebarGeometry(
+                id: id, position: undoPosition, width: undoWidth,
+                undoPosition: position, undoWidth: width
+            )
+        }
+        undoManager?.setActionName("Move Sidebar")
+        rebuildFloatingImageLayout()
+        pageViews.first?.didChangeText()
+    }
+
+    /// Draws the selection outline and resize handle on the selected sidebar.
+    func drawSidebarSelection(in pageView: PageTextView) {
+        guard let id = selectedSidebar,
+              let located = sidebarViewRect(id),
+              located.view === pageView
+        else { return }
+
+        let magnification = enclosingScrollView?.magnification ?? 1
+        NSColor.controlAccentColor.setStroke()
+        let outline = NSBezierPath(rect: located.rect)
+        outline.lineWidth = 2 / max(magnification, 0.01)
+        outline.stroke()
+
+        let handle = sidebarResizeHandleRect(located.rect)
+        NSColor.white.setFill()
+        handle.fill()
+        NSColor.controlAccentColor.setStroke()
+        let handlePath = NSBezierPath(rect: handle)
+        handlePath.lineWidth = 1 / max(magnification, 0.01)
+        handlePath.stroke()
     }
 
     static func displaySize(of attachment: NSTextAttachment) -> NSSize {

@@ -930,6 +930,242 @@ struct PageStackViewTests {
         #expect(stack.resizeSession == nil)
     }
 
+    // MARK: - Milestone 3: sidebars
+
+    /// `alignedRight: false` places the box against the left content edge, which
+    /// leaves room to widen it — a right-aligned box is already at its maximum
+    /// width, since the box may not extend past the column.
+    private static func stackWithSidebar(
+        paragraphs: Int,
+        page: Int,
+        at location: Int = 40,
+        alignedRight: Bool = true
+    ) -> PageStackView {
+        let stack = PageStackView()
+        stack.setAttributedString(filler(paragraphs: paragraphs))
+
+        let layout = PagedEditorLayout.letter
+        let x = alignedRight
+            ? layout.leftMargin + layout.contentWidth - SidebarStyle.defaultWidth
+            : layout.leftMargin
+        let sidebar = SidebarAttachment(
+            contentData: nil,
+            width: SidebarStyle.defaultWidth,
+            position: FloatingImagePosition(
+                page: page,
+                origin: CGPoint(x: x, y: layout.topMargin)
+            ),
+            contentHeight: SidebarStyle.minContentHeight
+        )
+        stack.storage.insert(
+            NSAttributedString(attachment: sidebar),
+            at: min(location, stack.storage.length)
+        )
+        stack.prepareSidebars()
+
+        // Host in a window so the child editors have somewhere to live.
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 900, height: 1100),
+            styleMask: [.titled], backing: .buffered, defer: false
+        )
+        window.contentView = stack
+        stack.rebuildFloatingImageLayout()
+        return stack
+    }
+
+    @Test func aSidebarIsHostedByThePageItSitsOn() throws {
+        let stack = Self.stackWithSidebar(paragraphs: 200, page: 2)
+
+        let id = try #require(stack.sidebarAttachments.keys.first)
+        let view = try #require(stack.sidebarViews[id])
+        // The child editor is a subview of page 2, not of the stack, so it
+        // scrolls and clips with its page.
+        #expect(view.superview === stack.pageViews[2])
+        #expect(stack.sidebarPlacements[id]?.page == 2)
+    }
+
+    @Test func aSidebarExcludesOnItsOwnPageOnly() throws {
+        let stack = Self.stackWithSidebar(paragraphs: 200, page: 2)
+        let layout = PagedEditorLayout.letter
+
+        #expect(stack.pageViews[2].textContainer?.exclusionPaths.count == 1)
+        for (index, view) in stack.pageViews.enumerated() where index != 2 {
+            #expect(view.textContainer?.exclusionPaths.isEmpty == true)
+        }
+        // And the exclusion is page-local, like an image's.
+        let path = try #require(stack.pageViews[2].textContainer?.exclusionPaths.first)
+        #expect(path.bounds.height < layout.pageStride)
+    }
+
+    @Test func textWrapsToTheLeftOfARightHandSidebar() throws {
+        let stack = Self.stackWithSidebar(paragraphs: 200, page: 2)
+        let manager = stack.sharedLayoutManager
+        let container = try #require(stack.pageViews[2].textContainer)
+        let id = try #require(stack.sidebarAttachments.keys.first)
+        // Use the box's real rect — it's only as tall as its content, so a
+        // fixed Y cutoff would sample lines below it that are free to run full
+        // width.
+        let box = try #require(stack.sidebarPlacements[id]).rect
+
+        var checked = false
+        manager.enumerateLineFragments(forGlyphRange: manager.glyphRange(for: container)) {
+            _, usedRect, _, _, _ in
+            guard usedRect.midY > box.minY, usedRect.midY < box.maxY else { return }
+            guard usedRect.width > 1 else { return }
+            checked = true
+            #expect(usedRect.maxX <= box.minX + 0.5)
+        }
+        #expect(checked)
+    }
+
+    @Test func draggingASidebarOntoAnotherPageRehomesItsChildView() throws {
+        let stack = Self.stackWithSidebar(paragraphs: 200, page: 1)
+        let id = try #require(stack.sidebarAttachments.keys.first)
+        let located = try #require(stack.sidebarViewRect(id))
+
+        // Press inside the box, then drag to page 3.
+        let press = NSPoint(x: located.rect.midX, y: located.rect.midY)
+        let event = NSEvent.mouseEvent(
+            with: .leftMouseDown, location: located.view.convert(press, to: nil),
+            modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: stack.window?.windowNumber ?? 0,
+            context: nil, eventNumber: 0, clickCount: 1, pressure: 1
+        )!
+        #expect(stack.handleSidebarMouseDown(at: press, in: located.view, event: event))
+
+        let target = stack.paperFrame(forPage: 3)
+        #expect(stack.continueSidebarDrag(
+            with: Self.dragEvent(NSPoint(x: target.midX, y: target.midY), in: stack)
+        ))
+        #expect(stack.endSidebarDrag())
+
+        #expect(stack.sidebarAttachments[id]?.position?.page == 3)
+        #expect(stack.sidebarPlacements[id]?.page == 3)
+        #expect(stack.sidebarViews[id]?.superview === stack.pageViews[3])
+        #expect(stack.pageViews[1].textContainer?.exclusionPaths.isEmpty == true)
+        #expect(stack.pageViews[3].textContainer?.exclusionPaths.count == 1)
+    }
+
+    @Test func resizingASidebarWidensItsExclusion() throws {
+        // Left-aligned, so there is column room to grow into.
+        let stack = Self.stackWithSidebar(paragraphs: 200, page: 1, alignedRight: false)
+        let id = try #require(stack.sidebarAttachments.keys.first)
+        let located = try #require(stack.sidebarViewRect(id))
+        let startWidth = try #require(stack.sidebarAttachments[id]).width
+        let startExclusion = try #require(
+            stack.pageViews[1].textContainer?.exclusionPaths.first?.bounds.width
+        )
+
+        // Select it, then grab the bottom-right handle and drag outward.
+        stack.selectedSidebar = id
+        let handle = stack.sidebarResizeHandleRect(located.rect)
+        let press = NSPoint(x: handle.midX, y: handle.midY)
+        let event = NSEvent.mouseEvent(
+            with: .leftMouseDown, location: located.view.convert(press, to: nil),
+            modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: stack.window?.windowNumber ?? 0,
+            context: nil, eventNumber: 0, clickCount: 1, pressure: 1
+        )!
+        #expect(stack.handleSidebarMouseDown(at: press, in: located.view, event: event))
+        #expect(stack.continueSidebarDrag(
+            with: Self.dragEvent(NSPoint(x: press.x + 60, y: press.y), in: located.view)
+        ))
+        #expect(stack.endSidebarDrag())
+
+        #expect(try #require(stack.sidebarAttachments[id]).width > startWidth)
+        let endExclusion = try #require(
+            stack.pageViews[1].textContainer?.exclusionPaths.first?.bounds.width
+        )
+        #expect(endExclusion > startExclusion)
+    }
+
+    @Test func aRightAlignedSidebarCannotBeWidenedPastTheColumn() throws {
+        let layout = PagedEditorLayout.letter
+        let stack = Self.stackWithSidebar(paragraphs: 200, page: 1)
+        let id = try #require(stack.sidebarAttachments.keys.first)
+        let located = try #require(stack.sidebarViewRect(id))
+        stack.selectedSidebar = id
+
+        let handle = stack.sidebarResizeHandleRect(located.rect)
+        let press = NSPoint(x: handle.midX, y: handle.midY)
+        let event = NSEvent.mouseEvent(
+            with: .leftMouseDown, location: located.view.convert(press, to: nil),
+            modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: stack.window?.windowNumber ?? 0,
+            context: nil, eventNumber: 0, clickCount: 1, pressure: 1
+        )!
+        #expect(stack.handleSidebarMouseDown(at: press, in: located.view, event: event))
+        _ = stack.continueSidebarDrag(
+            with: Self.dragEvent(NSPoint(x: press.x + 400, y: press.y), in: located.view)
+        )
+        _ = stack.endSidebarDrag()
+
+        // Its left edge is fixed, so it can never extend past the right margin.
+        let sidebar = try #require(stack.sidebarAttachments[id])
+        let leftInColumn = (sidebar.position?.origin.x ?? 0) - layout.leftMargin
+        #expect(leftInColumn + sidebar.width <= layout.contentWidth + 0.5)
+    }
+
+    @Test func removingASidebarsAnchorDropsItsChildView() throws {
+        let stack = Self.stackWithSidebar(paragraphs: 200, page: 1)
+        let id = try #require(stack.sidebarAttachments.keys.first)
+        #expect(stack.sidebarViews[id] != nil)
+
+        // Delete the whole text, anchor included.
+        stack.storage.replaceCharacters(
+            in: NSRange(location: 0, length: stack.storage.length), with: "Nothing left."
+        )
+        stack.rebuildFloatingImageLayout()
+
+        #expect(stack.sidebarViews[id] == nil)
+        #expect(stack.sidebarAttachments.isEmpty)
+        #expect(stack.pageViews.allSatisfy { $0.textContainer?.exclusionPaths.isEmpty == true })
+    }
+
+    // MARK: - Milestone 3: callouts
+    //
+    // Callout chrome is drawn by the shared CalloutLayoutManager, which the
+    // stack builds with `pageLayout` nil — the printer's configuration, where
+    // each container is already exactly one page. So a callout should be bounded
+    // to its page for free, with no page-grouping logic.
+
+    @Test func theStackUsesThePrinterCalloutConfiguration() {
+        let stack = PageStackView()
+        // nil means "each container is one page", so drawBackground restricts
+        // each box to the container being drawn instead of grouping by Y.
+        #expect(stack.sharedLayoutManager.pageLayout == nil)
+    }
+
+    @Test func aCalloutSpanningAPageBreakStaysLaidOutOnBothPages() throws {
+        let stack = PageStackView()
+        let text = NSMutableAttributedString(attributedString: Self.filler(paragraphs: 200))
+        stack.setAttributedString(text)
+
+        // Find a paragraph range straddling the first page break and mark it.
+        let firstPage = Self.characterRange(ofPage: 0, in: stack)
+        let boundary = NSMaxRange(firstPage)
+        let calloutRange = NSRange(location: max(0, boundary - 150), length: 300)
+        stack.storage.addAttribute(
+            .inklingCallout, value: CalloutKind.note.rawValue, range: calloutRange
+        )
+        stack.rebuildPages()
+
+        // The callout's glyphs must still be distributed across both pages —
+        // marking a callout must not disturb pagination or drop text.
+        let manager = stack.sharedLayoutManager
+        let glyphs = manager.glyphRange(forCharacterRange: calloutRange, actualCharacterRange: nil)
+        let page0 = manager.glyphRange(for: try #require(stack.pageViews[0].textContainer))
+        let page1 = manager.glyphRange(for: try #require(stack.pageViews[1].textContainer))
+        #expect(NSIntersectionRange(glyphs, page0).length > 0)
+        #expect(NSIntersectionRange(glyphs, page1).length > 0)
+
+        var laidOut = 0
+        for view in stack.pageViews {
+            laidOut += manager.glyphRange(for: view.textContainer!).length
+        }
+        #expect(laidOut == manager.numberOfGlyphs)
+    }
+
     @Test func editingOnAnEarlyPageRepaginatesLaterPages() {
         let stack = Self.makeStack(paragraphs: 200)
         let before = Self.characterRange(ofPage: 1, in: stack)
