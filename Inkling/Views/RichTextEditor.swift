@@ -39,6 +39,12 @@ struct RichTextEditor: NSViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeNSView(context: Context) -> NSScrollView {
+        // Experimental per-page-container editor, opt-in from Project Settings.
+        // Text-only for now: images, sidebars, and callouts don't render yet.
+        if presentation == .paged, PageStackView.isEnabled {
+            return makePerPageEditor(context: context)
+        }
+
         let scrollView: NSScrollView
         switch presentation {
         case .continuous:
@@ -82,7 +88,34 @@ struct RichTextEditor: NSViewRepresentable {
         return scrollView
     }
 
+    /// Builds the experimental per-page-container editor. Deliberately separate
+    /// from the main path so the shipping editor is unaffected and this can be
+    /// deleted wholesale if the rearchitecture is abandoned.
+    private func makePerPageEditor(context: Context) -> NSScrollView {
+        let scrollView = PageStackView.makeScrollView()
+        guard let stack = scrollView.documentView as? PageStackView else { return scrollView }
+
+        let bodyFont = TextStyle.body.font(familyName: fontFamilyName)
+        stack.pageTypingAttributes = [
+            .font: bodyFont,
+            .paragraphStyle: RichTextCodec.defaultParagraphStyle,
+        ]
+        stack.pageDelegate = context.coordinator
+        stack.pageCountDidChange = { [weak coordinator = context.coordinator] count in
+            coordinator?.parent.onPageCountChange?(count)
+        }
+
+        context.coordinator.loadStack(data, documentID: documentID, into: stack)
+        controller?.textView = stack.pageViews.first
+        return scrollView
+    }
+
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        if let stack = scrollView.documentView as? PageStackView {
+            context.coordinator.parent = self
+            context.coordinator.loadStackIfChanged(data, documentID: documentID, into: stack)
+            return
+        }
         guard let textView = scrollView.documentView as? NSTextView else { return }
         // Refresh the coordinator's reference so edits write to the *current*
         // chapter's binding (the struct is recreated on every SwiftUI update).
@@ -132,6 +165,27 @@ struct RichTextEditor: NSViewRepresentable {
             load(data, documentID: documentID, into: textView)
         }
 
+        // MARK: - Experimental per-page editor
+
+        func loadStack(_ data: Data?, documentID: NSManagedObjectID, into stack: PageStackView) {
+            isLoading = true
+            defer { isLoading = false }
+
+            stack.setAttributedString(RichTextCodec.decode(data) ?? NSAttributedString())
+            loadedID = documentID
+            loadedData = data
+            parent.controller?.selectionDidChange()
+        }
+
+        func loadStackIfChanged(
+            _ data: Data?,
+            documentID: NSManagedObjectID,
+            into stack: PageStackView
+        ) {
+            guard loadedID != documentID || data != loadedData else { return }
+            loadStack(data, documentID: documentID, into: stack)
+        }
+
         func textDidChange(_ notification: Notification) {
             guard !isLoading, let textView = notification.object as? NSTextView else { return }
             (textView as? PagedTextView)?.prepareFloatingImages()
@@ -145,6 +199,13 @@ struct RichTextEditor: NSViewRepresentable {
 
         func textViewDidChangeSelection(_ notification: Notification) {
             guard !isLoading else { return }
+            // In the per-page editor the caret moves between page views, so
+            // point the formatting toolbar at whichever page now holds it.
+            // (Any page view would edit the same shared storage, but the
+            // toolbar reads the selection off the view it's given.)
+            if let page = notification.object as? PageTextView {
+                parent.controller?.textView = page
+            }
             parent.controller?.selectionDidChange()
             if let textView = notification.object as? NSTextView {
                 parent.onCaretChange?(textView.selectedRange().location)

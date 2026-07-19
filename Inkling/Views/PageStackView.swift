@@ -101,6 +101,14 @@ final class PageStackView: NSView, NSTextStorageDelegate {
     /// doesn't sit flush against the scroll view. Matches `PagedTextView`.
     static let canvasPadding: CGFloat = 16
 
+    /// Opt-in switch for the experimental per-page editor, surfaced in Project
+    /// Settings. Off means the shipping single-container editor is used.
+    static let defaultsKey = "InklingUsePerPageEditor"
+
+    static var isEnabled: Bool {
+        UserDefaults.standard.bool(forKey: defaultsKey)
+    }
+
     let pageLayout: PagedEditorLayout
     let storage: NSTextStorage
     let sharedLayoutManager: CalloutLayoutManager
@@ -110,6 +118,18 @@ final class PageStackView: NSView, NSTextStorageDelegate {
     /// Reports a changed page count (for the editor footer), mirroring
     /// `PagedTextView.pageCountDidChange`.
     var pageCountDidChange: ((Int) -> Void)?
+
+    /// Delegate handed to every page view, including pages added later by
+    /// repagination — a page that appears mid-typing must report its edits like
+    /// any other.
+    weak var pageDelegate: (any NSTextViewDelegate)? {
+        didSet { pageViews.forEach { $0.delegate = pageDelegate } }
+    }
+
+    /// Typing attributes applied to every page view, present and future.
+    var pageTypingAttributes: [NSAttributedString.Key: Any] = [:] {
+        didSet { pageViews.forEach { $0.typingAttributes = pageTypingAttributes } }
+    }
 
     /// Guards against `rebuildPages` re-entering itself by way of the layout it
     /// triggers.
@@ -236,6 +256,11 @@ final class PageStackView: NSView, NSTextStorageDelegate {
 
         let view = PageTextView(pageIndex: index, container: container, layout: pageLayout)
         view.frame = paperFrame(forPage: index)
+        view.delegate = pageDelegate
+        if !pageTypingAttributes.isEmpty { view.typingAttributes = pageTypingAttributes }
+        // Paper is white in every appearance, so the ink must be explicitly dark.
+        view.textColor = .black
+        view.insertionPointColor = .black
         addSubview(view)
         pageViews.append(view)
     }

@@ -20,6 +20,7 @@ struct ProjectSettingsView: View {
     @FetchRequest(sortDescriptors: []) private var chapters: FetchedResults<Chapter>
     @FetchRequest(sortDescriptors: []) private var shelfEntries: FetchedResults<ShelfEntry>
     @State private var fontPanelController = FontPanelController()
+    @AppStorage(PageStackView.defaultsKey) private var usePerPageEditor = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -52,6 +53,15 @@ struct ProjectSettingsView: View {
             }
 
             Text("Applies to the whole project — every chapter's body and notes, and everything on the Shelf, are restyled immediately, keeping their existing sizes and bold/italic formatting.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Divider()
+
+            Toggle("Per-Page Editor (Experimental)", isOn: $usePerPageEditor)
+
+            Text("Lays each page out in its own text container instead of faking page breaks in one long one. Experimental and text-only: images, sidebars, and callouts do not render yet, so keep it off for real writing. Reopen the project after changing this.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
