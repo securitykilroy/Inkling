@@ -93,17 +93,31 @@ final class PageTextView: NSTextView {
     }
 
     /// Floating images anchored to this page, in container-local coordinates
-    /// (origin = the text column's top-left).
-    var floatingImages: [(rect: NSRect, image: NSImage)] = [] {
+    /// (origin = the text column's top-left). `location` is the attachment's
+    /// character index, so a hit test can map back to the attachment.
+    var floatingImages: [(location: Int, rect: NSRect, image: NSImage)] = [] {
         didSet { needsDisplay = true }
     }
 
+    /// This page view's rect for a floating image, in view coordinates. The view
+    /// is the whole sheet of paper, so view coordinates *are* paper coordinates.
+    func viewRect(forFloating rect: NSRect) -> NSRect {
+        let origin = textContainerOrigin
+        return rect.offsetBy(dx: origin.x, dy: origin.y)
+    }
+
+    /// The floating image under `point` (view coordinates), topmost first.
+    func floatingImage(at point: NSPoint) -> (location: Int, rect: NSRect, image: NSImage)? {
+        floatingImages.reversed().first { viewRect(forFloating: $0.rect).contains(point) }
+    }
+
+    private var stack: PageStackView? { superview as? PageStackView }
+
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        let origin = textContainerOrigin
         for item in floatingImages {
             item.image.draw(
-                in: item.rect.offsetBy(dx: origin.x, dy: origin.y),
+                in: viewRect(forFloating: item.rect),
                 from: .zero,
                 operation: .sourceOver,
                 fraction: 1,
@@ -111,6 +125,29 @@ final class PageTextView: NSTextView {
                 hints: nil
             )
         }
+        stack?.drawSnapGuide(in: self)
+    }
+
+    // MARK: - Image dragging
+    //
+    // The drag session lives on the stack, not here, because a drag can carry an
+    // image onto a different page — and therefore into a different view — partway
+    // through. The stack owns the coordinate conversion.
+
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        if stack?.beginImageDrag(at: point, in: self) == true { return }
+        super.mouseDown(with: event)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        if stack?.continueImageDrag(with: event) == true { return }
+        super.mouseDragged(with: event)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        if stack?.endImageDrag() == true { return }
+        super.mouseUp(with: event)
     }
 }
 
@@ -267,6 +304,12 @@ final class PageStackView: NSView, NSTextStorageDelegate {
     /// floating image is parked there. Set by `rebuildFloatingImageLayout`.
     var minimumPageCount = 1
 
+    /// The in-flight image move, if the user is dragging one.
+    var moveSession: ImageMoveSession?
+    /// The snap guide to draw, and the page to draw it on, during a drag.
+    var activeSnapGuide: HorizontalGuide?
+    var activeSnapPage: Int?
+
     /// Upper bound on pages, so a pathological layout can't hang the app.
     private static let maxPages = 5_000
 
@@ -400,6 +443,7 @@ extension PageStackView {
     /// Where one floating image sits: which page, and its rect in that page's
     /// container coordinates.
     struct FloatingPlacement {
+        let location: Int
         let page: Int
         let contentRect: NSRect
         let image: NSImage
@@ -461,7 +505,7 @@ extension PageStackView {
         }
 
         var exclusions: [Int: [NSBezierPath]] = [:]
-        var drawables: [Int: [(rect: NSRect, image: NSImage)]] = [:]
+        var drawables: [Int: [(location: Int, rect: NSRect, image: NSImage)]] = [:]
         for placement in placements {
             if let rect = FloatingImagePlacement.exclusionRect(
                 contentRect: placement.contentRect,
@@ -470,7 +514,9 @@ extension PageStackView {
             ) {
                 exclusions[placement.page, default: []].append(NSBezierPath(rect: rect))
             }
-            drawables[placement.page, default: []].append((placement.contentRect, placement.image))
+            drawables[placement.page, default: []].append(
+                (placement.location, placement.contentRect, placement.image)
+            )
         }
 
         for (index, view) in pageViews.enumerated() {
@@ -501,6 +547,7 @@ extension PageStackView {
                 // The user placed this image at a fixed spot on its page. The
                 // paper origin converts straight to container coordinates.
                 placements.append(FloatingPlacement(
+                    location: range.location,
                     page: position.page,
                     contentRect: FloatingImagePlacement.contentRect(
                         origin: position.origin,
@@ -549,6 +596,7 @@ extension PageStackView {
         let y = fits ? lineRect.minY : 0
 
         return FloatingPlacement(
+            location: location,
             page: targetPage,
             contentRect: NSRect(
                 x: 0,
@@ -558,6 +606,145 @@ extension PageStackView {
             ),
             image: image
         )
+    }
+
+    // MARK: - Dragging an image between pages
+    //
+    // The single-container editor had to convert a dragged point through
+    // `PagedEditorLayout.position(forDisplayOrigin:size:)`, inferring the page
+    // from a Y offset in a synthetic stacked space. Here the page is simply the
+    // page view the cursor is over, and because each page view *is* its sheet of
+    // paper, view coordinates are already paper coordinates. Dragging an image
+    // onto another page is the same code path as moving it within one.
+
+    struct ImageMoveSession {
+        let location: Int
+        /// Where inside the image the user grabbed, so it doesn't jump to the
+        /// cursor on the first drag event.
+        let grabOffset: NSSize
+        let size: NSSize
+        let startPosition: FloatingImagePosition?
+    }
+
+    private static let snapThreshold: CGFloat = 10
+
+    /// Starts a move if `point` (in `pageView`'s coordinates) is on an image.
+    func beginImageDrag(at point: NSPoint, in pageView: PageTextView) -> Bool {
+        guard let hit = pageView.floatingImage(at: point),
+              let attachment = floatingAttachment(at: hit.location)
+        else { return false }
+
+        let rect = pageView.viewRect(forFloating: hit.rect)
+        moveSession = ImageMoveSession(
+            location: hit.location,
+            grabOffset: NSSize(width: point.x - rect.minX, height: point.y - rect.minY),
+            size: attachment.displaySize,
+            startPosition: attachment.position
+        )
+        window?.makeFirstResponder(pageView)
+        return true
+    }
+
+    /// Moves the dragged image to follow the cursor, across pages if needed.
+    func continueImageDrag(with event: NSEvent) -> Bool {
+        guard let session = moveSession,
+              let attachment = floatingAttachment(at: session.location)
+        else { return false }
+
+        autoscroll(with: event)
+        let stackPoint = convert(event.locationInWindow, from: nil)
+
+        // Whichever page the cursor is over is the image's new page.
+        let page = min(max(0, targetPage(forStackY: stackPoint.y)), max(0, pageCount - 1))
+        let paper = paperFrame(forPage: page)
+        var origin = CGPoint(
+            x: stackPoint.x - paper.minX - session.grabOffset.width,
+            y: stackPoint.y - paper.minY - session.grabOffset.height
+        )
+
+        let snap = FloatingImagePlacement.horizontalSnap(
+            originX: origin.x,
+            imageWidth: session.size.width,
+            leftMargin: pageLayout.leftMargin,
+            contentWidth: pageLayout.contentWidth,
+            threshold: Self.snapThreshold
+        )
+        origin.x = snap.x
+        activeSnapGuide = snap.guide
+        activeSnapPage = page
+
+        attachment.position = FloatingImagePosition(
+            page: page,
+            origin: FloatingImagePlacement.clampedOrigin(
+                origin, imageSize: session.size, paperSize: pageLayout.paperSize
+            )
+        )
+        rebuildFloatingImageLayout()
+        return true
+    }
+
+    /// Commits the move, with undo, if the image actually moved. A plain click
+    /// that merely lands on an image must not dirty the document.
+    func endImageDrag() -> Bool {
+        guard let session = moveSession else { return false }
+        moveSession = nil
+        activeSnapGuide = nil
+        activeSnapPage = nil
+        needsDisplay = true
+
+        guard let attachment = floatingAttachment(at: session.location),
+              attachment.position != session.startPosition
+        else { return true }
+
+        setFloatingPosition(attachment.position, from: session.startPosition, at: session.location)
+        return true
+    }
+
+    private func setFloatingPosition(
+        _ new: FloatingImagePosition?,
+        from old: FloatingImagePosition?,
+        at location: Int
+    ) {
+        guard let attachment = floatingAttachment(at: location) else { return }
+        attachment.position = new
+        undoManager?.registerUndo(withTarget: self) { stack in
+            stack.setFloatingPosition(old, from: new, at: location)
+        }
+        undoManager?.setActionName("Move Image")
+        rebuildFloatingImageLayout()
+        // Position lives on the attachment, not in the character stream, so no
+        // storage edit fires. Tell the delegate directly or the move never gets
+        // encoded into the chapter's bodyData.
+        pageViews.first?.didChangeText()
+    }
+
+    /// The page whose paper (or the gap below it) contains `y`.
+    func targetPage(forStackY y: CGFloat) -> Int {
+        max(0, Int(floor(max(0, y) / pageLayout.pageStride)))
+    }
+
+    func floatingAttachment(at location: Int) -> FloatingImageAttachment? {
+        guard location >= 0, location < storage.length else { return nil }
+        return storage.attribute(
+            .attachment, at: location, effectiveRange: nil
+        ) as? FloatingImageAttachment
+    }
+
+    /// Draws the vertical snap guide on the page currently being dragged over.
+    func drawSnapGuide(in pageView: PageTextView) {
+        guard let guide = activeSnapGuide, activeSnapPage == pageView.pageIndex else { return }
+        let x: CGFloat
+        switch guide {
+        case .left: x = pageLayout.leftMargin
+        case .center: x = pageLayout.leftMargin + pageLayout.contentWidth / 2
+        case .right: x = pageLayout.leftMargin + pageLayout.contentWidth
+        }
+        NSColor.systemBlue.withAlphaComponent(0.7).setStroke()
+        let path = NSBezierPath()
+        path.move(to: NSPoint(x: x, y: pageLayout.topMargin))
+        path.line(to: NSPoint(x: x, y: pageLayout.paperSize.height - pageLayout.bottomMargin))
+        path.lineWidth = 1
+        path.stroke()
     }
 
     static func displaySize(of attachment: NSTextAttachment) -> NSSize {

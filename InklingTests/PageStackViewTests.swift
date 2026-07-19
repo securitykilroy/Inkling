@@ -594,6 +594,179 @@ struct PageStackViewTests {
         #expect(stack.pageViews[3].floatingImages.count == 1)
     }
 
+    // MARK: - Image dragging, including across pages
+
+    /// Drives a real image drag: press on the image, move to a point in stack
+    /// coordinates, release. Returns the image's committed position.
+    @discardableResult
+    private static func dragImage(
+        in stack: PageStackView,
+        grabbingOnPage page: Int,
+        to stackPoint: NSPoint
+    ) -> FloatingImagePosition? {
+        // Hosted directly in the window, with no clip view on purpose: the drag
+        // path calls `autoscroll(with:)` before converting the event point (as
+        // the shipping editor does), so inside a scroll view a synthetic drag to
+        // an off-screen page scrolls the document and shifts the coordinates out
+        // from under the very conversion being tested. Without a clip view
+        // autoscroll is a no-op, which isolates page targeting.
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 900, height: 1100),
+            styleMask: [.titled], backing: .buffered, defer: false
+        )
+        window.contentView = stack
+
+        let pageView = stack.pageViews[page]
+        guard let hit = pageView.floatingImages.first else { return nil }
+        // Press in the middle of the image.
+        let grabPoint = NSPoint(
+            x: pageView.viewRect(forFloating: hit.rect).midX,
+            y: pageView.viewRect(forFloating: hit.rect).midY
+        )
+        #expect(stack.beginImageDrag(at: grabPoint, in: pageView))
+
+        let event = NSEvent.mouseEvent(
+            with: .leftMouseDragged,
+            location: stack.convert(stackPoint, to: nil),
+            modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window.windowNumber,
+            context: nil, eventNumber: 0, clickCount: 1, pressure: 1
+        )!
+        #expect(stack.continueImageDrag(with: event))
+        #expect(stack.endImageDrag())
+
+        return stack.floatingAttachment(at: hit.location)?.position
+    }
+
+    @Test func draggingAnImageOntoALaterPageMovesItToThatPage() throws {
+        let layout = PagedEditorLayout.letter
+        let stack = Self.stackWithImage(
+            paragraphs: 200,
+            at: 40,
+            position: FloatingImagePosition(
+                page: 0, origin: CGPoint(x: layout.leftMargin, y: layout.topMargin)
+            )
+        )
+        #expect(stack.pageCount > 2)
+
+        // Drop it in the middle of page 2's paper.
+        let target = stack.paperFrame(forPage: 2)
+        let position = try #require(Self.dragImage(
+            in: stack,
+            grabbingOnPage: 0,
+            to: NSPoint(x: target.midX, y: target.midY)
+        ))
+
+        #expect(position.page == 2)
+        // ...and the exclusion followed it: page 0 no longer excludes, page 2 does.
+        #expect(stack.pageViews[0].textContainer?.exclusionPaths.isEmpty == true)
+        #expect(stack.pageViews[2].textContainer?.exclusionPaths.count == 1)
+        #expect(stack.pageViews[2].floatingImages.count == 1)
+        #expect(stack.pageViews[0].floatingImages.isEmpty)
+    }
+
+    @Test func draggingAnImageBackToAnEarlierPageMovesItBack() throws {
+        let layout = PagedEditorLayout.letter
+        let stack = Self.stackWithImage(
+            paragraphs: 200,
+            at: 40,
+            position: FloatingImagePosition(
+                page: 2, origin: CGPoint(x: layout.leftMargin, y: layout.topMargin)
+            )
+        )
+
+        let target = stack.paperFrame(forPage: 0)
+        let position = try #require(Self.dragImage(
+            in: stack,
+            grabbingOnPage: 2,
+            to: NSPoint(x: target.midX, y: target.midY)
+        ))
+
+        #expect(position.page == 0)
+        #expect(stack.pageViews[0].floatingImages.count == 1)
+    }
+
+    @Test func aDraggedImageIsClampedInsideThePaper() throws {
+        let layout = PagedEditorLayout.letter
+        let size = NSSize(width: 200, height: 150)
+        let stack = Self.stackWithImage(
+            paragraphs: 200,
+            at: 40,
+            size: size,
+            position: FloatingImagePosition(
+                page: 0, origin: CGPoint(x: layout.leftMargin, y: layout.topMargin)
+            )
+        )
+
+        // Aim well past the bottom-right corner of page 1's paper.
+        let paper = stack.paperFrame(forPage: 1)
+        let position = try #require(Self.dragImage(
+            in: stack,
+            grabbingOnPage: 0,
+            to: NSPoint(x: paper.maxX + 500, y: paper.maxY - 5)
+        ))
+
+        #expect(position.origin.x <= layout.paperSize.width - size.width + 0.5)
+        #expect(position.origin.y <= layout.paperSize.height - size.height + 0.5)
+        #expect(position.origin.x >= -0.5)
+        #expect(position.origin.y >= -0.5)
+    }
+
+    @Test func draggingAnImageNearTheColumnEdgeSnapsToIt() throws {
+        let layout = PagedEditorLayout.letter
+        let stack = Self.stackWithImage(
+            paragraphs: 200,
+            at: 40,
+            position: FloatingImagePosition(
+                page: 0, origin: CGPoint(x: 300, y: layout.topMargin)
+            )
+        )
+
+        // Aim a few points off the left content edge — inside the snap threshold.
+        let paper = stack.paperFrame(forPage: 0)
+        let imageWidth: CGFloat = 200
+        let position = try #require(Self.dragImage(
+            in: stack,
+            grabbingOnPage: 0,
+            to: NSPoint(
+                x: paper.minX + layout.leftMargin + 4 + imageWidth / 2,
+                y: paper.minY + 300
+            )
+        ))
+
+        #expect(abs(position.origin.x - layout.leftMargin) < 0.5)
+    }
+
+    @Test func aClickOnAnImageWithoutMovingDoesNotChangeItsPosition() {
+        let layout = PagedEditorLayout.letter
+        let start = FloatingImagePosition(
+            page: 0, origin: CGPoint(x: layout.leftMargin, y: layout.topMargin)
+        )
+        let stack = Self.stackWithImage(paragraphs: 200, at: 40, position: start)
+
+        let pageView = stack.pageViews[0]
+        let hit = pageView.floatingImages.first!
+        let rect = pageView.viewRect(forFloating: hit.rect)
+        #expect(stack.beginImageDrag(at: NSPoint(x: rect.midX, y: rect.midY), in: pageView))
+        #expect(stack.endImageDrag())
+
+        #expect(stack.floatingAttachment(at: hit.location)?.position == start)
+    }
+
+    @Test func pressingOffAnyImageDoesNotStartADrag() {
+        let stack = Self.stackWithImage(paragraphs: 200, at: 40)
+        let pageView = stack.pageViews[0]
+
+        // Bottom-right of the page, well away from a left-anchored image.
+        let corner = NSPoint(
+            x: pageView.bounds.maxX - 20,
+            y: pageView.bounds.maxY - 20
+        )
+        #expect(stack.beginImageDrag(at: corner, in: pageView) == false)
+        #expect(stack.moveSession == nil)
+    }
+
     @Test func editingOnAnEarlyPageRepaginatesLaterPages() {
         let stack = Self.makeStack(paragraphs: 200)
         let before = Self.characterRange(ofPage: 1, in: stack)
