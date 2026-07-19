@@ -23,6 +23,9 @@ struct ChapterDetailView: View {
     @ObservedObject var project: Project
     @ObservedObject var statistics: StatisticsViewModel
     @ObservedObject var navigator: OutlineNavigator
+    /// Reports the caret's character offset in the body as it moves, so the
+    /// document can remember this chapter + caret for reopening.
+    var onCaretChange: (Int) -> Void = { _ in }
     @StateObject private var controller = RichTextController()
     @State private var laidOutPageCount = 1
     @AppStorage("showSidePanel") private var showSidePanel = true
@@ -69,7 +72,8 @@ struct ChapterDetailView: View {
                     controller: controller,
                     presentation: .paged,
                     onTextChange: { statistics.update(chapter, plainText: $0) },
-                    onPageCountChange: { laidOutPageCount = $0 },
+                    onPageCountChange: { laidOutPageCount = $0; statistics.updatePageCount(chapter, pages: $0) },
+                    onCaretChange: onCaretChange,
                     fontFamilyName: project.bodyFontFamily,
                     isTypewriterScrollingEnabled: typewriterScrolling
                 )

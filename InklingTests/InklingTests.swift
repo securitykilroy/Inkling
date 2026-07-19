@@ -83,6 +83,74 @@ struct InklingTests {
         #expect(!font.fontDescriptor.symbolicTraits.contains(.bold))
     }
 
+    /// A short body fits on a single real editor page — where the old
+    /// 250-words-per-page estimate would have rounded up to 2.
+    @Test @MainActor func realPageCountFitsAShortChapterOnOnePage() {
+        let body = NSAttributedString(
+            string: String(repeating: "word ", count: 300),
+            attributes: [.font: NSFont.systemFont(ofSize: 14)]
+        )
+        let data = body.rtf(from: NSRange(location: 0, length: body.length), documentAttributes: [:])
+
+        #expect(PagedTextView.pageCount(forRTF: data) == 1)
+    }
+
+    /// An empty (or missing) chapter still occupies its own page, matching what
+    /// the editor footer shows for an empty chapter.
+    @Test @MainActor func realPageCountIsOneForEmptyChapter() {
+        #expect(PagedTextView.pageCount(forRTF: nil) == 1)
+    }
+
+    /// A long body spills onto multiple real pages, and the count matches an
+    /// on-screen editor laying out the same text.
+    @Test @MainActor func realPageCountSpillsLongChapterAcrossPages() throws {
+        let body = NSAttributedString(
+            string: String(repeating: "A comfortably long manuscript line that wraps across the page. ", count: 400),
+            attributes: [.font: NSFont.systemFont(ofSize: 14)]
+        )
+        let data = body.rtf(from: NSRange(location: 0, length: body.length), documentAttributes: [:])
+
+        let helperCount = PagedTextView.pageCount(forRTF: data)
+        #expect(helperCount > 1)
+
+        let scrollView = PagedTextView.makePagedScrollView()
+        let textView = try #require(scrollView.documentView as? PagedTextView)
+        textView.textStorage?.setAttributedString(body)
+        textView.updatePageLayout()
+        #expect(helperCount == textView.pageCount)
+    }
+
+    /// The sidebar (real editor layout) and print (ManuscriptPrintView) share
+    /// paper size, 1" margins, fonts and per-chapter page breaks, so their page
+    /// counts should agree to within about a page per chapter — not the big
+    /// gap the old word-estimate produced. Prints both totals for the record.
+    @Test @MainActor func editorAndPrintPageCountsAgreeWithinAPagePerChapter() {
+        // Letter minus 1" margins on every side — exactly what ManuscriptPrinter
+        // hands ManuscriptPrintView, and the content band PagedEditorLayout uses.
+        let printPageSize = NSSize(width: 612 - 144, height: 792 - 144)
+
+        let chapterBodies = (0..<8).map { index in
+            NSAttributedString(
+                string: String(repeating: "A comfortably long manuscript line that wraps across the printable page. ", count: 90 + index * 15),
+                attributes: [.font: NSFont.systemFont(ofSize: 14)]
+            )
+        }
+        let datas = chapterBodies.map {
+            $0.rtf(from: NSRange(location: 0, length: $0.length), documentAttributes: [:])
+        }
+
+        let editorTotal = datas.reduce(0) { $0 + PagedTextView.pageCount(forRTF: $1) }
+
+        let printView = ManuscriptPrintView(
+            chapters: datas.enumerated().map { PrintableChapter(title: "Ch \($0.offset)", bodyData: $0.element) },
+            pageSize: printPageSize
+        )
+        let printTotal = printView.pageCount
+
+        #expect(abs(editorTotal - printTotal) <= datas.count,
+                "editor=\(editorTotal) print=\(printTotal) chapters=\(datas.count)")
+    }
+
     @Test @MainActor func typewriterScrollingHoldsTheCaretAtAFixedFractionOfTheViewport() throws {
         let scrollView = PagedTextView.makePagedScrollView()
         let textView = try #require(scrollView.documentView as? PagedTextView)
@@ -714,12 +782,14 @@ struct InklingTests {
         #expect(inlineSize.height <= 1)
     }
 
-    @Test @MainActor func floatingImageAnchorsToStartOfContainingParagraph() throws {
+    @Test @MainActor func floatingImageAnchorsToItsOwnLineNotParagraphTop() throws {
         let scrollView = PagedTextView.makePagedScrollView()
         scrollView.frame = NSRect(x: 0, y: 0, width: 676, height: 792)
         scrollView.layoutSubtreeIfNeeded()
         let textView = try #require(scrollView.documentView as? PagedTextView)
-        let prefix = String(repeating: "Words before the pasted image ", count: 8)
+        // A long run of text, an image referenced partway through it, then more
+        // text — the shape of a Word-imported image sitting mid-paragraph.
+        let prefix = String(repeating: "Words before the referenced image ", count: 8)
         textView.string = prefix
         let imageLocation = (prefix as NSString).length
         let image = NSImage(size: NSSize(width: 120, height: 80), flipped: false) { rect in
@@ -753,8 +823,13 @@ struct InklingTests {
             effectiveRange: nil
         )
 
-        #expect(abs(imageRect.minY - firstLine.minY) < 0.5)
-        #expect(firstLine.minX > 120, "first paragraph line was not wrapped: \(firstLine)")
+        // The image is no longer lifted to the paragraph's first line: it floats
+        // beside its own line, which is well below the top of the text...
+        #expect(imageRect.minY > firstLine.minY + 1,
+                "image should sit below the first line, not be lifted to the paragraph top")
+        // ...and the first line (above the image) is full width, not wrapped.
+        #expect(firstLine.minX < 1,
+                "text above the image should not be wrapped around it: \(firstLine)")
     }
 
     @Test @MainActor func rebuildingFloatingLayoutDoesNotMoveImageDownward() throws {
@@ -968,6 +1043,25 @@ struct InklingTests {
         ))
     }
 
+    @Test func documentDropOnlyAcceptsInklingFiles() {
+        let inkling = URL(fileURLWithPath: "/tmp/My Project.inkling")
+        let uppercase = URL(fileURLWithPath: "/tmp/Archive.INKLING")
+        let text = URL(fileURLWithPath: "/tmp/notes.txt")
+
+        #expect(InklingDocumentDrop.isInklingDocumentURL(inkling))
+        #expect(InklingDocumentDrop.isInklingDocumentURL(uppercase))
+        #expect(!InklingDocumentDrop.isInklingDocumentURL(text))
+    }
+
+    @Test func documentDropDecodesFileURLPayload() throws {
+        let url = URL(fileURLWithPath: "/tmp/My Project.inkling")
+        let data = try #require(url.absoluteString.data(using: .utf8))
+
+        #expect(InklingDocumentDrop.fileURL(from: data) == url)
+        #expect(InklingDocumentDrop.fileURL(from: url as NSURL) == url)
+        #expect(InklingDocumentDrop.fileURL(from: "not a file URL") == nil)
+    }
+
     @Test func standardDocumentPrintCommandIsImplementedByInklingDocument() throws {
         let selector = NSSelectorFromString("printOperationWithSettings:error:")
         let inklingMethod = try #require(class_getInstanceMethod(InklingDocument.self, selector))
@@ -1098,6 +1192,279 @@ struct InklingTests {
 
     @Test func plainTextExportOfNoChaptersIsEmpty() {
         #expect(PlainTextExporter.plainText(for: []) == "")
+    }
+
+    // MARK: - Callouts
+
+    /// Applies a callout to the middle paragraph of a three-paragraph string and
+    /// returns the string plus that paragraph's range.
+    private func calloutBody(kind: CalloutKind) -> (body: NSMutableAttributedString, calloutRange: NSRange) {
+        let body = NSMutableAttributedString(string: "Intro paragraph.\nThe callout body.\nOutro paragraph.")
+        let middle = (body.string as NSString).paragraphRange(for: NSRange(location: 20, length: 0))
+        CalloutStyling.apply(kind, to: body, range: middle)
+        return (body, middle)
+    }
+
+    @Test func calloutKindLabelsAndColorsAreStable() {
+        #expect(CalloutKind.note.exportLabel == "NOTE")
+        #expect(CalloutKind.warning.exportLabel == "WARNING")
+        #expect(CalloutKind(rawValue: "warning") == .warning)
+        // The retired inline "sidebar" kind migrates to Note on load.
+        #expect(CalloutKind(storedRawValue: "sidebar") == .note)
+        #expect(CalloutKind(storedRawValue: "note") == .note)
+        // Hex "3B82F6" → (59, 130, 246)/255.
+        let note = CalloutKind.note.accentColor.usingColorSpace(.sRGB)
+        #expect(abs((note?.redComponent ?? 0) - 59.0 / 255) < 0.001)
+        #expect(abs((note?.blueComponent ?? 0) - 246.0 / 255) < 0.001)
+    }
+
+    @Test func applyingCalloutInsetsAndSpacesItsParagraph() {
+        let (body, range) = calloutBody(kind: .note)
+        let style = body.attribute(.paragraphStyle, at: range.location, effectiveRange: nil) as? NSParagraphStyle
+        #expect(style?.headIndent == CalloutStyling.sideInset)
+        #expect(style?.firstLineHeadIndent == CalloutStyling.sideInset)
+        #expect(style?.tailIndent == -CalloutStyling.sideInset)
+        // Single-paragraph callout reserves both the label/top room and the bottom room.
+        #expect(style?.paragraphSpacingBefore == CalloutStyling.topReserve)
+        #expect(style?.paragraphSpacing == CalloutStyling.bottomReserve)
+    }
+
+    @Test @MainActor func calloutRangeAndKindRoundTripThroughEncodeAndDecode() throws {
+        let (body, range) = calloutBody(kind: .warning)
+        let encoded = try #require(RichTextCodec.encode(body))
+        let decoded = try #require(RichTextCodec.decode(encoded))
+
+        let kind = decoded.attribute(.inklingCallout, at: range.location, effectiveRange: nil) as? String
+        #expect(kind == "warning")
+        // The reserved-padding style is re-derived on decode, not just the tag.
+        let style = decoded.attribute(.paragraphStyle, at: range.location, effectiveRange: nil) as? NSParagraphStyle
+        #expect(style?.headIndent == CalloutStyling.sideInset)
+        // Body text outside the callout carries no callout tag.
+        #expect(decoded.attribute(.inklingCallout, at: 0, effectiveRange: nil) == nil)
+    }
+
+    @Test @MainActor func bodyWithoutCalloutsEncodesNoCalloutSidecar() throws {
+        // A plain body still round-trips with no callout tags anywhere.
+        let body = NSAttributedString(string: "Just ordinary prose.")
+        let encoded = try #require(RichTextCodec.encode(body))
+        let decoded = try #require(RichTextCodec.decode(encoded))
+        #expect(decoded.attribute(.inklingCallout, at: 0, effectiveRange: nil) == nil)
+    }
+
+    @Test @MainActor func applyCalloutTagsTheSelectedParagraphAndTracksCurrentKind() throws {
+        let scrollView = PagedTextView.makePagedScrollView()
+        let textView = try #require(scrollView.documentView as? PagedTextView)
+        textView.textStorage?.setAttributedString(NSAttributedString(string: "First para.\nSecond para."))
+        let controller = RichTextController()
+        controller.textView = textView
+
+        textView.setSelectedRange(NSRange(location: 2, length: 0))  // inside the first paragraph
+        controller.applyCallout(.warning)
+
+        #expect(textView.textStorage?.attribute(.inklingCallout, at: 0, effectiveRange: nil) as? String == "warning")
+        #expect(controller.currentCallout == .warning)
+        // The second paragraph is untouched.
+        #expect(textView.textStorage?.attribute(.inklingCallout, at: 15, effectiveRange: nil) == nil)
+
+        controller.removeCallout()
+        #expect(textView.textStorage?.attribute(.inklingCallout, at: 0, effectiveRange: nil) == nil)
+        #expect(controller.currentCallout == nil)
+    }
+
+    @Test @MainActor func plainTextExportWrapsCalloutsInLabeledMarkers() throws {
+        let (body, _) = calloutBody(kind: .note)
+        let data = try #require(RichTextCodec.encode(body))
+        let text = PlainTextExporter.plainText(for: [PrintableChapter(title: "Ch", bodyData: data)])
+
+        #expect(text == """
+        Ch
+
+        Intro paragraph.
+
+        [NOTE]
+        The callout body.
+        [/NOTE]
+
+        Outro paragraph.
+
+        """)
+    }
+
+    @Test @MainActor func wordExportGivesCalloutsABorderedStyleAndLabel() throws {
+        let (body, _) = calloutBody(kind: .warning)
+        let data = try #require(RichTextCodec.encode(body))
+        let docx = try WordDocumentExporter.docxData(for: PrintableChapter(title: "Ch", bodyData: data))
+        let reader = try MinimalZipReader(data: docx)
+        let documentXML = try #require(String(data: reader.contents(of: "word/document.xml"), encoding: .utf8))
+        let stylesXML = try #require(String(data: reader.contents(of: "word/styles.xml"), encoding: .utf8))
+
+        #expect(documentXML.contains(#"<w:pStyle w:val="WarningCallout"/>"#))
+        #expect(documentXML.contains("WARNING — "))
+        #expect(stylesXML.contains(#"w:styleId="WarningCallout""#))
+        #expect(stylesXML.contains("<w:pBdr>"))
+        #expect(stylesXML.contains(CalloutKind.warning.accentHex))
+        #expect(stylesXML.contains(CalloutKind.warning.fillHex))
+    }
+
+    // MARK: - Floating image layout regressions (real-content failures)
+
+    /// Reproduces the "text vanishes after an image" failure: large images near
+    /// page boundaries in a multi-page chapter must not cause TextKit to drop the
+    /// remaining text. Asserts every glyph is laid out.
+    @Test @MainActor func largeImagesAcrossPagesDoNotDropText() throws {
+        let scrollView = PagedTextView.makePagedScrollView()
+        scrollView.frame = NSRect(x: 0, y: 0, width: 676, height: 792)
+        scrollView.layoutSubtreeIfNeeded()
+        let textView = try #require(scrollView.documentView as? PagedTextView)
+
+        let paragraph = String(repeating: "This is a sentence of body text that fills the lines. ", count: 30) + "\n"
+        let big = NSImage(size: NSSize(width: 300, height: 380), flipped: false) { rect in
+            NSColor.systemTeal.setFill(); rect.fill(); return true
+        }
+        let content = NSMutableAttributedString()
+        for index in 0..<8 {
+            content.append(NSAttributedString(string: paragraph, attributes: [.font: TextStyle.body.font]))
+            if index == 2 || index == 5 {
+                let attachment = NSTextAttachment()
+                attachment.image = big
+                attachment.bounds = NSRect(x: 0, y: 0, width: 300, height: 380)
+                content.append(NSAttributedString(attachment: attachment))
+                content.append(NSAttributedString(string: paragraph, attributes: [.font: TextStyle.body.font]))
+            }
+        }
+        textView.textStorage?.setAttributedString(content)
+        textView.frame = NSRect(x: 0, y: 0, width: 676, height: 792 * 8)
+        textView.prepareFloatingImages()
+        textView.updatePageLayout()
+
+        let layoutManager = try #require(textView.layoutManager)
+        let container = try #require(textView.textContainer)
+        layoutManager.ensureLayout(for: container)
+        let laid = layoutManager.glyphRange(for: container)
+        #expect(NSMaxRange(laid) == layoutManager.numberOfGlyphs,
+                "text dropped: only \(NSMaxRange(laid)) of \(layoutManager.numberOfGlyphs) glyphs laid out")
+    }
+
+    /// Reproduces the real "text vanishes" failure: text fills page 1, then a
+    /// tall image that can't fit in the remainder gets bumped to the top of page
+    /// 2 (a first-line image on a later page — the documented fragile case), then
+    /// more text follows. The trailing text must still lay out with real height,
+    /// not collapse into a degenerate zero-height line.
+    @Test @MainActor func imageBumpedToNextPageTopDoesNotDropTrailingText() throws {
+        let scrollView = PagedTextView.makePagedScrollView()
+        scrollView.frame = NSRect(x: 0, y: 0, width: 676, height: 792)
+        scrollView.layoutSubtreeIfNeeded()
+        let textView = try #require(scrollView.documentView as? PagedTextView)
+
+        let line = "This is a line of ordinary body text that fills most of the column width. "
+        // Roughly one page of text so the image lands low on page 1.
+        let pageish = String(repeating: line, count: 34) + "\n"
+        let trailing = "\n" + String(repeating: "Trailing sentence after the image. ", count: 20)
+
+        let tall = NSImage(size: NSSize(width: 240, height: 460), flipped: false) { rect in
+            NSColor.systemIndigo.setFill(); rect.fill(); return true
+        }
+        let attachment = NSTextAttachment()
+        attachment.image = tall
+        attachment.bounds = NSRect(x: 0, y: 0, width: 240, height: 460)
+
+        let content = NSMutableAttributedString(string: pageish, attributes: [.font: TextStyle.body.font])
+        let imageLocation = content.length
+        content.append(NSAttributedString(attachment: attachment))
+        content.append(NSAttributedString(string: trailing, attributes: [.font: TextStyle.body.font]))
+
+        textView.textStorage?.setAttributedString(content)
+        textView.prepareFloatingImages()
+        textView.updatePageLayout()
+
+        let lm = try #require(textView.layoutManager)
+        let imageRect = try #require(textView.imageAttachmentRect(for: NSRange(location: imageLocation, length: 1)))
+
+        // The last glyph of the trailing text must be laid out with a real line
+        // height and sit below the image — not collapsed to a degenerate line.
+        let total = lm.numberOfGlyphs
+        let lastLine = lm.lineFragmentRect(forGlyphAt: total - 1, effectiveRange: nil)
+        #expect(lastLine.height > 5,
+                "trailing text collapsed to a degenerate line (height \(lastLine.height)) — text vanished")
+        #expect(lastLine.minY > imageRect.minY,
+                "trailing text should lay out at/after the image, not above it")
+    }
+
+    // MARK: - Floating sidebars
+
+    /// A body with one floating sidebar anchored after "Body ".
+    private func sidebarBody(text: String = "Context note.", width: CGFloat = 180) -> Data? {
+        let content = RichTextCodec.encode(NSAttributedString(string: text))
+        let sidebar = SidebarAttachment(
+            contentData: content,
+            width: width,
+            position: FloatingImagePosition(page: 1, origin: CGPoint(x: 300, y: 200)),
+            contentHeight: 40
+        )
+        let body = NSMutableAttributedString(string: "Body ")
+        body.append(NSAttributedString(attachment: sidebar))
+        return RichTextCodec.encode(body)
+    }
+
+    @Test @MainActor func sidebarRoundTripsThroughEncodeAndDecode() throws {
+        let data = try #require(sidebarBody(text: "Historical context.", width: 200))
+        let decoded = try #require(RichTextCodec.decode(data))
+        let restored = try #require(
+            decoded.attribute(.attachment, at: "Body ".count, effectiveRange: nil) as? SidebarAttachment
+        )
+        #expect(restored.width == 200)
+        #expect(restored.position?.page == 1)
+        #expect(restored.position?.origin == CGPoint(x: 300, y: 200))
+        #expect(RichTextCodec.decode(restored.contentData)?.string == "Historical context.")
+    }
+
+    @Test @MainActor func sidebarStyleHeightGrowsWithContent() {
+        let one = SidebarStyle.boxHeight(forContentHeight: 20)
+        let taller = SidebarStyle.boxHeight(forContentHeight: 120)
+        #expect(taller > one)
+        // Room for header + padding is always reserved above the text.
+        #expect(one >= SidebarStyle.headerHeight + SidebarStyle.minContentHeight)
+    }
+
+    @Test @MainActor func plainTextExportWrapsSidebarContentInMarkers() throws {
+        let data = try #require(sidebarBody(text: "An aside."))
+        let text = PlainTextExporter.plainText(for: [PrintableChapter(title: "Ch", bodyData: data)])
+        #expect(text.contains("[SIDEBAR]"))
+        #expect(text.contains("An aside."))
+        #expect(text.contains("[/SIDEBAR]"))
+    }
+
+    @Test @MainActor func wordExportGivesSidebarABorderedStyleAndLabel() throws {
+        let data = try #require(sidebarBody(text: "An aside."))
+        let docx = try WordDocumentExporter.docxData(for: PrintableChapter(title: "Ch", bodyData: data))
+        let reader = try MinimalZipReader(data: docx)
+        let documentXML = try #require(String(data: reader.contents(of: "word/document.xml"), encoding: .utf8))
+        let stylesXML = try #require(String(data: reader.contents(of: "word/styles.xml"), encoding: .utf8))
+
+        #expect(documentXML.contains(#"<w:pStyle w:val="SidebarBox"/>"#))
+        #expect(documentXML.contains("SIDEBAR — "))
+        #expect(documentXML.contains(#"<w:t xml:space="preserve">An aside.</w:t>"#))
+        #expect(stylesXML.contains(#"w:styleId="SidebarBox""#))
+        #expect(stylesXML.contains(SidebarStyle.accentHex))
+    }
+
+    @Test @MainActor func insertingSidebarAddsAnEditableBox() throws {
+        let scrollView = PagedTextView.makePagedScrollView()
+        let textView = try #require(scrollView.documentView as? PagedTextView)
+        textView.textStorage?.setAttributedString(NSAttributedString(string: "The body text."))
+        textView.setSelectedRange(NSRange(location: 4, length: 0))
+
+        textView.insertSidebar()
+
+        var found: SidebarAttachment?
+        textView.textStorage?.enumerateAttribute(
+            .attachment, in: NSRange(location: 0, length: textView.textStorage?.length ?? 0)
+        ) { value, _, stop in
+            if let sidebar = value as? SidebarAttachment { found = sidebar; stop.pointee = true }
+        }
+        let sidebar = try #require(found)
+        #expect(sidebar.position != nil)
+        #expect(sidebar.width == SidebarStyle.defaultWidth)
     }
 
     // MARK: - Project metadata
@@ -2294,5 +2661,65 @@ private enum TestZipBuilder {
             UInt8((value >> 16) & 0xff),
             UInt8((value >> 24) & 0xff),
         ]
+    }
+}
+
+/// Serialized because every test swaps the shared `LastEditPositionStore.defaults`
+/// static; running them concurrently would let one test's suite clobber another's.
+@Suite(.serialized)
+struct LastEditPositionStoreTests {
+
+    /// Each test gets an isolated defaults suite so runs don't collide with the
+    /// real app's stored positions or with each other.
+    private func withIsolatedDefaults(_ body: (URL) -> Void) {
+        let suiteName = "LastEditPositionStoreTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        let previous = LastEditPositionStore.defaults
+        LastEditPositionStore.defaults = defaults
+        defer {
+            LastEditPositionStore.defaults = previous
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+        body(URL(fileURLWithPath: "/tmp/Some Project.inkling"))
+    }
+
+    @Test func returnsNilForNeverOpenedDocument() {
+        withIsolatedDefaults { url in
+            #expect(LastEditPositionStore.position(for: url) == nil)
+        }
+    }
+
+    @Test func roundTripsSavedPosition() {
+        withIsolatedDefaults { url in
+            let position = LastEditPosition(chapterID: UUID(), caret: 137)
+            LastEditPositionStore.save(position, for: url)
+            #expect(LastEditPositionStore.position(for: url) == position)
+        }
+    }
+
+    @Test func savingOverwritesTheEarlierPosition() {
+        withIsolatedDefaults { url in
+            LastEditPositionStore.save(LastEditPosition(chapterID: UUID(), caret: 5), for: url)
+            let latest = LastEditPosition(chapterID: UUID(), caret: 90)
+            LastEditPositionStore.save(latest, for: url)
+            #expect(LastEditPositionStore.position(for: url) == latest)
+        }
+    }
+
+    @Test func positionsAreKeyedPerDocument() {
+        withIsolatedDefaults { url in
+            let other = URL(fileURLWithPath: "/tmp/Another.inkling")
+            let position = LastEditPosition(chapterID: UUID(), caret: 12)
+            LastEditPositionStore.save(position, for: url)
+            #expect(LastEditPositionStore.position(for: other) == nil)
+        }
+    }
+
+    @Test func clearForgetsTheStoredPosition() {
+        withIsolatedDefaults { url in
+            LastEditPositionStore.save(LastEditPosition(chapterID: UUID(), caret: 3), for: url)
+            LastEditPositionStore.clear(for: url)
+            #expect(LastEditPositionStore.position(for: url) == nil)
+        }
     }
 }

@@ -63,7 +63,7 @@ struct ChapterSidebar: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
             .background(.bar)
-            .help("Estimated at \(TextStatistics.wordsPerPage) words per page; each chapter starts a new page.")
+            .help("Total pages across all chapters, matching the editor; each chapter starts a new page.")
         }
         .onDeleteCommand {
             if let selected = selection { delete([selected]) }

@@ -161,11 +161,17 @@ final class ManuscriptPrintView: NSView {
         let image: NSImage
     }
 
+    private struct PlacedSidebar {
+        let contentRect: NSRect
+        let content: NSAttributedString
+    }
+
     private struct PageLayout {
         let chapterIndex: Int
         let textContainer: NSTextContainer
         let glyphRange: NSRange
         var images: [PlacedImage] = []
+        var sidebars: [PlacedSidebar] = []
     }
 
     private let pageSize: NSSize
@@ -279,6 +285,7 @@ final class ManuscriptPrintView: NSView {
                 .attachment, in: NSRange(location: 0, length: baseText.length)
             ) { value, _, _ in
                 guard let attachment = value as? NSTextAttachment,
+                      !(attachment is SidebarAttachment),
                       let size = Self.displaySize(of: attachment)
                 else { return }
                 sizes[ObjectIdentifier(attachment)] = size
@@ -286,11 +293,13 @@ final class ManuscriptPrintView: NSView {
             }
 
             let explicitPlacements = floatingPlacementsWithSavedPosition(in: baseText, sizes: sizes)
+            let sidebarsByPage = sidebarPlacements(in: baseText)
 
             let discovery = layOutPages(
                 chapterIndex: chapterIndex,
                 text: baseText,
-                placements: Self.groupedByPage(explicitPlacements)
+                placements: Self.groupedByPage(explicitPlacements),
+                sidebars: sidebarsByPage
             )
             let discoveredPlacements = discoverUnplacedPlacements(
                 in: discovery.storage,
@@ -302,7 +311,8 @@ final class ManuscriptPrintView: NSView {
             let final = layOutPages(
                 chapterIndex: chapterIndex,
                 text: baseText,
-                placements: Self.groupedByPage(explicitPlacements + discoveredPlacements)
+                placements: Self.groupedByPage(explicitPlacements + discoveredPlacements),
+                sidebars: sidebarsByPage
             )
             layouts.append(ChapterLayout(textStorage: final.storage, layoutManager: final.layoutManager))
             pages.append(contentsOf: final.pages)
@@ -362,6 +372,33 @@ final class ManuscriptPrintView: NSView {
         return placements
     }
 
+    /// Collects each floating sidebar's page + content-relative rect and its
+    /// (forced-black) text, mirroring how positioned images are gathered.
+    private func sidebarPlacements(in text: NSAttributedString) -> [Int: [PlacedSidebar]] {
+        var byPage: [Int: [PlacedSidebar]] = [:]
+        text.enumerateAttribute(
+            .attachment, in: NSRange(location: 0, length: text.length)
+        ) { value, _, _ in
+            guard let sidebar = value as? SidebarAttachment, let position = sidebar.position else { return }
+            let contentRect = FloatingImagePlacement.contentRect(
+                origin: position.origin,
+                imageSize: sidebar.displaySize,
+                leftMargin: leftMargin,
+                topMargin: topMargin
+            )
+            let content = NSMutableAttributedString()
+            if let decoded = RichTextCodec.decode(sidebar.contentData) {
+                content.append(decoded)
+                content.addAttribute(.foregroundColor, value: NSColor.black,
+                                     range: NSRange(location: 0, length: content.length))
+            }
+            byPage[position.page, default: []].append(
+                PlacedSidebar(contentRect: contentRect, content: content)
+            )
+        }
+        return byPage
+    }
+
     /// Finds attachments *without* a saved position and locates each one's
     /// containing page and its paragraph's first line, mirroring the editor's
     /// auto-float anchor. An image that can't fit in what's left of its
@@ -377,6 +414,7 @@ final class ManuscriptPrintView: NSView {
         let fullRange = NSRange(location: 0, length: storage.length)
         storage.enumerateAttribute(.attachment, in: fullRange) { value, range, _ in
             guard let attachment = value as? NSTextAttachment,
+                  !(attachment is SidebarAttachment),
                   storage.attribute(.inklingFloatingImagePosition, at: range.location, effectiveRange: nil) == nil,
                   let size = sizes[ObjectIdentifier(attachment)],
                   let image = attachment.image
@@ -389,15 +427,10 @@ final class ManuscriptPrintView: NSView {
             guard let page = pages.firstIndex(where: { NSLocationInRange(glyphIndex, $0.glyphRange) })
             else { return }
 
-            let paragraphRange = (storage.string as NSString).paragraphRange(
-                for: NSRange(location: range.location, length: 0)
-            )
-            let paragraphGlyph = layoutManager.glyphRange(
-                forCharacterRange: NSRange(location: paragraphRange.location, length: 1),
-                actualCharacterRange: nil
-            )
-            guard paragraphGlyph.length > 0 else { return }
-            let lineRect = layoutManager.lineFragmentRect(forGlyphAt: paragraphGlyph.location, effectiveRange: nil)
+            // Float beside the image's own line (matching the editor), so an
+            // image referenced mid-paragraph lands beside that text rather than
+            // being lifted to the paragraph's top.
+            let lineRect = layoutManager.lineFragmentRect(forGlyphAt: glyphIndex, effectiveRange: nil)
 
             let fits = lineRect.minY + size.height <= pageSize.height
             let placedPage = fits ? page : page + 1
@@ -414,10 +447,13 @@ final class ManuscriptPrintView: NSView {
     private func layOutPages(
         chapterIndex: Int,
         text: NSAttributedString,
-        placements: [Int: [FloatingPlacement]]
+        placements: [Int: [FloatingPlacement]],
+        sidebars: [Int: [PlacedSidebar]] = [:]
     ) -> LayoutPass {
         let storage = NSTextStorage(attributedString: text)
-        let layoutManager = NSLayoutManager()
+        // A callout-aware layout manager (pageLayout nil: the print view draws
+        // one page per container, so each callout box is naturally page-bounded).
+        let layoutManager = CalloutLayoutManager()
         storage.addLayoutManager(layoutManager)
 
         var exclusions: [Int: [NSBezierPath]] = [:]
@@ -436,7 +472,19 @@ final class ManuscriptPrintView: NSView {
                 )
             }
         }
-        let maxImagePage = placements.keys.max() ?? -1
+        // Sidebars reserve the same kind of exclusion so body text wraps around them.
+        for (page, list) in sidebars {
+            for sidebar in list {
+                if let rect = FloatingImagePlacement.exclusionRect(
+                    contentRect: sidebar.contentRect,
+                    contentWidth: pageSize.width,
+                    gutter: 8
+                ) {
+                    exclusions[page, default: []].append(NSBezierPath(rect: rect))
+                }
+            }
+        }
+        let maxImagePage = max(placements.keys.max() ?? -1, sidebars.keys.max() ?? -1)
 
         var laidOutPages: [PageLayout] = []
         var laidOutGlyphs = 0
@@ -453,7 +501,8 @@ final class ManuscriptPrintView: NSView {
                 chapterIndex: chapterIndex,
                 textContainer: container,
                 glyphRange: range,
-                images: drawables[pageIndex] ?? []
+                images: drawables[pageIndex] ?? [],
+                sidebars: sidebars[pageIndex] ?? []
             ))
 
             let progressed = NSMaxRange(range) > laidOutGlyphs
@@ -507,6 +556,9 @@ final class ManuscriptPrintView: NSView {
                     hints: nil
                 )
             }
+            for sidebar in page.sidebars {
+                drawSidebar(sidebar, at: origin)
+            }
             NSGraphicsContext.restoreGraphicsState()
         }
     }
@@ -522,6 +574,39 @@ final class ManuscriptPrintView: NSView {
         let y = pageRect.minY + max(0, (pageRect.height - measured.height) / 2)
         let drawRect = NSRect(x: pageRect.minX, y: y, width: pageRect.width, height: measured.height)
         text.draw(with: drawRect, options: [.usesLineFragmentOrigin, .usesFontLeading])
+    }
+
+    /// Draws one floating sidebar box (fill, header, wrapped text, border) at its
+    /// placed rect. Mirrors `SidebarTextView.draw` so screen and paper match.
+    private func drawSidebar(_ sidebar: PlacedSidebar, at origin: NSPoint) {
+        let box = sidebar.contentRect.offsetBy(dx: origin.x, dy: origin.y)
+        let path = NSBezierPath(
+            roundedRect: box.insetBy(dx: SidebarStyle.borderWidth / 2, dy: SidebarStyle.borderWidth / 2),
+            xRadius: SidebarStyle.cornerRadius,
+            yRadius: SidebarStyle.cornerRadius
+        )
+        SidebarStyle.fillColor.setFill()
+        path.fill()
+
+        (SidebarStyle.headerLabel as NSString).draw(
+            at: NSPoint(x: box.minX + SidebarStyle.padding, y: box.minY + 5),
+            withAttributes: [
+                .font: NSFont.boldSystemFont(ofSize: 10),
+                .foregroundColor: SidebarStyle.accentColor,
+            ]
+        )
+
+        let textRect = NSRect(
+            x: box.minX + SidebarStyle.padding,
+            y: box.minY + SidebarStyle.headerHeight + SidebarStyle.padding,
+            width: max(0, box.width - SidebarStyle.padding * 2),
+            height: max(0, box.height - SidebarStyle.headerHeight - SidebarStyle.padding * 2)
+        )
+        sidebar.content.draw(with: textRect, options: [.usesLineFragmentOrigin, .usesFontLeading])
+
+        SidebarStyle.accentColor.setStroke()
+        path.lineWidth = SidebarStyle.borderWidth
+        path.stroke()
     }
 
     /// Draws the running head and page-number folio into the page margins. The

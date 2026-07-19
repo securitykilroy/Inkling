@@ -4,16 +4,14 @@
 //
 //  Pure helpers for computing writing statistics. Word counting uses the
 //  platform's linguistic word boundaries (so punctuation and the bullet
-//  marker don't get miscounted), and page estimates use the standard
-//  manuscript convention of ~250 words per page.
+//  marker don't get miscounted). Page counts are the real laid-out page
+//  count from the editor (see `PagedTextView.pageCount(forRTF:)`), not a
+//  word-based estimate, so the sidebar total matches what you see on screen.
 //
 
 import AppKit
 
 enum TextStatistics {
-
-    /// Standard manuscript page ≈ 250 words.
-    static let wordsPerPage = 250
 
     static func wordCount(in string: String) -> Int {
         let text = string as NSString
@@ -32,10 +30,5 @@ enum TextStatistics {
         guard let string = RichTextCodec.decode(data)?.string
         else { return 0 }
         return wordCount(in: string)
-    }
-
-    static func pageEstimate(forWords words: Int) -> Int {
-        guard words > 0 else { return 0 }
-        return Int((Double(words) / Double(wordsPerPage)).rounded(.up))
     }
 }

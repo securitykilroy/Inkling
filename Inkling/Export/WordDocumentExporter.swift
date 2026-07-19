@@ -10,7 +10,15 @@
 import AppKit
 import Foundation
 
+private extension NSAttributedString.Key {
+    /// Export-only tag marking paragraphs that came from an expanded floating
+    /// sidebar, so they get the bordered Word "Sidebar" style + label.
+    static let inklingWordSidebar = NSAttributedString.Key("inklingWordSidebar")
+}
+
 enum WordDocumentExporter {
+
+    static let sidebarWordStyleID = "SidebarBox"
 
     private final class ExportState {
         var imageIndex = 1
@@ -32,9 +40,10 @@ enum WordDocumentExporter {
     }
 
     static func docxData(for chapter: PrintableChapter) throws -> Data {
-        guard let body = RichTextCodec.decode(chapter.bodyData) else {
+        guard let decoded = RichTextCodec.decode(chapter.bodyData) else {
             throw ExportError.unreadableBody
         }
+        let body = expandSidebars(decoded)
 
         let state = ExportState()
         let bodyXML = documentBodyXML(from: body, state: state)
@@ -94,12 +103,27 @@ enum WordDocumentExporter {
         range: NSRange,
         state: ExportState
     ) -> String {
+        // A sidebar or callout paragraph gets its bordered/shaded style; otherwise
+        // fall back to the heading-style mapping. All three are mutually exclusive.
+        let isSidebar = attributeIsPresent(.inklingWordSidebar, in: attributed, at: range.location)
+        let callout = isSidebar ? nil : calloutKind(in: attributed, at: range.location)
         var properties = ""
-        if let style = paragraphStyle(in: attributed, range: range) {
+        if isSidebar {
+            properties = #"<w:pPr><w:pStyle w:val="\#(sidebarWordStyleID)"/></w:pPr>"#
+        } else if let callout {
+            properties = #"<w:pPr><w:pStyle w:val="\#(wordStyleID(for: callout))"/></w:pPr>"#
+        } else if let style = paragraphStyle(in: attributed, range: range) {
             properties = #"<w:pPr><w:pStyle w:val="\#(style)"/></w:pPr>"#
         }
 
+        // The label leads the first paragraph of a sidebar/callout as a bold run,
+        // so the aside is clearly labeled and its text is fully extractable in Word.
         var runs = ""
+        if isSidebar, !attributeIsPresent(.inklingWordSidebar, in: attributed, at: range.location - 1) {
+            runs += #"<w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">\#(SidebarStyle.headerLabel) — </w:t></w:r>"#
+        } else if let callout, isFirstCalloutParagraph(in: attributed, at: range.location, kind: callout) {
+            runs += #"<w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">\#(callout.exportLabel) — </w:t></w:r>"#
+        }
         attributed.enumerateAttributes(in: range) { attributes, runRange, _ in
             if let attachment = attributes[.attachment] as? NSTextAttachment,
                let image = pngData(from: attachment) {
@@ -119,6 +143,60 @@ enum WordDocumentExporter {
             runs += textRunXML(text, font: attributes[.font] as? NSFont)
         }
         return "<w:p>\(properties)\(runs)</w:p>"
+    }
+
+    /// Replaces each floating sidebar anchor with its content as real paragraphs,
+    /// tagged for the bordered Word "Sidebar" style, inline where it was anchored.
+    private static func expandSidebars(_ attributed: NSAttributedString) -> NSAttributedString {
+        let mutable = NSMutableAttributedString(attributedString: attributed)
+        var anchors: [(range: NSRange, replacement: NSAttributedString)] = []
+        mutable.enumerateAttribute(
+            .attachment, in: NSRange(location: 0, length: mutable.length)
+        ) { value, range, _ in
+            guard let sidebar = value as? SidebarAttachment else { return }
+            let content = NSMutableAttributedString(
+                attributedString: RichTextCodec.decode(sidebar.contentData) ?? NSAttributedString(string: "")
+            )
+            if content.length == 0 { content.append(NSAttributedString(string: " ")) }
+            if !content.string.hasSuffix("\n") { content.append(NSAttributedString(string: "\n")) }
+            content.addAttribute(.inklingWordSidebar, value: true, range: NSRange(location: 0, length: content.length))
+
+            let replacement = NSMutableAttributedString(string: "\n")
+            replacement.append(content)
+            anchors.append((range, replacement))
+        }
+        for anchor in anchors.sorted(by: { $0.range.location > $1.range.location }) {
+            mutable.replaceCharacters(in: anchor.range, with: anchor.replacement)
+        }
+        return mutable
+    }
+
+    private static func attributeIsPresent(_ key: NSAttributedString.Key, in attributed: NSAttributedString, at location: Int) -> Bool {
+        guard location >= 0, location < attributed.length else { return false }
+        return attributed.attribute(key, at: location, effectiveRange: nil) != nil
+    }
+
+    /// The callout kind covering the paragraph starting at `location`, if any.
+    private static func calloutKind(in attributed: NSAttributedString, at location: Int) -> CalloutKind? {
+        guard location < attributed.length else { return nil }
+        let raw = attributed.attribute(.inklingCallout, at: location, effectiveRange: nil) as? String
+        return raw.flatMap(CalloutKind.init(storedRawValue:))
+    }
+
+    /// Whether the paragraph at `location` opens its callout (nothing before it,
+    /// or the preceding character belongs to a different/absent callout), so only
+    /// the first paragraph of a callout carries the label run.
+    private static func isFirstCalloutParagraph(
+        in attributed: NSAttributedString,
+        at location: Int,
+        kind: CalloutKind
+    ) -> Bool {
+        guard location > 0 else { return true }
+        return calloutKind(in: attributed, at: location - 1) != kind
+    }
+
+    private static func wordStyleID(for kind: CalloutKind) -> String {
+        "\(kind.rawValue.capitalized)Callout"
     }
 
     private static func paragraphStyle(in attributed: NSAttributedString, range: NSRange) -> String? {
@@ -246,7 +324,8 @@ enum WordDocumentExporter {
     }
 
     /// Point sizes mirror `TextStyle` in RichTextController; OOXML `w:sz` is in half-points.
-    private static let stylesXML = """
+    private static var stylesXML: String {
+        """
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
         <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">\
         <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>\
@@ -256,8 +335,41 @@ enum WordDocumentExporter {
         <w:rPr><w:b/><w:sz w:val="44"/></w:rPr></w:style>\
         <w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="heading 2"/><w:basedOn w:val="Normal"/>\
         <w:rPr><w:b/><w:sz w:val="34"/></w:rPr></w:style>\
+        \(CalloutKind.allCases.map(calloutStyleXML).joined())\
+        \(sidebarStyleXML)\
         </w:styles>
         """
+    }
+
+    /// A shaded, bordered paragraph style for expanded floating sidebars, using
+    /// the same colors as the on-screen/printed box.
+    private static var sidebarStyleXML: String {
+        let border = ["top", "left", "bottom", "right"].map {
+            #"<w:\#($0) w:val="single" w:sz="12" w:space="6" w:color="\#(SidebarStyle.accentHex)"/>"#
+        }.joined()
+        return """
+        <w:style w:type="paragraph" w:styleId="\(sidebarWordStyleID)"><w:name w:val="\(sidebarWordStyleID)"/><w:basedOn w:val="Normal"/>\
+        <w:pPr><w:pBdr>\(border)</w:pBdr>\
+        <w:shd w:val="clear" w:color="auto" w:fill="\(SidebarStyle.fillHex)"/>\
+        <w:ind w:left="240" w:right="240"/><w:spacing w:before="120" w:after="120"/></w:pPr></w:style>
+        """
+    }
+
+    /// A shaded, four-sided-bordered paragraph style for a callout kind. Adjacent
+    /// paragraphs sharing this style merge into one visual box in Word. Colors
+    /// come from the same hex values the on-screen/printed box uses.
+    private static func calloutStyleXML(for kind: CalloutKind) -> String {
+        let id = wordStyleID(for: kind)
+        let border = ["top", "left", "bottom", "right"].map {
+            #"<w:\#($0) w:val="single" w:sz="12" w:space="6" w:color="\#(kind.accentHex)"/>"#
+        }.joined()
+        return """
+        <w:style w:type="paragraph" w:styleId="\(id)"><w:name w:val="\(id)"/><w:basedOn w:val="Normal"/>\
+        <w:pPr><w:pBdr>\(border)</w:pBdr>\
+        <w:shd w:val="clear" w:color="auto" w:fill="\(kind.fillHex)"/>\
+        <w:ind w:left="240" w:right="240"/><w:spacing w:before="120" w:after="120"/></w:pPr></w:style>
+        """
+    }
 
     private static func nsString(_ attributed: NSAttributedString) -> NSString {
         attributed.string as NSString

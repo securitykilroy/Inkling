@@ -86,6 +86,11 @@ final class RichTextController: ObservableObject {
     /// Kept up to date by `RichTextEditor.Coordinator.textViewDidChangeSelection`.
     @Published private(set) var currentStyle: TextStyle = .body
 
+    /// The callout kind the cursor (or start of selection) sits inside, or `nil`
+    /// in ordinary body text. Drives the checkmark in the Callout menu; kept in
+    /// sync by `selectionDidChange`, for the same reason `currentStyle` is.
+    @Published private(set) var currentCallout: CalloutKind?
+
     private var bodyFont: NSFont { TextStyle.body.font(familyName: fontFamilyName) }
 
     // MARK: - Images
@@ -195,11 +200,22 @@ final class RichTextController: ObservableObject {
     func selectionDidChange() {
         guard let textView else {
             currentStyle = .body
+            currentCallout = nil
             return
         }
         let location = textView.selectedRange().location
+        let storageLength = textView.textStorage?.length ?? 0
+        // Classify the callout at the cursor. At end-of-text (location ==
+        // length) there's no character to read, so report no callout.
+        if location < storageLength,
+           let raw = textView.textStorage?.attribute(.inklingCallout, at: location, effectiveRange: nil) as? String {
+            currentCallout = CalloutKind(storedRawValue: raw)
+        } else {
+            currentCallout = nil
+        }
+
         let font: NSFont?
-        if location < textView.textStorage?.length ?? 0 {
+        if location < storageLength {
             font = textView.textStorage?.attribute(.font, at: location, effectiveRange: nil) as? NSFont
         } else {
             font = textView.typingAttributes[.font] as? NSFont
@@ -225,6 +241,48 @@ final class RichTextController: ObservableObject {
         textView.typingAttributes[.font] = font
         textView.didChangeText()
         selectionDidChange()
+    }
+
+    // MARK: - Callouts
+
+    /// Wraps the selection's paragraph(s) in a callout of `kind` (or re-tags an
+    /// existing callout to a different kind). Operates on whole paragraphs, like
+    /// `applyStyle`, so a callout is always a clean run of paragraphs.
+    func applyCallout(_ kind: CalloutKind) {
+        guard let textView, let storage = textView.textStorage else { return }
+        let range = (textView.string as NSString).paragraphRange(for: textView.selectedRange())
+        guard range.length > 0, textView.shouldChangeText(in: range, replacementString: nil) else { return }
+
+        storage.beginEditing()
+        CalloutStyling.apply(kind, to: storage, range: range)
+        storage.endEditing()
+        textView.didChangeText()
+        (textView as? PagedTextView)?.updatePageLayout()
+        textView.needsDisplay = true
+        selectionDidChange()
+    }
+
+    /// Removes any callout covering the selection's paragraph(s), resetting them
+    /// to plain body paragraphs.
+    func removeCallout() {
+        guard let textView, let storage = textView.textStorage else { return }
+        let range = (textView.string as NSString).paragraphRange(for: textView.selectedRange())
+        guard range.length > 0, textView.shouldChangeText(in: range, replacementString: nil) else { return }
+
+        storage.beginEditing()
+        CalloutStyling.remove(from: storage, range: range)
+        storage.endEditing()
+        textView.didChangeText()
+        (textView as? PagedTextView)?.updatePageLayout()
+        textView.needsDisplay = true
+        selectionDidChange()
+    }
+
+    // MARK: - Floating sidebar
+
+    /// Inserts a floating margin sidebar at the caret and enters it for typing.
+    func insertSidebar() {
+        (textView as? PagedTextView)?.insertSidebar()
     }
 
     // MARK: - Bullet list

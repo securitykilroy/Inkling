@@ -27,6 +27,9 @@ struct RichTextEditor: NSViewRepresentable {
     /// Called with the editor's plain text on every edit (used for live stats).
     var onTextChange: ((String) -> Void)? = nil
     var onPageCountChange: ((Int) -> Void)? = nil
+    /// Called with the caret's character offset whenever the selection moves,
+    /// so the document can remember where the user was for reopening.
+    var onCaretChange: ((Int) -> Void)? = nil
     /// The project's chosen typeface (nil = system default). Drives both the
     /// initial/reload typing font and the empty-document display font.
     var fontFamilyName: String? = nil
@@ -113,6 +116,7 @@ struct RichTextEditor: NSViewRepresentable {
                 textView.string = ""
             }
             (textView as? PagedTextView)?.prepareFloatingImages()
+            (textView as? PagedTextView)?.prepareSidebars()
             textView.typingAttributes = [
                 .font: TextStyle.body.font(familyName: parent.fontFamilyName),
                 .paragraphStyle: RichTextCodec.defaultParagraphStyle,
@@ -142,6 +146,9 @@ struct RichTextEditor: NSViewRepresentable {
         func textViewDidChangeSelection(_ notification: Notification) {
             guard !isLoading else { return }
             parent.controller?.selectionDidChange()
+            if let textView = notification.object as? NSTextView {
+                parent.onCaretChange?(textView.selectedRange().location)
+            }
         }
     }
 }

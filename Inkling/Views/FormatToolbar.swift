@@ -53,6 +53,35 @@ struct FormatToolbar: View {
 
             Divider().frame(height: 16)
 
+            Menu {
+                ForEach(CalloutKind.allCases) { kind in
+                    Button {
+                        controller.applyCallout(kind)
+                    } label: {
+                        if kind == controller.currentCallout {
+                            Label(kind.menuLabel, systemImage: "checkmark")
+                        } else {
+                            Label(kind.menuLabel, systemImage: kind.symbolName)
+                        }
+                    }
+                }
+                Divider()
+                Button("Remove Callout") { controller.removeCallout() }
+                    .disabled(controller.currentCallout == nil)
+            } label: {
+                Label("Callout", systemImage: "text.bubble")
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("Wrap the selected paragraphs in a Note or Warning callout box")
+
+            Button { controller.insertSidebar() } label: {
+                Image(systemName: "sidebar.squares.right")
+            }
+            .help("Insert a floating Sidebar the text wraps around")
+
+            Divider().frame(height: 16)
+
             Button { controller.chooseImage() } label: {
                 Image(systemName: "photo.badge.plus")
             }

@@ -72,7 +72,9 @@ final class InklingDocument: NSPersistentDocument {
         let rootView = ProjectRootView(
             context: context,
             documentName: displayName,
-            onSelectionChange: { [weak self] id in self?.currentChapterID = id }
+            initialPosition: fileURL.flatMap { LastEditPositionStore.position(for: $0) },
+            onSelectionChange: { [weak self] id in self?.currentChapterID = id },
+            onCaretChange: { [weak self] location in self?.currentCaretLocation = location }
         )
         .environment(\.managedObjectContext, context)
 
@@ -162,16 +164,37 @@ final class InklingDocument: NSPersistentDocument {
     /// outlive the document. `close()` fires when the document closes for any
     /// reason (window close, quit), so tear the notes window down here.
     override func close() {
+        persistLastEditPosition()
         projectNotesWindow?.close()
         projectNotesWindow = nil
         super.close()
     }
 
+    /// Remember the current chapter + caret so reopening this file jumps back
+    /// here. Only saved documents have a `fileURL` to key on; an untitled,
+    /// never-saved document has nothing to store against (and will just open at
+    /// its first chapter next time).
+    private func persistLastEditPosition() {
+        guard let url = fileURL,
+              let id = currentChapterID,
+              let chapter = try? managedObjectContext?.existingObject(with: id) as? Chapter,
+              let chapterID = chapter.id
+        else { return }
+        LastEditPositionStore.save(
+            LastEditPosition(chapterID: chapterID, caret: currentCaretLocation),
+            for: url
+        )
+    }
+
     // MARK: - Printing
 
     /// The chapter currently shown in the editor, reported by the SwiftUI view.
-    /// Used by "Print Chapter…".
+    /// Used by "Print Chapter…" and by the reopen-where-you-left-off save.
     private var currentChapterID: NSManagedObjectID?
+
+    /// The caret's character offset in the current chapter's body, reported by
+    /// the editor. Persisted on close so reopening restores the cursor.
+    private var currentCaretLocation: Int = 0
 
     private func orderedChapters() -> [Chapter] {
         guard let context = managedObjectContext else { return [] }
