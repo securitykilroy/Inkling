@@ -324,33 +324,90 @@ struct PageStackViewTests {
     }
 
     // MARK: - Cross-page drag selection (plan §6 item 1)
-    //
-    // A mouse drag that starts on page 0 and continues below it is tracked by
-    // page 0's text view, which resolves the drag point against *its own*
-    // container. This probes whether that resolution can reach text on page 1 —
-    // i.e. whether cross-page drag selection works natively or needs handling
-    // in PageStackView.
 
-    @Test func draggingBelowAPageResolvesOnlyWithinThatPagesOwnText() {
+    /// Hosts the stack in a key window and runs a real drag through NSTextView's
+    /// modal mouse-tracking loop, by pre-posting the drag and mouse-up events so
+    /// the loop consumes them. Returns the resulting selection.
+    private static func performDrag(
+        in stack: PageStackView,
+        fromStackPoint start: NSPoint,
+        toStackPoint end: NSPoint
+    ) -> NSRange {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 800, height: 1000),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        let scrollView = NSScrollView(frame: NSRect(x: 0, y: 0, width: 800, height: 1000))
+        scrollView.documentView = stack
+        window.contentView = scrollView
+        window.makeKeyAndOrderFront(nil)
+
+        let startView = stack.pageViews.first { $0.frame.contains(start) } ?? stack.pageViews[0]
+        _ = window.makeFirstResponder(startView)
+
+        func mouse(_ type: NSEvent.EventType, _ stackPoint: NSPoint) -> NSEvent {
+            NSEvent.mouseEvent(
+                with: type,
+                location: stack.convert(stackPoint, to: nil),
+                modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber,
+                context: nil,
+                eventNumber: 0,
+                clickCount: 1,
+                pressure: type == .leftMouseUp ? 0 : 1
+            )!
+        }
+
+        window.postEvent(mouse(.leftMouseDragged, end), atStart: false)
+        window.postEvent(mouse(.leftMouseUp, end), atStart: false)
+        startView.mouseDown(with: mouse(.leftMouseDown, start))
+
+        return startView.selectedRange()
+    }
+
+    /// The interaction the whole per-page model hinges on: sweeping the mouse
+    /// from one sheet of paper onto the next must select straight through the
+    /// page break, not stop at the bottom of the first page.
+    ///
+    /// This works without any custom tracking code. Note that
+    /// `characterIndexForInsertion(at:)` on a single page view *does* clamp to
+    /// its own container — but NSTextView's drag tracking does not go through
+    /// that method, so the clamping is not what governs drag selection.
+    @Test func draggingOntoTheNextPageSelectsThroughThePageBreak() {
         let stack = Self.makeStack(paragraphs: 200)
         #expect(stack.pageCount > 1)
         let firstPage = Self.characterRange(ofPage: 0, in: stack)
 
-        // A point far below page 0's paper — where the user's cursor would be
-        // after dragging down onto page 1.
-        let farBelow = NSPoint(x: 200, y: stack.pageViews[0].bounds.maxY + 1_000)
-        let index = stack.pageViews[0].characterIndexForInsertion(at: farBelow)
+        let selection = Self.performDrag(
+            in: stack,
+            fromStackPoint: NSPoint(x: 200, y: stack.paperFrame(forPage: 0).midY),
+            toStackPoint: NSPoint(x: 200, y: stack.paperFrame(forPage: 1).midY)
+        )
 
-        // Page 0's view cannot see page 1's glyphs, so the drag clamps at the
-        // end of its own container rather than reaching page 1. Cross-page drag
-        // selection therefore needs explicit handling in the stack (routing the
-        // drag point to whichever page view contains it); it does not come free
-        // from TextKit the way the caret and shared selection do.
-        #expect(index <= NSMaxRange(firstPage))
-        // ...and it really is clamped to the page end, not some arbitrary spot:
-        // the drag reaches the last line of page 0 and stops.
-        #expect(index > firstPage.location)
-        #expect(NSMaxRange(firstPage) - index < 100)
+        // Started mid-page-0...
+        #expect(selection.location > firstPage.location)
+        #expect(selection.location < NSMaxRange(firstPage))
+        // ...and ran past the page break into page 1's text.
+        #expect(NSMaxRange(selection) > NSMaxRange(firstPage))
+    }
+
+    @Test func draggingBackwardsFromALaterPageAlsoSpansThePageBreak() {
+        let stack = Self.makeStack(paragraphs: 200)
+        #expect(stack.pageCount > 1)
+        let firstPage = Self.characterRange(ofPage: 0, in: stack)
+
+        // Drag upward: start on page 1, finish on page 0.
+        let selection = Self.performDrag(
+            in: stack,
+            fromStackPoint: NSPoint(x: 200, y: stack.paperFrame(forPage: 1).midY),
+            toStackPoint: NSPoint(x: 200, y: stack.paperFrame(forPage: 0).midY)
+        )
+
+        #expect(selection.location < NSMaxRange(firstPage))
+        #expect(NSMaxRange(selection) > NSMaxRange(firstPage))
     }
 
     @Test func editingOnAnEarlyPageRepaginatesLaterPages() {
