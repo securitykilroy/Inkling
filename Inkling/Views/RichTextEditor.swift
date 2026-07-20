@@ -100,6 +100,16 @@ struct RichTextEditor: NSViewRepresentable {
             .font: bodyFont,
             .paragraphStyle: RichTextCodec.defaultParagraphStyle,
         ]
+        // Applied to every page, including ones repagination adds later — a page
+        // that appears mid-typing needs spell checking like any other.
+        stack.configurePage = { page in
+            page.font = bodyFont
+            page.importsGraphics = true
+            page.isContinuousSpellCheckingEnabled = true
+            page.isAutomaticSpellingCorrectionEnabled = false
+            page.usesAdaptiveColorMappingForDarkAppearance = false
+        }
+        stack.isTypewriterScrollingEnabled = isTypewriterScrollingEnabled
         stack.pageDelegate = context.coordinator
         stack.pageCountDidChange = { [weak coordinator = context.coordinator] count in
             coordinator?.parent.onPageCountChange?(count)
@@ -113,6 +123,7 @@ struct RichTextEditor: NSViewRepresentable {
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         if let stack = scrollView.documentView as? PageStackView {
             context.coordinator.parent = self
+            stack.isTypewriterScrollingEnabled = isTypewriterScrollingEnabled
             context.coordinator.loadStackIfChanged(data, documentID: documentID, into: stack)
             return
         }

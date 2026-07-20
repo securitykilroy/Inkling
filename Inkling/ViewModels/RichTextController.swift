@@ -138,6 +138,13 @@ final class RichTextController: ObservableObject {
     /// so the destination text is actually visible/highlighted rather than
     /// just placing a collapsed cursor at its start.
     func scroll(to range: NSRange) {
+        // In the per-page editor the target may live on a different page than
+        // the focused one, and a page view's scrollRangeToVisible only
+        // understands its own container. Let the stack resolve it.
+        if let stack = (textView as? PageTextView)?.pageStack {
+            stack.scroll(toCharacterRange: range)
+            return
+        }
         guard let textView, range.location != NSNotFound else { return }
         let length = textView.textStorage?.length ?? 0
         guard range.location <= length else { return }

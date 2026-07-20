@@ -175,6 +175,20 @@ final class PageTextView: NSTextView {
         if stack?.endImageDrag() == true { return }
         super.mouseUp(with: event)
     }
+
+    /// All page views share the stack's undo manager, so undo is one stack for
+    /// the whole document rather than one per page.
+    override var undoManager: UndoManager? { pageStack?.sharedUndoManager }
+
+    override func setSelectedRanges(
+        _ ranges: [NSValue],
+        affinity: NSSelectionAffinity,
+        stillSelecting stillSelectingFlag: Bool
+    ) {
+        super.setSelectedRanges(ranges, affinity: affinity, stillSelecting: stillSelectingFlag)
+        guard !stillSelectingFlag else { return }
+        pageStack?.scrollCaretToTypewriterPosition()
+    }
 }
 
 /// The scrolling document view: a vertical stack of fixed-size page views, all
@@ -347,6 +361,30 @@ final class PageStackView: NSView, NSTextStorageDelegate {
     var enteredSidebar: ObjectIdentifier?
     var sidebarMoveSession: SidebarDragSession?
     var sidebarResizeSession: SidebarDragSession?
+
+    /// Caret pinned at this fraction of the viewport height when typewriter
+    /// scrolling is on. Matches `PagedTextView`.
+    static let typewriterAnchorFraction: CGFloat = 0.42
+
+    var isTypewriterScrollingEnabled = false {
+        didSet {
+            guard isTypewriterScrollingEnabled, !oldValue else { return }
+            scrollCaretToTypewriterPosition()
+        }
+    }
+
+    /// One undo stack for the whole document. Each NSTextView would otherwise
+    /// resolve its own through the responder chain, so an edit made on page 3
+    /// could land on a different stack than one made on page 1 — and the image
+    /// and sidebar gestures, which register against the stack itself, on a third.
+    let sharedUndoManager = UndoManager()
+
+    override var undoManager: UndoManager? { sharedUndoManager }
+
+    /// Applied to every page view, including ones created later by repagination.
+    var configurePage: ((PageTextView) -> Void)? {
+        didSet { pageViews.forEach { configurePage?($0) } }
+    }
     /// The snap guide to draw, and the page to draw it on, during a drag.
     var activeSnapGuide: HorizontalGuide?
     var activeSnapPage: Int?
@@ -372,6 +410,7 @@ final class PageStackView: NSView, NSTextStorageDelegate {
         // Paper is white in every appearance, so the ink must be explicitly dark.
         view.textColor = .black
         view.insertionPointColor = .black
+        configurePage?(view)
         addSubview(view)
         pageViews.append(view)
     }
@@ -455,6 +494,71 @@ final class PageStackView: NSView, NSTextStorageDelegate {
     /// selection, according to the shared layout manager.
     var focusedPageView: PageTextView? {
         sharedLayoutManager.textViewForBeginningOfSelection as? PageTextView
+    }
+
+    // MARK: - Scrolling
+
+    /// The caret's rect in stack coordinates, wherever its page happens to be.
+    func caretRectInStack() -> NSRect? {
+        guard let page = focusedPageView ?? pageViews.first else { return nil }
+        guard storage.length > 0, sharedLayoutManager.numberOfGlyphs > 0 else {
+            // Empty document: the caret sits at the top of page 1's text column.
+            let origin = page.textContainerOrigin
+            return page.convert(
+                NSRect(x: origin.x, y: origin.y, width: 1, height: 16), to: self
+            )
+        }
+        let location = min(page.selectedRange().location, storage.length - 1)
+        let glyph = sharedLayoutManager.glyphIndexForCharacter(at: location)
+        guard glyph < sharedLayoutManager.numberOfGlyphs,
+              let container = sharedLayoutManager.textContainer(
+                  forGlyphAt: glyph, effectiveRange: nil
+              ),
+              let host = pageViews.first(where: { $0.textContainer === container })
+        else { return nil }
+
+        let lineRect = sharedLayoutManager.lineFragmentRect(
+            forGlyphAt: glyph, effectiveRange: nil
+        )
+        return host.convert(host.viewRect(forFloating: lineRect), to: self)
+    }
+
+    /// Pins the caret at a fixed fraction of the viewport height.
+    func scrollCaretToTypewriterPosition() {
+        guard isTypewriterScrollingEnabled,
+              let scrollView = enclosingScrollView,
+              let caret = caretRectInStack()
+        else { return }
+
+        let clipView = scrollView.contentView
+        let visibleHeight = clipView.bounds.height
+        let targetY = caret.midY - visibleHeight * Self.typewriterAnchorFraction
+        let maxY = max(0, bounds.height - visibleHeight)
+        clipView.setBoundsOrigin(NSPoint(
+            x: clipView.bounds.origin.x,
+            y: min(max(targetY, 0), maxY)
+        ))
+        scrollView.reflectScrolledClipView(clipView)
+    }
+
+    /// Selects `range` and scrolls it into view, whichever page it lives on.
+    /// This is what outline jumps, find results, and reopen-last-position use;
+    /// a page view's own `scrollRangeToVisible` only understands its container.
+    func scroll(toCharacterRange range: NSRange) {
+        guard range.location != NSNotFound, range.location <= storage.length else { return }
+        let clamped = NSRange(
+            location: range.location,
+            length: min(range.length, storage.length - range.location)
+        )
+        guard let host = pageView(forCharacterIndex: clamped.location) else { return }
+        host.setSelectedRange(clamped)
+        window?.makeFirstResponder(host)
+
+        if isTypewriterScrollingEnabled {
+            scrollCaretToTypewriterPosition()
+        } else if let caret = caretRectInStack() {
+            scrollToVisible(caret.insetBy(dx: 0, dy: -60))
+        }
     }
 
     /// The page view whose container holds `characterIndex`.

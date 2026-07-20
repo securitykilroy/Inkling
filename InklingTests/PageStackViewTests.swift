@@ -1166,6 +1166,171 @@ struct PageStackViewTests {
         #expect(laidOut == manager.numberOfGlyphs)
     }
 
+    // MARK: - Milestone 4: parity polish
+
+    /// Hosts the stack in a scrolling canvas, as the real editor does.
+    private static func inCanvas(_ stack: PageStackView) -> PagedEditorScrollView {
+        let scrollView = PagedEditorScrollView(canvasWidth: stack.canvasWidth)
+        scrollView.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
+        scrollView.documentView = stack
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+            styleMask: [.titled], backing: .buffered, defer: false
+        )
+        window.contentView = scrollView
+        scrollView.layoutSubtreeIfNeeded()
+        return scrollView
+    }
+
+    @Test func allPageViewsShareOneUndoStack() {
+        let stack = Self.makeStack(paragraphs: 200)
+        #expect(stack.pageCount > 1)
+
+        // Each NSTextView would otherwise resolve its own through the responder
+        // chain, so an edit on page 3 could land on a different stack than one
+        // on page 1 — and the image/sidebar gestures on a third.
+        for view in stack.pageViews {
+            #expect(view.undoManager === stack.sharedUndoManager)
+        }
+    }
+
+    @Test func everyPageGetsTheEditorConfigurationIncludingNewOnes() {
+        let stack = PageStackView()
+        stack.configurePage = { $0.isContinuousSpellCheckingEnabled = true }
+        stack.setAttributedString(Self.filler(paragraphs: 2))
+        #expect(stack.pageCount == 1)
+
+        // Grow to several pages; the pages created by repagination must be
+        // configured too, not just the ones present when the closure was set.
+        stack.setAttributedString(Self.filler(paragraphs: 200))
+        #expect(stack.pageCount > 1)
+        let allConfigured = stack.pageViews.allSatisfy { $0.isContinuousSpellCheckingEnabled }
+        #expect(allConfigured)
+    }
+
+    @Test func scrollingToARangeOnALaterPageSelectsItThere() throws {
+        let stack = Self.makeStack(paragraphs: 200)
+        _ = Self.inCanvas(stack)
+        #expect(stack.pageCount > 2)
+
+        let thirdPage = Self.characterRange(ofPage: 2, in: stack)
+        let target = NSRange(location: thirdPage.location + 10, length: 5)
+        stack.scroll(toCharacterRange: target)
+
+        #expect(stack.pageViews[0].selectedRange() == target)
+        #expect(stack.focusedPageView === stack.pageViews[2])
+    }
+
+    @Test func scrollingToARangeBringsItIntoTheViewport() throws {
+        let stack = Self.makeStack(paragraphs: 200)
+        let scrollView = Self.inCanvas(stack)
+        #expect(stack.pageCount > 2)
+
+        let thirdPage = Self.characterRange(ofPage: 2, in: stack)
+        stack.scroll(toCharacterRange: NSRange(location: thirdPage.location + 10, length: 5))
+
+        let caret = try #require(stack.caretRectInStack())
+        let visible = scrollView.contentView.bounds
+        #expect(caret.midY >= visible.minY - 0.5)
+        #expect(caret.midY <= visible.maxY + 0.5)
+    }
+
+    @Test func typewriterScrollingPinsTheCaretAtTheAnchorFraction() throws {
+        let stack = Self.makeStack(paragraphs: 200)
+        let scrollView = Self.inCanvas(stack)
+        stack.isTypewriterScrollingEnabled = true
+
+        // Put the caret well down the document so there is room to scroll.
+        let page = Self.characterRange(ofPage: 3, in: stack)
+        stack.pageViews[0].setSelectedRange(NSRange(location: page.location + 20, length: 0))
+        stack.scrollCaretToTypewriterPosition()
+
+        let caret = try #require(stack.caretRectInStack())
+        let visible = scrollView.contentView.bounds
+        let fraction = (caret.midY - visible.minY) / visible.height
+        #expect(abs(fraction - PageStackView.typewriterAnchorFraction) < 0.02)
+    }
+
+    @Test func typewriterScrollingDoesNothingWhenDisabled() throws {
+        let stack = Self.makeStack(paragraphs: 200)
+        let scrollView = Self.inCanvas(stack)
+        stack.isTypewriterScrollingEnabled = false
+        let before = scrollView.contentView.bounds.origin.y
+
+        let page = Self.characterRange(ofPage: 3, in: stack)
+        stack.pageViews[0].setSelectedRange(NSRange(location: page.location + 20, length: 0))
+        stack.scrollCaretToTypewriterPosition()
+
+        #expect(abs(scrollView.contentView.bounds.origin.y - before) < 0.5)
+    }
+
+    @Test func theCaretRectIsResolvedEvenForAnEmptyDocument() throws {
+        let stack = PageStackView()
+        _ = Self.inCanvas(stack)
+
+        let caret = try #require(stack.caretRectInStack())
+        // Inside page 1's text column, not at the very top of the paper.
+        #expect(caret.minY >= PagedEditorLayout.letter.topMargin - 0.5)
+    }
+
+    /// Plan §4: the printer already lays one container per page, and the editor
+    /// now does the same, so their page counts should agree — this is the
+    /// property that used to require two independent implementations to match.
+    @Test func pageStackAndPrinterAgreeOnPageCount() throws {
+        // Letter minus 1" margins — what ManuscriptPrinter hands the print view,
+        // and the content band the page stack lays into.
+        let printPageSize = NSSize(width: 612 - 144, height: 792 - 144)
+        let body = NSAttributedString(
+            string: String(
+                repeating: "A comfortably long manuscript line that wraps across the printable page. ",
+                count: 300
+            ),
+            attributes: [.font: NSFont.systemFont(ofSize: 14)]
+        )
+        let data = try #require(
+            body.rtf(from: NSRange(location: 0, length: body.length), documentAttributes: [:])
+        )
+
+        let stack = PageStackView()
+        stack.setAttributedString(body)
+
+        let printView = ManuscriptPrintView(
+            chapters: [PrintableChapter(title: "Ch 0", bodyData: data)],
+            pageSize: printPageSize
+        )
+
+        // The printer adds chrome the editor doesn't (a chapter title block), so
+        // allow a page of slack — the same tolerance the existing editor/print
+        // agreement test uses per chapter.
+        #expect(
+            abs(stack.pageCount - printView.pageCount) <= 1,
+            "stack=\(stack.pageCount) print=\(printView.pageCount)"
+        )
+    }
+
+    /// The find bar searches its client text view's `string`. Because every page
+    /// view shares one storage, that string is the whole chapter rather than the
+    /// page's slice — which is what lets a find started on page 1 match text on
+    /// page 5 and select it there.
+    @Test func eachPageViewSeesTheWholeDocumentNotJustItsOwnPage() throws {
+        let stack = Self.makeStack(paragraphs: 200)
+        #expect(stack.pageCount > 2)
+
+        let whole = stack.storage.string
+        for view in stack.pageViews {
+            #expect(view.string == whole)
+        }
+
+        // A match found late in the document resolves onto its real page.
+        let needle = "Paragraph 180."
+        let found = (whole as NSString).range(of: needle)
+        #expect(found.location != NSNotFound)
+        let host = try #require(stack.pageView(forCharacterIndex: found.location))
+        #expect(host !== stack.pageViews[0])
+        stack.scroll(toCharacterRange: found)
+        #expect(stack.focusedPageView === host)
+    }
+
     @Test func editingOnAnEarlyPageRepaginatesLaterPages() {
         let stack = Self.makeStack(paragraphs: 200)
         let before = Self.characterRange(ofPage: 1, in: stack)
