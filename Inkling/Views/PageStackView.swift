@@ -180,6 +180,15 @@ final class PageTextView: NSTextView {
     /// the whole document rather than one per page.
     override var undoManager: UndoManager? { pageStack?.sharedUndoManager }
 
+    // NOTE: deliberately no `scrollRangeToVisible` override. It was tried as a
+    // fix for the reported find-doesn't-jump bug on the theory that the find bar
+    // asks the focused page view — not the page holding the match — to reveal
+    // the range. That theory is wrong: NSTextView's own implementation resolves
+    // a range on any page correctly through the shared layout manager, verified
+    // both at magnification 1 and scaled down. The find bug is still unexplained;
+    // the next suspect is NSTextFinderClient geometry (`rects(forCharacterRange:)`
+    // and friends), which is per-view and so does not know about other pages.
+
     override func setSelectedRanges(
         _ ranges: [NSValue],
         affinity: NSSelectionAffinity,
@@ -563,6 +572,51 @@ final class PageStackView: NSView, NSTextStorageDelegate {
         scrollView.reflectScrolledClipView(clipView)
     }
 
+    /// The rect for `range` in stack coordinates, on whichever page holds it.
+    /// Clipped to that page's glyphs, since a range straddling a page break has
+    /// no single rect.
+    func rect(forCharacterRange range: NSRange) -> NSRect? {
+        guard storage.length > 0, sharedLayoutManager.numberOfGlyphs > 0 else { return nil }
+        let location = min(max(0, range.location), storage.length - 1)
+        let glyph = sharedLayoutManager.glyphIndexForCharacter(at: location)
+        guard glyph < sharedLayoutManager.numberOfGlyphs,
+              let container = sharedLayoutManager.textContainer(
+                  forGlyphAt: glyph, effectiveRange: nil
+              ),
+              let host = pageViews.first(where: { $0.textContainer === container })
+        else { return nil }
+
+        let wanted = sharedLayoutManager.glyphRange(
+            forCharacterRange: NSRange(
+                location: location,
+                length: max(1, min(range.length, storage.length - location))
+            ),
+            actualCharacterRange: nil
+        )
+        let onThisPage = NSIntersectionRange(
+            wanted, sharedLayoutManager.glyphRange(for: container)
+        )
+        guard onThisPage.length > 0 else { return nil }
+
+        let bounds = sharedLayoutManager.boundingRect(forGlyphRange: onThisPage, in: container)
+        return host.convert(host.viewRect(forFloating: bounds), to: self)
+    }
+
+    /// Scrolls `range` into view without disturbing the selection. This is what
+    /// the find bar needs: it has already selected the match, and only wants it
+    /// revealed — on whichever page actually holds it.
+    func revealCharacterRange(_ range: NSRange) {
+        guard range.location != NSNotFound else { return }
+        if isTypewriterScrollingEnabled {
+            scrollCaretToTypewriterPosition()
+            return
+        }
+        guard let rect = rect(forCharacterRange: range) else { return }
+        // A little vertical padding so a match doesn't land flush against the
+        // viewport edge.
+        scrollToVisible(rect.insetBy(dx: 0, dy: -60))
+    }
+
     /// Selects `range` and scrolls it into view, whichever page it lives on.
     /// This is what outline jumps, find results, and reopen-last-position use;
     /// a page view's own `scrollRangeToVisible` only understands its container.
@@ -575,12 +629,7 @@ final class PageStackView: NSView, NSTextStorageDelegate {
         guard let host = pageView(forCharacterIndex: clamped.location) else { return }
         host.setSelectedRange(clamped)
         window?.makeFirstResponder(host)
-
-        if isTypewriterScrollingEnabled {
-            scrollCaretToTypewriterPosition()
-        } else if let caret = caretRectInStack() {
-            scrollToVisible(caret.insetBy(dx: 0, dy: -60))
-        }
+        revealCharacterRange(clamped)
     }
 
     /// The page view whose container holds `characterIndex`.

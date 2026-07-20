@@ -1169,17 +1169,44 @@ struct PageStackViewTests {
     // MARK: - Milestone 4: parity polish
 
     /// Hosts the stack in a scrolling canvas, as the real editor does.
-    private static func inCanvas(_ stack: PageStackView) -> PagedEditorScrollView {
+    ///
+    /// `width` matters: PagedEditorScrollView fits the paper to the viewport, so
+    /// a viewport wider than the canvas runs at magnification 1 while a narrower
+    /// one — the normal case in the app, where the editor pane is narrower than
+    /// a page — runs magnified. Scrolling maths differs between the two.
+    private static func inCanvas(
+        _ stack: PageStackView, width: CGFloat = 800
+    ) -> PagedEditorScrollView {
         let scrollView = PagedEditorScrollView(canvasWidth: stack.canvasWidth)
-        scrollView.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
+        scrollView.frame = NSRect(x: 0, y: 0, width: width, height: 600)
         scrollView.documentView = stack
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+            contentRect: NSRect(x: 0, y: 0, width: width, height: 600),
             styleMask: [.titled], backing: .buffered, defer: false
         )
         window.contentView = scrollView
         scrollView.layoutSubtreeIfNeeded()
         return scrollView
+    }
+
+    /// Same, under the magnification the real editor runs at — magnification was
+    /// the other candidate explanation for the find bug, and is also ruled out.
+    @Test func findRevealsAMatchOnALaterPageEvenWhenMagnified() throws {
+        let stack = Self.makeStack(paragraphs: 200)
+        // Narrower than the canvas, so the page is scaled down to fit — what
+        // happens whenever the editor pane is narrower than a sheet of paper.
+        let scrollView = Self.inCanvas(stack, width: 400)
+        #expect(scrollView.magnification < 1)
+        #expect(stack.pageCount > 3)
+
+        let target = Self.characterRange(ofPage: 3, in: stack)
+        let match = NSRange(location: target.location + 20, length: 6)
+        stack.pageViews[0].scrollRangeToVisible(match)
+
+        let rect = try #require(stack.rect(forCharacterRange: match))
+        let visible = scrollView.contentView.bounds
+        #expect(rect.midY >= visible.minY, "match above viewport")
+        #expect(rect.midY <= visible.maxY, "match below viewport")
     }
 
     @Test func allPageViewsShareOneUndoStack() {
@@ -1552,6 +1579,58 @@ struct PageStackViewTests {
             laidOut += stack.sharedLayoutManager.glyphRange(for: view.textContainer!).length
         }
         #expect(laidOut == stack.sharedLayoutManager.numberOfGlyphs)
+    }
+
+    /// Pins that NSTextView's own scrollRangeToVisible already resolves a range
+    /// on any page through the shared layout manager. This does NOT reproduce
+    /// the reported find bug — it is the evidence that ruled that theory out,
+    /// kept so the same wrong fix isn't attempted again.
+    @Test func scrollRangeToVisibleFromOnePageRevealsAMatchOnAnother() throws {
+        let stack = Self.makeStack(paragraphs: 200)
+        let scrollView = Self.inCanvas(stack)
+        #expect(stack.pageCount > 3)
+
+        let target = Self.characterRange(ofPage: 3, in: stack)
+        let match = NSRange(location: target.location + 20, length: 6)
+
+        // Exactly what the find bar does: ask page 0's view to reveal it.
+        stack.pageViews[0].scrollRangeToVisible(match)
+
+        let rect = try #require(stack.rect(forCharacterRange: match))
+        let visible = scrollView.contentView.bounds
+        #expect(rect.midY >= visible.minY)
+        #expect(rect.midY <= visible.maxY)
+    }
+
+    @Test func aRangesRectResolvesOntoThePageThatHoldsIt() throws {
+        let stack = Self.makeStack(paragraphs: 200)
+        #expect(stack.pageCount > 2)
+
+        for page in 0..<min(3, stack.pageCount) {
+            let range = Self.characterRange(ofPage: page, in: stack)
+            guard range.length > 20 else { continue }
+            let rect = try #require(
+                stack.rect(forCharacterRange: NSRange(location: range.location + 5, length: 4))
+            )
+            // The rect must fall inside that page's paper, not another's.
+            let paper = stack.paperFrame(forPage: page)
+            #expect(rect.midY >= paper.minY)
+            #expect(rect.midY <= paper.maxY)
+        }
+    }
+
+    @Test func revealingARangeLeavesTheSelectionAlone() throws {
+        let stack = Self.makeStack(paragraphs: 200)
+        _ = Self.inCanvas(stack)
+
+        let chosen = NSRange(location: 12, length: 4)
+        stack.pageViews[0].setSelectedRange(chosen)
+
+        let later = Self.characterRange(ofPage: 2, in: stack)
+        stack.revealCharacterRange(NSRange(location: later.location + 5, length: 3))
+
+        // Find has already set its own selection; revealing must not move it.
+        #expect(stack.pageViews[0].selectedRange() == chosen)
     }
 
     @Test func editingOnAnEarlyPageRepaginatesLaterPages() {
