@@ -180,6 +180,19 @@ final class PageTextView: NSTextView {
     /// the whole document rather than one per page.
     override var undoManager: UndoManager? { pageStack?.sharedUndoManager }
 
+    /// TEMPORARY: records whether the finder scrolls through this at all, and
+    /// where the scroll lands. Not a behaviour change — it defers to super.
+    override func scrollRangeToVisible(_ range: NSRange) {
+        let before = enclosingScrollView?.contentView.bounds.origin.y ?? -1
+        super.scrollRangeToVisible(range)
+        let after = enclosingScrollView?.contentView.bounds.origin.y ?? -1
+        FindDiagnostics.log(
+            "scrollRangeToVisible(\(range)) on page \(pageIndex): "
+            + "clipY \(before) -> \(after); rangePage="
+            + "\(pageStack?.pageView(forCharacterIndex: range.location)?.pageIndex ?? -1)"
+        )
+    }
+
     // MARK: - NSTextFinderClient across pages
     //
     // NSTextView is a single-view find client: it answers these as though all of
@@ -207,9 +220,13 @@ final class PageTextView: NSTextView {
               let host = stack.pageView(forCharacterIndex: index)
         else {
             outRange.pointee = NSRange(location: 0, length: textStorage?.length ?? 0)
+            FindDiagnostics.log("contentView(at: \(index)) -> SELF page \(pageIndex) [no stack/host]")
             return self
         }
         outRange.pointee = stack.characterRange(ofPage: host.pageIndex)
+        FindDiagnostics.log(
+            "contentView(at: \(index)) -> page \(host.pageIndex), effective \(outRange.pointee)"
+        )
         return host
     }
 
@@ -220,12 +237,18 @@ final class PageTextView: NSTextView {
         guard let stack = pageStack,
               let host = stack.pageView(forCharacterIndex: range.location),
               let container = host.textContainer
-        else { return nil }
+        else {
+            FindDiagnostics.log("rects(for: \(range)) -> nil [no stack/host]")
+            return nil
+        }
 
         let manager = stack.sharedLayoutManager
         let glyphs = manager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
         let onThisPage = NSIntersectionRange(glyphs, manager.glyphRange(for: container))
-        guard onThisPage.length > 0 else { return nil }
+        guard onThisPage.length > 0 else {
+            FindDiagnostics.log("rects(for: \(range)) -> nil [no glyphs on page \(host.pageIndex)]")
+            return nil
+        }
 
         var rects: [NSValue] = []
         manager.enumerateEnclosingRects(
@@ -235,6 +258,9 @@ final class PageTextView: NSTextView {
         ) { rect, _ in
             rects.append(NSValue(rect: host.viewRect(forFloating: rect)))
         }
+        FindDiagnostics.log(
+            "rects(for: \(range)) on page \(host.pageIndex) -> \(rects.map(\.rectValue))"
+        )
         return rects
     }
 
@@ -255,17 +281,25 @@ final class PageTextView: NSTextView {
         let onThisPage = NSIntersectionRange(glyphs, manager.glyphRange(for: container))
         guard onThisPage.length > 0 else { return }
 
+        FindDiagnostics.log(
+            "drawCharacters(\(range)) into \(type(of: view)) "
+            + "hostPage=\(host.pageIndex) viewIsHost=\(view === host) origin=\(host.textContainerOrigin)"
+        )
         manager.drawGlyphs(forGlyphRange: onThisPage, at: host.textContainerOrigin)
     }
 
     /// Every character range on screen, across all visible pages — not just this
     /// view's page. Drives incremental highlighting of matches.
     @objc var visibleCharacterRanges: [NSValue] {
-        guard let stack = pageStack else { return [] }
-        return stack.visiblePageViews()
+        guard let stack = pageStack else {
+            FindDiagnostics.log("visibleCharacterRanges -> [] [no stack]")
+            return []
+        }
+        let ranges = stack.visiblePageViews()
             .map { stack.characterRange(ofPage: $0.pageIndex) }
             .filter { $0.length > 0 }
-            .map { NSValue(range: $0) }
+        FindDiagnostics.log("visibleCharacterRanges -> \(ranges)")
+        return ranges.map { NSValue(range: $0) }
     }
 
     override func setSelectedRanges(
