@@ -208,12 +208,16 @@ final class PageStackView: NSView, NSTextStorageDelegate {
     /// doesn't sit flush against the scroll view. Matches `PagedTextView`.
     static let canvasPadding: CGFloat = 16
 
-    /// Opt-in switch for the experimental per-page editor, surfaced in Project
-    /// Settings. Off means the shipping single-container editor is used.
+    /// Selects the per-page editor, surfaced in Project Settings. This is now
+    /// the default; turning it off falls back to the older single-container
+    /// `PagedTextView`, which is kept for the moment as a comparison point when
+    /// diagnosing layout differences.
     static let defaultsKey = "InklingUsePerPageEditor"
 
+    /// Absent means on. `bool(forKey:)` would report false for an unset key,
+    /// which would silently keep every existing install on the old editor.
     static var isEnabled: Bool {
-        UserDefaults.standard.bool(forKey: defaultsKey)
+        UserDefaults.standard.object(forKey: defaultsKey) as? Bool ?? true
     }
 
     let pageLayout: PagedEditorLayout

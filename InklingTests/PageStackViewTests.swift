@@ -1633,6 +1633,38 @@ struct PageStackViewTests {
         #expect(stack.pageViews[0].selectedRange() == chosen)
     }
 
+    // MARK: - Which editor is the default
+
+    @Test func thePerPageEditorIsOnWhenNothingHasBeenChosen() {
+        let defaults = UserDefaults.standard
+        let key = PageStackView.defaultsKey
+        let original = defaults.object(forKey: key)
+        defer {
+            if let original { defaults.set(original, forKey: key) }
+            else { defaults.removeObject(forKey: key) }
+        }
+
+        // An unset key must read as ON. `bool(forKey:)` would report false here,
+        // silently keeping every existing install on the old editor.
+        defaults.removeObject(forKey: key)
+        #expect(PageStackView.isEnabled)
+    }
+
+    @Test func theOldEditorCanStillBeChosenExplicitly() {
+        let defaults = UserDefaults.standard
+        let key = PageStackView.defaultsKey
+        let original = defaults.object(forKey: key)
+        defer {
+            if let original { defaults.set(original, forKey: key) }
+            else { defaults.removeObject(forKey: key) }
+        }
+
+        defaults.set(false, forKey: key)
+        #expect(PageStackView.isEnabled == false)
+        defaults.set(true, forKey: key)
+        #expect(PageStackView.isEnabled)
+    }
+
     @Test func editingOnAnEarlyPageRepaginatesLaterPages() {
         let stack = Self.makeStack(paragraphs: 200)
         let before = Self.characterRange(ofPage: 1, in: stack)

@@ -20,7 +20,9 @@ struct ProjectSettingsView: View {
     @FetchRequest(sortDescriptors: []) private var chapters: FetchedResults<Chapter>
     @FetchRequest(sortDescriptors: []) private var shelfEntries: FetchedResults<ShelfEntry>
     @State private var fontPanelController = FontPanelController()
-    @AppStorage(PageStackView.defaultsKey) private var usePerPageEditor = false
+    // Default true so the toggle reflects PageStackView.isEnabled, which treats
+    // an unset key as on.
+    @AppStorage(PageStackView.defaultsKey) private var usePerPageEditor = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -59,9 +61,9 @@ struct ProjectSettingsView: View {
 
             Divider()
 
-            Toggle("Per-Page Editor (Experimental)", isOn: $usePerPageEditor)
+            Toggle("Per-Page Editor", isOn: $usePerPageEditor)
 
-            Text("Lays each page out in its own text container instead of faking page breaks in one long one. Experimental and text-only: images, sidebars, and callouts do not render yet, so keep it off for real writing. Reopen the project after changing this.")
+            Text("Lays each page out in its own text container instead of faking page breaks in one long one, which is what fixes text wrapping around images near a page break. This is the default. Turning it off falls back to the older editor, kept for now as a comparison when tracking down layout differences. Reopen the project after changing this.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
