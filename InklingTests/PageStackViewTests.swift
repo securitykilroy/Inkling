@@ -1435,6 +1435,125 @@ struct PageStackViewTests {
         #expect(stack.floatingLayoutRebuildCount - before == 1)
     }
 
+    // MARK: - Word-import-shaped images
+    //
+    // WordDocumentImporter creates plain attachments with no saved position —
+    // "no attempt is made to reproduce Word's on-page pixel position" — so
+    // imported images take the anchor-relative float path rather than the
+    // explicitly-placed one. That path is precisely what the old editor
+    // expressed in pre-pagination coordinates and got wrong near a page top.
+
+    /// Inserts un-placed attachments (what an import produces) at several
+    /// mid-paragraph anchors spread through a long chapter.
+    private static func stackWithImportedImages(
+        size: NSSize = NSSize(width: 200, height: 150),
+        anchors: [Int]
+    ) -> PageStackView {
+        let text = NSMutableAttributedString(attributedString: filler(paragraphs: 200))
+        for location in anchors.sorted(by: >) {
+            let attachment = NSTextAttachment()
+            attachment.image = image(size)
+            attachment.bounds = NSRect(origin: .zero, size: size)
+            text.insert(
+                NSAttributedString(attachment: attachment),
+                at: min(location, text.length)
+            )
+        }
+        let stack = PageStackView()
+        stack.setAttributedString(text)
+        stack.prepareFloatingImages()
+        return stack
+    }
+
+    @Test func importedImagesLandPageLocallyWithNoTextLost() throws {
+        let stack = Self.stackWithImportedImages(
+            anchors: [500, 4_000, 9_000, 14_000]
+        )
+        let layout = PagedEditorLayout.letter
+        let manager = stack.sharedLayoutManager
+
+        // No text lost, no degenerate collapsed tail — the two original failures.
+        var laidOut = 0
+        for view in stack.pageViews {
+            laidOut += manager.glyphRange(for: view.textContainer!).length
+        }
+        #expect(laidOut == manager.numberOfGlyphs)
+        #expect(
+            manager.lineFragmentRect(
+                forGlyphAt: manager.numberOfGlyphs - 1, effectiveRange: nil
+            ).height > 3
+        )
+
+        // Every exclusion is page-local, and each image draws on the page that
+        // excludes for it.
+        var totalExclusions = 0
+        for view in stack.pageViews {
+            let paths = view.textContainer?.exclusionPaths ?? []
+            totalExclusions += paths.count
+            for path in paths {
+                #expect(path.bounds.height < layout.pageStride)
+            }
+            if !paths.isEmpty { #expect(!view.floatingImages.isEmpty) }
+        }
+        #expect(totalExclusions == 4)
+    }
+
+    /// The original reported failure, reached the way an import reaches it: an
+    /// image anchored so late on its page that it cannot fit, and is therefore
+    /// pushed to the top of the next page — a first-line image.
+    @Test func anImportedImageBumpedToTheNextPageTopStillWrapsText() throws {
+        let layout = PagedEditorLayout.letter
+        let size = NSSize(width: 200, height: 150)
+
+        // Lay out plain text first, then find a character whose line sits too
+        // low on its page for the image to fit beneath it.
+        let probe = PageStackView()
+        probe.setAttributedString(Self.filler(paragraphs: 200))
+        let manager = probe.sharedLayoutManager
+        let container = try #require(probe.pageViews[1].textContainer)
+        let pageGlyphs = manager.glyphRange(for: container)
+
+        var anchorGlyph: Int?
+        manager.enumerateLineFragments(forGlyphRange: pageGlyphs) { rect, _, _, range, stop in
+            if rect.minY + size.height > layout.contentHeight {
+                anchorGlyph = range.location
+                stop.pointee = true
+            }
+        }
+        let glyph = try #require(anchorGlyph)
+        let anchor = manager.characterIndexForGlyph(at: glyph)
+
+        let stack = Self.stackWithImportedImages(size: size, anchors: [anchor])
+
+        // It moved to a later page and sits at that page's top.
+        let hosting = try #require(
+            stack.pageViews.first { !$0.floatingImages.isEmpty }
+        )
+        let placed = try #require(hosting.floatingImages.first)
+        #expect(placed.rect.minY < 1)
+        #expect(hosting.pageIndex >= 2)
+
+        // Text beside it wraps to its right rather than running underneath —
+        // the exact symptom that was reported.
+        let hostContainer = try #require(hosting.textContainer)
+        var checkedAny = false
+        stack.sharedLayoutManager.enumerateLineFragments(
+            forGlyphRange: stack.sharedLayoutManager.glyphRange(for: hostContainer)
+        ) { _, usedRect, _, _, _ in
+            guard usedRect.midY < placed.rect.maxY, usedRect.width > 1 else { return }
+            checkedAny = true
+            #expect(usedRect.minX >= size.width - 0.5)
+        }
+        #expect(checkedAny)
+
+        // And nothing was lost getting there.
+        var laidOut = 0
+        for view in stack.pageViews {
+            laidOut += stack.sharedLayoutManager.glyphRange(for: view.textContainer!).length
+        }
+        #expect(laidOut == stack.sharedLayoutManager.numberOfGlyphs)
+    }
+
     @Test func editingOnAnEarlyPageRepaginatesLaterPages() {
         let stack = Self.makeStack(paragraphs: 200)
         let before = Self.characterRange(ofPage: 1, in: stack)
