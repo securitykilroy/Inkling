@@ -180,16 +180,30 @@ final class PageTextView: NSTextView {
     /// the whole document rather than one per page.
     override var undoManager: UndoManager? { pageStack?.sharedUndoManager }
 
-    /// TEMPORARY: records whether the finder scrolls through this at all, and
-    /// where the scroll lands. Not a behaviour change — it defers to super.
+    /// NSTextView scrolls a range using *this* view's geometry, ignoring the
+    /// text-container inset of the page that actually holds it. Measured on a
+    /// real find: for a match on page 2 at page-local y 575.6 — stack y 2207.6 —
+    /// it scrolled the clip view to 1390, leaving the match 61.2pt below a
+    /// viewport ending at 2162.8. That is the reported bug: the word sat just
+    /// out of sight while its indicator, correctly placed, was clamped to the
+    /// bottom edge over the status bar. 61.2pt is most of the 72pt top inset.
+    ///
+    /// Resolve the range against the page that holds it instead.
     override func scrollRangeToVisible(_ range: NSRange) {
-        let before = enclosingScrollView?.contentView.bounds.origin.y ?? -1
-        super.scrollRangeToVisible(range)
-        let after = enclosingScrollView?.contentView.bounds.origin.y ?? -1
+        guard let stack = pageStack else {
+            super.scrollRangeToVisible(range)
+            return
+        }
+        let before = stack.enclosingScrollView?.contentView.bounds.origin.y ?? -1
+        stack.revealCharacterRange(range)
+        let after = stack.enclosingScrollView?.contentView.bounds.origin.y ?? -1
+        let rect = stack.rect(forCharacterRange: range)
+        let viewport = stack.enclosingScrollView?.contentView.bounds.height ?? 0
+        let inside = rect.map { $0.minY >= after && $0.maxY <= after + viewport } ?? false
         FindDiagnostics.log(
-            "scrollRangeToVisible(\(range)) on page \(pageIndex): "
-            + "clipY \(before) -> \(after); rangePage="
-            + "\(pageStack?.pageView(forCharacterIndex: range.location)?.pageIndex ?? -1)"
+            "scrollRangeToVisible(\(range)) on page \(pageIndex): clipY \(before) -> \(after); "
+            + "rangePage=\(stack.pageView(forCharacterIndex: range.location)?.pageIndex ?? -1); "
+            + "rect=\(rect.map { "\($0)" } ?? "nil"); visible=\(inside)"
         )
     }
 
@@ -728,16 +742,16 @@ final class PageStackView: NSView, NSTextStorageDelegate {
     /// Scrolls `range` into view without disturbing the selection. This is what
     /// the find bar needs: it has already selected the match, and only wants it
     /// revealed — on whichever page actually holds it.
+    /// Always scrolls to the *range*, never the caret: the finder reveals a
+    /// match before the selection settles, and a caret-based scroll would aim at
+    /// the wrong place. If typewriter scrolling is on, the selection change that
+    /// follows re-pins the caret anyway.
     func revealCharacterRange(_ range: NSRange) {
-        guard range.location != NSNotFound else { return }
-        if isTypewriterScrollingEnabled {
-            scrollCaretToTypewriterPosition()
-            return
-        }
-        guard let rect = rect(forCharacterRange: range) else { return }
-        // A little vertical padding so a match doesn't land flush against the
-        // viewport edge.
-        scrollToVisible(rect.insetBy(dx: 0, dy: -60))
+        guard range.location != NSNotFound,
+              let rect = rect(forCharacterRange: range)
+        else { return }
+        // Padding so a match never lands flush against the viewport edge.
+        scrollToVisible(rect.insetBy(dx: 0, dy: -80))
     }
 
     /// Selects `range` and scrolls it into view, whichever page it lives on.
