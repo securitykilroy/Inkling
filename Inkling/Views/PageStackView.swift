@@ -382,9 +382,31 @@ final class PageStackView: NSView, NSTextStorageDelegate {
     override var undoManager: UndoManager? { sharedUndoManager }
 
     /// Applied to every page view, including ones created later by repagination.
+    /// Must not touch anything document-wide: `NSTextView.font`, for instance,
+    /// restyles the whole storage, and this runs whenever a page is appended.
     var configurePage: ((PageTextView) -> Void)? {
         didSet { pageViews.forEach { configurePage?($0) } }
     }
+
+    /// The page configuration the editor installs. Named and shared so a test
+    /// can exercise the real thing: the danger here is that anything
+    /// document-wide (notably `NSTextView.font`, which restyles the entire
+    /// storage) silently corrupts the chapter every time repagination appends a
+    /// page. A test that built its own closure would not catch that.
+    static func standardPageConfiguration() -> (PageTextView) -> Void {
+        { page in
+            page.importsGraphics = true
+            page.isContinuousSpellCheckingEnabled = true
+            page.isAutomaticSpellingCorrectionEnabled = false
+            page.usesAdaptiveColorMappingForDarkAppearance = false
+        }
+    }
+
+    private var floatingRebuildScheduled = false
+
+    /// Test instrumentation: how many times the floating layout has been rebuilt.
+    /// Typing inside a sidebar should not move this unless the box resizes.
+    private(set) var floatingLayoutRebuildCount = 0
     /// The snap guide to draw, and the page to draw it on, during a drag.
     var activeSnapGuide: HorizontalGuide?
     var activeSnapPage: Int?
@@ -628,9 +650,22 @@ extension PageStackView {
         rebuildFloatingImageLayout()
     }
 
+    /// Coalesces a floating-layout rebuild to the next run-loop pass, so a burst
+    /// of edits costs one relayout rather than one per edit.
+    func scheduleFloatingRebuild() {
+        guard !floatingRebuildScheduled else { return }
+        floatingRebuildScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.floatingRebuildScheduled = false
+            self.rebuildFloatingImageLayout()
+        }
+    }
+
     /// Recomputes every floating image's page + rect and installs the resulting
     /// exclusion paths on the page containers they belong to.
     func rebuildFloatingImageLayout() {
+        floatingLayoutRebuildCount += 1
         // Start from an unwrapped baseline, so a previous exclusion can't
         // influence the anchor used to build its replacement.
         for view in pageViews {
@@ -1173,7 +1208,16 @@ extension PageStackView {
         view.onEdited = { [weak self, weak sidebar, weak view] in
             guard let self, let sidebar, let view else { return }
             sidebar.contentData = view.contentRTF()
-            self.rebuildFloatingImageLayout()
+
+            // Only the box's *height* changes how body text wraps, so only a
+            // height change needs a relayout. Rebuilding on every keystroke
+            // relaid the whole chapter twice per character, which is unusably
+            // slow on a book-length chapter.
+            let height = view.fittingTextHeight()
+            if abs(height - sidebar.contentHeight) > 0.5 {
+                sidebar.contentHeight = height
+                self.scheduleFloatingRebuild()
+            }
             self.pageViews.first?.didChangeText()
         }
         view.onExit = { [weak self] in

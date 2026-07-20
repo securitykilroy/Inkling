@@ -102,13 +102,12 @@ struct RichTextEditor: NSViewRepresentable {
         ]
         // Applied to every page, including ones repagination adds later — a page
         // that appears mid-typing needs spell checking like any other.
-        stack.configurePage = { page in
-            page.font = bodyFont
-            page.importsGraphics = true
-            page.isContinuousSpellCheckingEnabled = true
-            page.isAutomaticSpellingCorrectionEnabled = false
-            page.usesAdaptiveColorMappingForDarkAppearance = false
-        }
+        // Note this must never set `page.font`: NSTextView's font setter applies
+        // to *all* text in the storage, and this runs for every page appended by
+        // repagination — long after the chapter is loaded — so it would reset
+        // every Title/Heading run to body font each time the document grew a
+        // page. The body font reaches new text via `pageTypingAttributes`.
+        stack.configurePage = PageStackView.standardPageConfiguration()
         stack.isTypewriterScrollingEnabled = isTypewriterScrollingEnabled
         stack.pageDelegate = context.coordinator
         stack.pageCountDidChange = { [weak coordinator = context.coordinator] count in

@@ -1331,6 +1331,110 @@ struct PageStackViewTests {
         #expect(stack.focusedPageView === host)
     }
 
+    // MARK: - Regressions
+
+    /// `NSTextView.font` restyles the whole storage, and `configurePage` runs
+    /// for every page appended by repagination — long after the chapter loads.
+    /// Setting the body font there reset every Title/Heading run to body each
+    /// time the document grew a page.
+    @Test func headingStylesSurviveThePagesAddedByRepagination() throws {
+        let heading = NSFont.boldSystemFont(ofSize: 24)
+        let text = NSMutableAttributedString(
+            string: "Chapter One\n", attributes: [.font: heading]
+        )
+        text.append(Self.filler(paragraphs: 200))
+
+        let stack = PageStackView()
+        // The real configuration the editor installs, not a stand-in — the bug
+        // lived inside that closure, so a hand-rolled one would not catch it.
+        stack.configurePage = PageStackView.standardPageConfiguration()
+        stack.setAttributedString(text)
+        #expect(stack.pageCount > 1)
+
+        let font = try #require(
+            stack.storage.attribute(.font, at: 0, effectiveRange: nil) as? NSFont
+        )
+        #expect(font.pointSize == 24)
+        #expect(font.fontDescriptor.symbolicTraits.contains(.bold))
+    }
+
+    @Test func aMixOfStylesSurvivesRepeatedRepagination() throws {
+        let title = NSFont.boldSystemFont(ofSize: 28)
+        let body = NSFont.systemFont(ofSize: 12)
+        let text = NSMutableAttributedString(string: "Title\n", attributes: [.font: title])
+        text.append(NSAttributedString(string: "Body text.\n", attributes: [.font: body]))
+        text.append(Self.filler(paragraphs: 50))
+
+        let stack = PageStackView()
+        stack.configurePage = PageStackView.standardPageConfiguration()
+        stack.setAttributedString(text)
+
+        // Grow and shrink repeatedly; styling must be untouched throughout.
+        for count in [200, 20, 300] {
+            let more = NSMutableAttributedString(attributedString: text)
+            more.append(Self.filler(paragraphs: count))
+            stack.setAttributedString(more)
+
+            let titleFont = try #require(
+                stack.storage.attribute(.font, at: 0, effectiveRange: nil) as? NSFont
+            )
+            #expect(titleFont.pointSize == 28)
+        }
+    }
+
+    /// Typing in a sidebar used to relayout the whole chapter twice per
+    /// keystroke. Only a change to the box's height affects how body text wraps.
+    @Test func typingInASidebarWithoutResizingItDoesNotRelayoutTheChapter() throws {
+        let stack = Self.stackWithSidebar(paragraphs: 200, page: 1)
+        let id = try #require(stack.sidebarAttachments.keys.first)
+        let view = try #require(stack.sidebarViews[id])
+        let sidebar = try #require(stack.sidebarAttachments[id])
+
+        // Match the attachment's recorded height to the view's, as a settled
+        // layout would.
+        sidebar.contentHeight = view.fittingTextHeight()
+        let before = stack.floatingLayoutRebuildCount
+
+        // A few characters that fit on the box's existing line.
+        view.onEdited?()
+        view.onEdited?()
+        view.onEdited?()
+
+        #expect(stack.floatingLayoutRebuildCount == before)
+    }
+
+    @Test func typingThatGrowsASidebarDoesRelayoutTheChapter() async throws {
+        let stack = Self.stackWithSidebar(paragraphs: 200, page: 1)
+        let id = try #require(stack.sidebarAttachments.keys.first)
+        let view = try #require(stack.sidebarViews[id])
+        let sidebar = try #require(stack.sidebarAttachments[id])
+        let before = stack.floatingLayoutRebuildCount
+
+        // Pretend the box got taller than its recorded height.
+        sidebar.contentHeight = view.fittingTextHeight() - 40
+        view.onEdited?()
+        await Self.settle()
+
+        #expect(stack.floatingLayoutRebuildCount > before)
+    }
+
+    @Test func aBurstOfSidebarGrowthCoalescesIntoOneRelayout() async throws {
+        let stack = Self.stackWithSidebar(paragraphs: 200, page: 1)
+        let id = try #require(stack.sidebarAttachments.keys.first)
+        let view = try #require(stack.sidebarViews[id])
+        let sidebar = try #require(stack.sidebarAttachments[id])
+        let before = stack.floatingLayoutRebuildCount
+
+        // Five height-changing edits in one run-loop pass.
+        for _ in 0..<5 {
+            sidebar.contentHeight = view.fittingTextHeight() - 40
+            view.onEdited?()
+        }
+        await Self.settle()
+
+        #expect(stack.floatingLayoutRebuildCount - before == 1)
+    }
+
     @Test func editingOnAnEarlyPageRepaginatesLaterPages() {
         let stack = Self.makeStack(paragraphs: 200)
         let before = Self.characterRange(ofPage: 1, in: stack)
