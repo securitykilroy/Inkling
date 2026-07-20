@@ -378,6 +378,12 @@ final class PageStackView: NSView, NSTextStorageDelegate {
         storage.delegate = self
         appendPage()
         resizeToFitPages()
+
+        // CONTROL for the find diagnostics: this definitely runs. If this line
+        // appears in the log but the NSTextFinderClient ones never do, those
+        // @objc overrides are not being called and the whole approach is wrong.
+        // If even this is missing, logging itself is at fault, not the theory.
+        FindDiagnostics.log("PageStackView created — logging is live")
     }
 
     @available(*, unavailable)

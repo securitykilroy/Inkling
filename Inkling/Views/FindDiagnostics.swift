@@ -21,8 +21,11 @@ enum FindDiagnostics {
     /// Set false to silence without unpicking the call sites.
     static let isEnabled = true
 
+    /// `.notice`, not `.info`: info-level messages are memory-only and are
+    /// routinely dropped before `log show` can read them, especially in a
+    /// Release build. Notice is persisted.
     static func log(_ message: String) {
         guard isEnabled else { return }
-        logger.info("INKLING-FIND \(message, privacy: .public)")
+        logger.notice("INKLING-FIND \(message, privacy: .public)")
     }
 }
