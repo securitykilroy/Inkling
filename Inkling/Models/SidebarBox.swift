@@ -64,7 +64,7 @@ final class SidebarAttachment: NSTextAttachment {
     /// re-measures. Kept current by `PagedTextView` as the box's text changes.
     var contentHeight: CGFloat
 
-    init(contentData: Data?, width: CGFloat, position: FloatingImagePosition?, contentHeight: CGFloat) {
+    nonisolated init(contentData: Data?, width: CGFloat, position: FloatingImagePosition?, contentHeight: CGFloat) {
         self.contentData = contentData
         self.width = width
         self.position = position
@@ -91,12 +91,23 @@ final class SidebarAttachment: NSTextAttachment {
         NSSize(width: width, height: SidebarStyle.boxHeight(forContentHeight: contentHeight))
     }
 
-    private static let invisibleAnchorImage: NSImage = {
+    nonisolated private static let invisibleAnchorImage: NSImage = {
         let image = NSImage(size: NSSize(width: 1, height: 1))
-        image.lockFocus()
-        NSColor.clear.set()
-        NSRect(x: 0, y: 0, width: 1, height: 1).fill()
-        image.unlockFocus()
+        if let representation = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: 1,
+            pixelsHigh: 1,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ) {
+            representation.size = image.size
+            image.addRepresentation(representation)
+        }
         return image
     }()
 }

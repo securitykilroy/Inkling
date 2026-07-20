@@ -17,7 +17,6 @@ struct InklingTests {
         let scrollView = PagedTextView.makePagedScrollView()
 
         #expect(scrollView.documentView is PagedTextView)
-        #expect(scrollView is PagedEditorScrollView)
     }
 
     @Test func pagedEditorFitsWidePaperIntoNarrowEditorPane() {
@@ -1018,7 +1017,9 @@ struct InklingTests {
     }
 
     @Test func documentControllerOverridesTheSystemOpenPath() throws {
-        let selector = NSSelectorFromString("openDocumentWithContentsOfURL:display:completionHandler:")
+        let selector = #selector(NSDocumentController.openDocument(
+            withContentsOf:display:completionHandler:
+        ))
         let inklingMethod = try #require(class_getInstanceMethod(InklingDocumentController.self, selector))
         let appKitMethod = try #require(class_getInstanceMethod(NSDocumentController.self, selector))
 
@@ -1063,7 +1064,7 @@ struct InklingTests {
     }
 
     @Test func standardDocumentPrintCommandIsImplementedByInklingDocument() throws {
-        let selector = NSSelectorFromString("printOperationWithSettings:error:")
+        let selector = #selector(NSDocument.printOperation(withSettings:))
         let inklingMethod = try #require(class_getInstanceMethod(InklingDocument.self, selector))
         let appKitMethod = try #require(class_getInstanceMethod(NSDocument.self, selector))
 
@@ -2119,7 +2120,7 @@ struct InklingTests {
 
         #expect(findItem.keyEquivalent == "f")
         #expect(findItem.keyEquivalentModifierMask == .command)
-        #expect(findItem.action == Selector(("performTextFinderAction:")))
+        #expect(findItem.action == #selector(NSTextView.performTextFinderAction(_:)))
         #expect(findItem.tag == NSTextFinder.Action.showFindInterface.rawValue)
     }
 

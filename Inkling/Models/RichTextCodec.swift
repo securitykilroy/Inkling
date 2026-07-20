@@ -9,17 +9,17 @@
 import AppKit
 
 enum RichTextCodec {
-    private static let attachmentMetadataFilename = "__inkling_attachment_sizes.json"
-    private static let calloutMetadataFilename = "__inkling_callouts.json"
-    private static let sidebarMetadataFilename = "__inkling_sidebars.json"
+    nonisolated private static let attachmentMetadataFilename = "__inkling_attachment_sizes.json"
+    nonisolated private static let calloutMetadataFilename = "__inkling_callouts.json"
+    nonisolated private static let sidebarMetadataFilename = "__inkling_sidebars.json"
 
     /// Space after a paragraph, in points, so a plain "\n" between paragraphs
     /// reads as a paragraph break rather than a line break. Applied to newly
     /// typed text (via typing attributes) and backfilled on decode for
     /// chapters written before this existed, including Word imports.
-    static let defaultParagraphSpacing: CGFloat = 6
+    nonisolated static let defaultParagraphSpacing: CGFloat = 6
 
-    static var defaultParagraphStyle: NSParagraphStyle {
+    nonisolated static var defaultParagraphStyle: NSParagraphStyle {
         let style = NSMutableParagraphStyle()
         style.paragraphSpacing = defaultParagraphSpacing
         return style
@@ -59,7 +59,7 @@ enum RichTextCodec {
         var content: Data?
     }
 
-    static func decode(_ data: Data?) -> NSAttributedString? {
+    nonisolated static func decode(_ data: Data?) -> NSAttributedString? {
         guard let data else { return nil }
         guard let attributed = NSAttributedString(rtfd: data, documentAttributes: nil)
             ?? NSAttributedString(rtf: data, documentAttributes: nil)
@@ -75,7 +75,7 @@ enum RichTextCodec {
     /// Rebuilds a full `SidebarAttachment` (content + placement + width) at each
     /// recorded anchor. The generic attachment produced by RTFD decoding is
     /// replaced in place, carrying over the surrounding run's attributes.
-    private static func restoreSidebars(
+    nonisolated private static func restoreSidebars(
         in attributedString: NSMutableAttributedString,
         from data: Data
     ) {
@@ -108,7 +108,7 @@ enum RichTextCodec {
     /// Re-tags callout runs recorded in the sidecar and re-applies each kind's
     /// canonical styling. Runs after `applyDefaultParagraphSpacing` so callout
     /// paragraphs get their reserved box padding rather than the default spacing.
-    private static func restoreCallouts(
+    nonisolated private static func restoreCallouts(
         in attributedString: NSMutableAttributedString,
         from data: Data
     ) {
@@ -133,7 +133,7 @@ enum RichTextCodec {
     /// paragraph-style properties (alignment, etc.) already present. Safe to
     /// run on every decode: a paragraph that already has spacing (from a
     /// prior save, once this exists) is left untouched.
-    private static func applyDefaultParagraphSpacing(in attributedString: NSMutableAttributedString) {
+    nonisolated private static func applyDefaultParagraphSpacing(in attributedString: NSMutableAttributedString) {
         guard attributedString.length > 0 else { return }
         let fullRange = NSRange(location: 0, length: attributedString.length)
         attributedString.enumerateAttribute(.paragraphStyle, in: fullRange) { value, range, _ in
@@ -145,7 +145,7 @@ enum RichTextCodec {
         }
     }
 
-    static func encode(_ attributedString: NSAttributedString) -> Data? {
+    nonisolated static func encode(_ attributedString: NSAttributedString) -> Data? {
         guard let rtfd = attributedString.rtfd(
             from: NSRange(location: 0, length: attributedString.length),
             documentAttributes: [:]
@@ -171,7 +171,7 @@ enum RichTextCodec {
     }
 
     /// One record per floating sidebar, capturing its anchor, geometry, and RTF.
-    private static func sidebarRecords(in attributedString: NSAttributedString) -> [SidebarRecord] {
+    nonisolated private static func sidebarRecords(in attributedString: NSAttributedString) -> [SidebarRecord] {
         var records: [SidebarRecord] = []
         attributedString.enumerateAttribute(
             .attachment,
@@ -191,7 +191,7 @@ enum RichTextCodec {
         return records
     }
 
-    private static func replaceFile(named name: String, contents: Data, in wrapper: FileWrapper) {
+    nonisolated private static func replaceFile(named name: String, contents: Data, in wrapper: FileWrapper) {
         if let existing = wrapper.fileWrappers?[name] {
             wrapper.removeFileWrapper(existing)
         }
@@ -200,7 +200,7 @@ enum RichTextCodec {
 
     /// One record per maximal callout run. `enumerateAttribute` already coalesces
     /// adjacent equal string values, so each callback is one contiguous callout.
-    private static func calloutRecords(in attributedString: NSAttributedString) -> [CalloutRecord] {
+    nonisolated private static func calloutRecords(in attributedString: NSAttributedString) -> [CalloutRecord] {
         var records: [CalloutRecord] = []
         attributedString.enumerateAttribute(
             .inklingCallout,
@@ -215,7 +215,7 @@ enum RichTextCodec {
     /// RTFD embeds attachment files but does not preserve NSTextAttachment's
     /// display bounds. Store those bounds in a private sidecar inside the RTFD
     /// package without reducing the original image or migrating Core Data.
-    private static func attachmentSizeRecords(
+    nonisolated private static func attachmentSizeRecords(
         in attributedString: NSAttributedString
     ) -> [AttachmentSizeRecord] {
         var records: [AttachmentSizeRecord] = []
@@ -242,7 +242,7 @@ enum RichTextCodec {
         return records
     }
 
-    private static func restoreAttachmentSizes(
+    nonisolated private static func restoreAttachmentSizes(
         in attributedString: NSMutableAttributedString,
         from data: Data
     ) {
@@ -275,8 +275,10 @@ enum RichTextCodec {
             // comes from the embedded image and ignores `bounds`. Convert it to a
             // plain image-backed attachment so our stored display size is honored.
             if attachment.image == nil {
-                if let cell = attachment.attachmentCell as? NSTextAttachmentCell,
-                   let cellImage = cell.image {
+                let cellImage = (attachment.attachmentCell as? NSTextAttachmentCell).flatMap { cell in
+                    Thread.isMainThread ? MainActor.assumeIsolated { cell.image } : nil
+                }
+                if let cellImage {
                     attachment.image = cellImage
                 } else if let contents = attachment.fileWrapper?.regularFileContents,
                           let image = NSImage(data: contents) {

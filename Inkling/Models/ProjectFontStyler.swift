@@ -22,7 +22,7 @@ struct FontStyledChapter {
 enum ProjectFontStyler {
     /// Rewrites every font run in `attributed` to `familyName` (nil = system
     /// default), preserving each run's point size and bold/italic traits.
-    static func restyled(_ attributed: NSAttributedString, familyName: String?) -> NSAttributedString {
+    nonisolated static func restyled(_ attributed: NSAttributedString, familyName: String?) -> NSAttributedString {
         let mutable = NSMutableAttributedString(attributedString: attributed)
         let full = NSRange(location: 0, length: mutable.length)
         mutable.enumerateAttribute(.font, in: full) { value, range, _ in
@@ -36,7 +36,7 @@ enum ProjectFontStyler {
     /// new data only for chapters that actually decoded (chapters with no
     /// rich text to restyle are omitted) — the caller writes these back onto
     /// the real `Chapter.bodyData`/`notesData`.
-    static func restyledChapters(
+    nonisolated static func restyledChapters(
         _ chapters: [FontStyledChapter],
         familyName: String?
     ) -> [UUID: (bodyData: Data?, notesData: Data?)] {

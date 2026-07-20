@@ -13,7 +13,7 @@ extension NSAttributedString.Key {
     /// Carries a `FloatingImagePosition` from `RichTextCodec.decode` to the code
     /// that builds `FloatingImageAttachment`s (the editor and the printer). This
     /// attribute lives only in memory — it is never serialized into RTFD.
-    static let inklingFloatingImagePosition = NSAttributedString.Key("inklingFloatingImagePosition")
+    nonisolated static let inklingFloatingImagePosition = NSAttributedString.Key("inklingFloatingImagePosition")
 }
 
 final class FloatingImageAttachment: NSTextAttachment {

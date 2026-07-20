@@ -10,9 +10,11 @@
 
 import Cocoa
 
-let application = NSApplication.shared
-let delegate = AppDelegate()
-application.delegate = delegate
-application.mainMenu = MainMenu.build()
-application.setActivationPolicy(.regular)
-application.run()
+MainActor.assumeIsolated {
+    let application = NSApplication.shared
+    let delegate = AppDelegate()
+    application.delegate = delegate
+    application.mainMenu = MainMenu.build()
+    application.setActivationPolicy(.regular)
+    application.run()
+}

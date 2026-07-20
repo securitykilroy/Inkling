@@ -13,13 +13,13 @@ import CoreGraphics
 
 /// A floating image's fixed placement: which page it lives on, and the top-left
 /// corner of the image in that page's paper coordinates.
-struct FloatingImagePosition: Equatable {
+nonisolated struct FloatingImagePosition: Equatable {
     var page: Int
     var origin: CGPoint
 }
 
 /// Which vertical guide a dragged image snapped to, for drawing the guide line.
-enum HorizontalGuide: Equatable {
+nonisolated enum HorizontalGuide: Equatable {
     case left, center, right
 }
 

@@ -489,7 +489,7 @@ struct PageStackViewTests {
         }
         #expect(pagesWithExclusions.count == 1)
         // The image draws on the same page that excludes for it.
-        let excludingPage = try? #require(pagesWithExclusions.first)
+        let excludingPage = pagesWithExclusions.first
         #expect(excludingPage?.floatingImages.count == 1)
     }
 

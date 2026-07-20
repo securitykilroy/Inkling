@@ -19,7 +19,7 @@ extension NSAttributedString.Key {
     /// Marks a run of paragraphs as a callout. The value is a
     /// `CalloutKind.rawValue`. Never serialized into RTFD directly — restored
     /// from the sidecar by `RichTextCodec.decode`.
-    static let inklingCallout = NSAttributedString.Key("inklingCallout")
+    nonisolated static let inklingCallout = NSAttributedString.Key("inklingCallout")
 }
 
 /// The kinds of inline callout an author can apply. Each carries the label drawn
@@ -34,13 +34,13 @@ enum CalloutKind: String, CaseIterable, Identifiable {
     /// Resolves a stored raw value to a kind, migrating the retired inline
     /// `sidebar` kind (superseded by the floating margin Sidebar) to `note` so
     /// existing chapters keep their box rather than losing the styling.
-    init?(storedRawValue raw: String) {
+    nonisolated init?(storedRawValue raw: String) {
         if raw == "sidebar" { self = .note; return }
         self.init(rawValue: raw)
     }
 
     /// Title-cased name for the authoring menu.
-    var menuLabel: String {
+    nonisolated var menuLabel: String {
         switch self {
         case .note: return "Note"
         case .warning: return "Warning"
@@ -49,9 +49,9 @@ enum CalloutKind: String, CaseIterable, Identifiable {
 
     /// Upper-cased label drawn on the box and written into exports (so NotebookLM
     /// and other readers see a clearly-labeled aside, not narrative text).
-    var exportLabel: String { menuLabel.uppercased() }
+    nonisolated var exportLabel: String { menuLabel.uppercased() }
 
-    var symbolName: String {
+    nonisolated var symbolName: String {
         switch self {
         case .note: return "info.circle"
         case .warning: return "exclamationmark.triangle"
@@ -60,7 +60,7 @@ enum CalloutKind: String, CaseIterable, Identifiable {
 
     /// Border/label color as a 6-digit hex string. Kept as hex so the exact same
     /// value flows to AppKit drawing and to Word's `w:color`/`w:fill`.
-    var accentHex: String {
+    nonisolated var accentHex: String {
         switch self {
         case .note: return "3B82F6"
         case .warning: return "D97706"
@@ -68,7 +68,7 @@ enum CalloutKind: String, CaseIterable, Identifiable {
     }
 
     /// Box fill color as a 6-digit hex string.
-    var fillHex: String {
+    nonisolated var fillHex: String {
         switch self {
         case .note: return "EAF2FE"
         case .warning: return "FEF3E2"
@@ -104,26 +104,26 @@ extension NSColor {
 /// callout's inset text and reserved box padding are defined in exactly one place.
 enum CalloutStyling {
     /// Horizontal inset of the callout text from the box's sides.
-    static let sideInset: CGFloat = 16
+    nonisolated static let sideInset: CGFloat = 16
     /// Vertical gap between the callout text and the box's top/bottom edges.
-    static let innerVerticalPad: CGFloat = 10
+    nonisolated static let innerVerticalPad: CGFloat = 10
     /// Height reserved above the first text line for the box's label.
-    static let labelHeight: CGFloat = 16
+    nonisolated static let labelHeight: CGFloat = 16
     /// Breathing room between the box and the surrounding body text.
-    static let outerGap: CGFloat = 10
-    static let cornerRadius: CGFloat = 6
-    static let borderWidth: CGFloat = 1.5
+    nonisolated static let outerGap: CGFloat = 10
+    nonisolated static let cornerRadius: CGFloat = 6
+    nonisolated static let borderWidth: CGFloat = 1.5
 
     /// Space reserved before a callout's first paragraph: outer gap + the box's
     /// top padding + the label band.
-    static var topReserve: CGFloat { outerGap + innerVerticalPad + labelHeight }
+    nonisolated static var topReserve: CGFloat { outerGap + innerVerticalPad + labelHeight }
     /// Space reserved after a callout's last paragraph: outer gap + bottom padding.
-    static var bottomReserve: CGFloat { outerGap + innerVerticalPad }
+    nonisolated static var bottomReserve: CGFloat { outerGap + innerVerticalPad }
 
     /// Tags `range` (expected to be whole paragraphs) as a callout of `kind` and
     /// applies the inset/spacing paragraph style. The first paragraph reserves
     /// room for the label + top padding; the last reserves the bottom padding.
-    static func apply(_ kind: CalloutKind, to storage: NSMutableAttributedString, range: NSRange) {
+    nonisolated static func apply(_ kind: CalloutKind, to storage: NSMutableAttributedString, range: NSRange) {
         guard range.length > 0, NSMaxRange(range) <= storage.length else { return }
         storage.addAttribute(.inklingCallout, value: kind.rawValue, range: range)
 
@@ -144,7 +144,7 @@ enum CalloutStyling {
 
     /// Clears the callout tag from `range` and resets its paragraphs to the
     /// default body paragraph style (dropping the inset and reserved padding).
-    static func remove(from storage: NSMutableAttributedString, range: NSRange) {
+    nonisolated static func remove(from storage: NSMutableAttributedString, range: NSRange) {
         guard range.length > 0, NSMaxRange(range) <= storage.length else { return }
         storage.removeAttribute(.inklingCallout, range: range)
         for paragraph in paragraphEnclosingRanges(in: storage.string as NSString, within: range) {
@@ -152,7 +152,7 @@ enum CalloutStyling {
         }
     }
 
-    private static func paragraphEnclosingRanges(in string: NSString, within range: NSRange) -> [NSRange] {
+    nonisolated private static func paragraphEnclosingRanges(in string: NSString, within range: NSRange) -> [NSRange] {
         var ranges: [NSRange] = []
         string.enumerateSubstrings(in: range, options: [.byParagraphs, .substringNotRequired]) { _, _, enclosing, _ in
             ranges.append(enclosing)

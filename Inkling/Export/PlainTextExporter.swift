@@ -15,9 +15,9 @@ import Foundation
 enum PlainTextExporter {
 
     /// Object-replacement character that stands in for an image attachment.
-    private static let attachmentMarker = "\u{fffc}"
+    nonisolated private static let attachmentMarker = "\u{fffc}"
 
-    static func plainText(for chapters: [PrintableChapter]) -> String {
+    nonisolated static func plainText(for chapters: [PrintableChapter]) -> String {
         let blocks = chapters.map { block(for: $0) }
         guard !blocks.isEmpty else { return "" }
         return blocks.joined(separator: "\n\n") + "\n"
@@ -25,7 +25,7 @@ enum PlainTextExporter {
 
     /// Title line, a blank line, then the body text. The body is included only
     /// when it has visible content so empty chapters don't trail blank lines.
-    private static func block(for chapter: PrintableChapter) -> String {
+    nonisolated private static func block(for chapter: PrintableChapter) -> String {
         let title = (chapter.title?.isEmpty == false) ? chapter.title! : "Untitled Chapter"
 
         let body = RichTextCodec.decode(chapter.bodyData).map(bodyText(from:)) ?? ""
@@ -36,7 +36,7 @@ enum PlainTextExporter {
     /// `[LABEL] … [/LABEL]` markers, so the aside's role survives with zero
     /// formatting (e.g. for NotebookLM). Non-callout stretches are emitted as-is;
     /// callouts are separated from surrounding text by a blank line.
-    static func bodyText(from attributed: NSAttributedString) -> String {
+    nonisolated static func bodyText(from attributed: NSAttributedString) -> String {
         let attributed = expandingSidebars(attributed)
         let string = attributed.string as NSString
         var pieces: [String] = []
@@ -60,7 +60,7 @@ enum PlainTextExporter {
     /// Replaces each floating sidebar anchor with its text wrapped in
     /// `[SIDEBAR] … [/SIDEBAR]` markers, inline where the box was anchored, so the
     /// aside's role and content survive with zero formatting.
-    private static func expandingSidebars(_ attributed: NSAttributedString) -> NSAttributedString {
+    nonisolated private static func expandingSidebars(_ attributed: NSAttributedString) -> NSAttributedString {
         let mutable = NSMutableAttributedString(attributedString: attributed)
         var anchors: [(range: NSRange, text: String)] = []
         mutable.enumerateAttribute(

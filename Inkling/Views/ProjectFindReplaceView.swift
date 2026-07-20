@@ -61,11 +61,7 @@ struct ProjectFindReplaceView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(match.chapterTitle)
                             .font(.callout.weight(.semibold))
-                        (
-                            Text(match.snippetBefore)
-                                + Text(match.snippetMatch).bold().foregroundColor(.accentColor)
-                                + Text(match.snippetAfter)
-                        )
+                        Text(snippet(for: match))
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -123,5 +119,15 @@ struct ProjectFindReplaceView: View {
             guard let id = chapter.id else { return nil }
             return SearchableChapter(id: id, title: chapter.title ?? "Untitled Chapter", bodyData: chapter.bodyData)
         }
+    }
+
+    private func snippet(for match: SearchMatch) -> AttributedString {
+        var result = AttributedString(match.snippetBefore)
+        var highlighted = AttributedString(match.snippetMatch)
+        highlighted.font = .callout.bold()
+        highlighted.foregroundColor = .accentColor
+        result += highlighted
+        result += AttributedString(match.snippetAfter)
+        return result
     }
 }

@@ -77,7 +77,7 @@ enum WordDocumentImporter {
 
     // MARK: - Relationships (rId -> media file path, relative to word/)
 
-    private static func relationshipTargets(from relsData: Data) -> [String: String]? {
+    nonisolated private static func relationshipTargets(from relsData: Data) -> [String: String]? {
         guard let doc = try? XMLDocument(data: relsData, options: []), let root = doc.rootElement() else { return nil }
         var map: [String: String] = [:]
         for case let relationship as XMLElement in root.children ?? [] where relationship.localName == "Relationship" {

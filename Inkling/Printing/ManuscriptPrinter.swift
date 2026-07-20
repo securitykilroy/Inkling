@@ -627,13 +627,6 @@ final class ManuscriptPrintView: NSView {
         frame = NSRect(origin: .zero, size: borderSize)
         defer { frame = savedFrame }
 
-        // Resizing to the full page and re-locking focus is the documented way
-        // to draw into the margins from drawPageBorder(with:); it resets the
-        // graphics origin to the page corner. `lockFocus`/`unlockFocus` are
-        // soft-deprecated but have no replacement for this print-time use.
-        lockFocus()
-        defer { unlockFocus() }
-
         let left = info.leftMargin
         let contentWidth = borderSize.width - info.leftMargin - info.rightMargin
 

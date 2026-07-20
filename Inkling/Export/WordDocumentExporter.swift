@@ -13,7 +13,7 @@ import Foundation
 private extension NSAttributedString.Key {
     /// Export-only tag marking paragraphs that came from an expanded floating
     /// sidebar, so they get the bordered Word "Sidebar" style + label.
-    static let inklingWordSidebar = NSAttributedString.Key("inklingWordSidebar")
+    nonisolated static let inklingWordSidebar = NSAttributedString.Key("inklingWordSidebar")
 }
 
 enum WordDocumentExporter {
@@ -195,7 +195,7 @@ enum WordDocumentExporter {
         return calloutKind(in: attributed, at: location - 1) != kind
     }
 
-    private static func wordStyleID(for kind: CalloutKind) -> String {
+    nonisolated private static func wordStyleID(for kind: CalloutKind) -> String {
         "\(kind.rawValue.capitalized)Callout"
     }
 
@@ -358,7 +358,7 @@ enum WordDocumentExporter {
     /// A shaded, four-sided-bordered paragraph style for a callout kind. Adjacent
     /// paragraphs sharing this style merge into one visual box in Word. Colors
     /// come from the same hex values the on-screen/printed box uses.
-    private static func calloutStyleXML(for kind: CalloutKind) -> String {
+    nonisolated private static func calloutStyleXML(for kind: CalloutKind) -> String {
         let id = wordStyleID(for: kind)
         let border = ["top", "left", "bottom", "right"].map {
             #"<w:\#($0) w:val="single" w:sz="12" w:space="6" w:color="\#(kind.accentHex)"/>"#
