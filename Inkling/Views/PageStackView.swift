@@ -238,6 +238,26 @@ final class PageTextView: NSTextView {
         return rects
     }
 
+    /// Draws the matched characters into the finder's indicator bubble. The
+    /// finder calls this on the *client* — the focused page view — but the
+    /// glyphs belong to whichever page holds them, so drawing them with this
+    /// view's container origin puts them somewhere arbitrary. That is why the
+    /// found word rendered outside the page, over the status bar.
+    @objc(drawCharactersInRange:forContentView:)
+    func drawCharacters(in range: NSRange, forContentView view: NSView) {
+        guard let stack = pageStack else { return }
+        let host = (view as? PageTextView)
+            ?? stack.pageView(forCharacterIndex: range.location)
+        guard let host, let container = host.textContainer else { return }
+
+        let manager = stack.sharedLayoutManager
+        let glyphs = manager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+        let onThisPage = NSIntersectionRange(glyphs, manager.glyphRange(for: container))
+        guard onThisPage.length > 0 else { return }
+
+        manager.drawGlyphs(forGlyphRange: onThisPage, at: host.textContainerOrigin)
+    }
+
     /// Every character range on screen, across all visible pages — not just this
     /// view's page. Drives incremental highlighting of matches.
     @objc var visibleCharacterRanges: [NSValue] {
