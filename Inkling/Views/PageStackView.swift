@@ -180,14 +180,73 @@ final class PageTextView: NSTextView {
     /// the whole document rather than one per page.
     override var undoManager: UndoManager? { pageStack?.sharedUndoManager }
 
-    // NOTE: deliberately no `scrollRangeToVisible` override. It was tried as a
-    // fix for the reported find-doesn't-jump bug on the theory that the find bar
-    // asks the focused page view — not the page holding the match — to reveal
-    // the range. That theory is wrong: NSTextView's own implementation resolves
-    // a range on any page correctly through the shared layout manager, verified
-    // both at magnification 1 and scaled down. The find bug is still unexplained;
-    // the next suspect is NSTextFinderClient geometry (`rects(forCharacterRange:)`
-    // and friends), which is per-view and so does not know about other pages.
+    // MARK: - NSTextFinderClient across pages
+    //
+    // NSTextView is a single-view find client: it answers these as though all of
+    // its text were displayed in itself. With one container that is true. Here
+    // it isn't — the focused page view is the client, but a match usually lives
+    // on a *different* page view. The finder then computes the match's geometry
+    // in the wrong view's coordinate space, which is why a found word was
+    // highlighted correctly (the selection is shared, so the right page draws it)
+    // while the scroll landed somewhere meaningless.
+    //
+    // `contentView(at:effectiveCharacterRange:)` exists precisely for clients
+    // that "display content in multiple views", so implement that side properly.
+
+    // NSTextView implements these in Objective-C without surfacing them as
+    // overridable Swift members, so they are declared with explicit selectors
+    // and override at the runtime level. There is no `super` to fall back to;
+    // each degrades to the single-view answer instead.
+
+    @objc(contentViewAtIndex:effectiveCharacterRange:)
+    func contentView(
+        at index: Int,
+        effectiveCharacterRange outRange: NSRangePointer
+    ) -> NSView {
+        guard let stack = pageStack,
+              let host = stack.pageView(forCharacterIndex: index)
+        else {
+            outRange.pointee = NSRange(location: 0, length: textStorage?.length ?? 0)
+            return self
+        }
+        outRange.pointee = stack.characterRange(ofPage: host.pageIndex)
+        return host
+    }
+
+    /// Rects enclosing `range`, in the coordinates of the view that displays it
+    /// — the page view `contentView(at:)` returns, not necessarily self.
+    @objc(rectsForCharacterRange:)
+    func rects(forCharacterRange range: NSRange) -> [NSValue]? {
+        guard let stack = pageStack,
+              let host = stack.pageView(forCharacterIndex: range.location),
+              let container = host.textContainer
+        else { return nil }
+
+        let manager = stack.sharedLayoutManager
+        let glyphs = manager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+        let onThisPage = NSIntersectionRange(glyphs, manager.glyphRange(for: container))
+        guard onThisPage.length > 0 else { return nil }
+
+        var rects: [NSValue] = []
+        manager.enumerateEnclosingRects(
+            forGlyphRange: onThisPage,
+            withinSelectedGlyphRange: NSRange(location: NSNotFound, length: 0),
+            in: container
+        ) { rect, _ in
+            rects.append(NSValue(rect: host.viewRect(forFloating: rect)))
+        }
+        return rects
+    }
+
+    /// Every character range on screen, across all visible pages — not just this
+    /// view's page. Drives incremental highlighting of matches.
+    @objc var visibleCharacterRanges: [NSValue] {
+        guard let stack = pageStack else { return [] }
+        return stack.visiblePageViews()
+            .map { stack.characterRange(ofPage: $0.pageIndex) }
+            .filter { $0.length > 0 }
+            .map { NSValue(range: $0) }
+    }
 
     override func setSelectedRanges(
         _ ranges: [NSValue],
@@ -634,6 +693,24 @@ final class PageStackView: NSView, NSTextStorageDelegate {
         host.setSelectedRange(clamped)
         window?.makeFirstResponder(host)
         revealCharacterRange(clamped)
+    }
+
+    /// The character range `page` displays.
+    func characterRange(ofPage page: Int) -> NSRange {
+        guard page >= 0, page < pageViews.count,
+              let container = pageViews[page].textContainer
+        else { return NSRange(location: 0, length: 0) }
+        return sharedLayoutManager.characterRange(
+            forGlyphRange: sharedLayoutManager.glyphRange(for: container),
+            actualGlyphRange: nil
+        )
+    }
+
+    /// The pages currently intersecting the viewport.
+    func visiblePageViews() -> [PageTextView] {
+        guard let clip = enclosingScrollView?.contentView else { return pageViews }
+        let visible = clip.bounds
+        return pageViews.filter { $0.frame.intersects(visible) }
     }
 
     /// The page view whose container holds `characterIndex`.

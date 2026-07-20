@@ -1665,6 +1665,68 @@ struct PageStackViewTests {
         #expect(PageStackView.isEnabled)
     }
 
+    // MARK: - NSTextFinderClient across pages
+    //
+    // NSTextView answers the find client protocol as a single-view client: all
+    // of its text is in itself. That is false here, and is the leading
+    // explanation for a match being highlighted on the right page while the
+    // scroll goes somewhere meaningless. These test the answers directly —
+    // driving NSTextFinder end-to-end could not be made to run headless.
+
+    @Test func theFindClientReportsThePageViewThatDisplaysAnIndex() throws {
+        let stack = Self.makeStack(paragraphs: 200)
+        _ = Self.inCanvas(stack)
+        #expect(stack.pageCount > 2)
+
+        for page in 0..<min(3, stack.pageCount) {
+            let range = stack.characterRange(ofPage: page)
+            guard range.length > 0 else { continue }
+            var effective = NSRange(location: 0, length: 0)
+            let view = stack.pageViews[0].contentView(
+                at: range.location + 1, effectiveCharacterRange: &effective
+            )
+            // Asked from page 0's view, it must still name the page that shows
+            // the character — that is the whole point of the protocol method.
+            #expect(view === stack.pageViews[page])
+            #expect(effective == range)
+        }
+    }
+
+    @Test func theFindClientReturnsRectsInTheDisplayingPagesCoordinates() throws {
+        let stack = Self.makeStack(paragraphs: 200)
+        _ = Self.inCanvas(stack)
+        #expect(stack.pageCount > 2)
+
+        let page2 = stack.characterRange(ofPage: 2)
+        let match = NSRange(location: page2.location + 10, length: 6)
+        let rects = try #require(stack.pageViews[0].rects(forCharacterRange: match))
+        #expect(!rects.isEmpty)
+
+        // Page-local: within one page's bounds, not offset by two page strides.
+        let host = stack.pageViews[2]
+        for value in rects {
+            #expect(host.bounds.contains(value.rectValue.origin))
+        }
+    }
+
+    @Test func theFindClientReportsEveryVisiblePagesRange() throws {
+        let stack = Self.makeStack(paragraphs: 200)
+        let scrollView = Self.inCanvas(stack)
+        #expect(stack.pageCount > 2)
+
+        let visible = stack.pageViews[0].visibleCharacterRanges
+        #expect(!visible.isEmpty)
+
+        // Every reported range belongs to a page actually on screen.
+        let onScreen = Set(stack.visiblePageViews().map(\.pageIndex))
+        #expect(!onScreen.isEmpty)
+        for value in visible {
+            let page = try #require(stack.pageView(forCharacterIndex: value.rangeValue.location))
+            #expect(onScreen.contains(page.pageIndex))
+        }
+        _ = scrollView
+    }
+
     @Test func editingOnAnEarlyPageRepaginatesLaterPages() {
         let stack = Self.makeStack(paragraphs: 200)
         let before = Self.characterRange(ofPage: 1, in: stack)
