@@ -77,6 +77,7 @@ final class InklingDocument: NSPersistentDocument {
             onCaretChange: { [weak self] location in self?.currentCaretLocation = location }
         )
         .environment(\.managedObjectContext, context)
+        .environmentObject(projectCommands)
 
         let hosting = NSHostingController(rootView: rootView)
         let window = NSWindow(contentViewController: hosting)
@@ -89,6 +90,30 @@ final class InklingDocument: NSPersistentDocument {
         let controller = NSWindowController(window: window)
         controller.shouldCascadeWindows = true
         addWindowController(controller)
+    }
+
+    /// Bridge for menu commands that drive this window's SwiftUI layer (Project
+    /// Settings, New Chapter). Injected into the root view's environment in
+    /// `makeWindowControllers`; the `@objc` actions below poke it.
+    let projectCommands = ProjectCommands()
+
+    /// Raises the Project Settings sheet. Wired to the app menu's Settings…
+    /// item (⌘,) through the responder chain, like the print/export actions.
+    @objc func showProjectSettings(_ sender: Any?) {
+        projectCommands.presentSettings()
+    }
+
+    /// Raises the project-wide Find & Replace sheet. Wired to the Edit menu's
+    /// Find & Replace in Project… item (⇧⌘F) through the responder chain.
+    @objc func showFindReplace(_ sender: Any?) {
+        projectCommands.presentFindReplace()
+    }
+
+    /// Adds a chapter and selects it. Wired to the File menu's New Chapter item
+    /// (⇧⌘N); the sidebar observes the request and reuses its own insert path so
+    /// the menu and the toolbar button behave identically.
+    @objc func newChapter(_ sender: Any?) {
+        projectCommands.requestNewChapter()
     }
 
     // MARK: - Project Notes

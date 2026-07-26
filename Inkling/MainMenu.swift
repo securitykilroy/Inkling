@@ -49,6 +49,8 @@ enum MainMenu {
         return submenu(appName, [
             item("About \(appName)", "orderFrontStandardAboutPanel:", ""),
             .separator(),
+            item("Settings…", "showProjectSettings:", ","),
+            .separator(),
             {
                 let hideOthers = item("Hide Others", "hideOtherApplications:", "h")
                 hideOthers.keyEquivalentModifierMask = [.command, .option]
@@ -76,12 +78,17 @@ enum MainMenu {
         let exportWord = item("Export Word Chapters…", "exportWordChapters:", "e")
         exportWord.keyEquivalentModifierMask = [.command, .option]
 
+        // ⇧⌘N so ⌘N stays the standard "New" (new document/project) above it.
+        let newChapter = item("New Chapter", "newChapter:", "n")
+        newChapter.keyEquivalentModifierMask = [.command, .shift]
+
         // macOS automatically augments a document app's File menu with a
         // populated "Open Recent" plus Close All / Rename / Move To /
         // Revert To (the version browser) / Share, so we don't add those here —
         // doing so produced a duplicate, empty "Open Recent".
         return submenu("File", [
             item("New", "newDocument:", "n"),
+            newChapter,
             item("Open…", "openDocument:", "o"),
             .separator(),
             item("Close", "performClose:", "w"),
@@ -143,6 +150,10 @@ enum MainMenu {
             finderItem("Find Next", .nextMatch, "g"),
             finderItem("Find Previous", .previousMatch, "g", modifiers: [.command, .shift]),
             finderItem("Use Selection for Find", .setSearchString, "e"),
+            .separator(),
+            // Inkling's cross-chapter search, distinct from the per-editor find
+            // bar above. Routes to InklingDocument through the responder chain.
+            item("Find & Replace in Project…", "showFindReplace:", "f", modifiers: [.command, .shift]),
         ])
     }
 

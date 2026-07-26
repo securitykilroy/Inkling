@@ -18,9 +18,8 @@ struct ChapterSidebar: View {
     @Binding var selection: Chapter?
     var documentName: String = ""
 
+    @EnvironmentObject private var commands: ProjectCommands
     @State private var expanded: Set<UUID> = []
-    @State private var showingSettings = false
-    @State private var showingFindReplace = false
 
     @FetchRequest(
         sortDescriptors: [NSSortDescriptor(keyPath: \Chapter.sortIndex, ascending: true)],
@@ -71,7 +70,7 @@ struct ChapterSidebar: View {
         .toolbar {
             ToolbarItem {
                 Button {
-                    selection = viewModel.addChapter()
+                    commands.requestNewChapter()
                 } label: {
                     Label("Add Chapter", systemImage: "plus")
                 }
@@ -80,7 +79,7 @@ struct ChapterSidebar: View {
             }
             ToolbarItem {
                 Button {
-                    showingFindReplace = true
+                    commands.presentFindReplace()
                 } label: {
                     Label("Find & Replace", systemImage: "magnifyingglass")
                 }
@@ -89,17 +88,23 @@ struct ChapterSidebar: View {
             }
             ToolbarItem {
                 Button {
-                    showingSettings = true
+                    commands.presentSettings()
                 } label: {
                     Label("Project Settings", systemImage: "gearshape")
                 }
-                .help("Project Settings")
+                .help("Project Settings (⌘,)")
             }
         }
-        .sheet(isPresented: $showingSettings) {
+        // Both the toolbar button and the Settings… / New Chapter menu items
+        // route through `commands`, so each has a single behavior: one sheet
+        // presentation, and one insert-and-select path shared with the button.
+        .onChange(of: commands.newChapterRequests) {
+            selection = viewModel.addChapter()
+        }
+        .sheet(isPresented: $commands.settingsPresented) {
             ProjectSettingsView(project: viewModel.project, documentName: documentName)
         }
-        .sheet(isPresented: $showingFindReplace) {
+        .sheet(isPresented: $commands.findReplacePresented) {
             ProjectFindReplaceView(navigator: navigator, selection: $selection)
         }
         .overlay {
