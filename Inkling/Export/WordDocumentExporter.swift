@@ -132,7 +132,11 @@ enum WordDocumentExporter {
                 runs += imageRunXML(
                     relationshipID: "rId\(state.imageIndex)",
                     docPrID: state.imageIndex,
-                    pixelSize: image.pixelSize
+                    displaySize: image.displaySize,
+                    position: (attachment as? FloatingImageAttachment)?.position
+                        ?? attributes[.inklingFloatingImagePosition] as? FloatingImagePosition,
+                    importedPlacementHint: (attachment as? FloatingImageAttachment)?.importedPlacementHint
+                        ?? attributes[.inklingImportedImagePlacementHint] as? ImportedImagePlacementHint
                 )
                 state.imageIndex += 1
                 return
@@ -246,26 +250,89 @@ enum WordDocumentExporter {
         return "<w:r>\(runProperties)\(content)</w:r>"
     }
 
-    /// EMU (English Metric Units) per pixel at the 96 DPI Word assumes for inline drawings.
-    private static let emuPerPixel = 9525
+    private static let emuPerPoint = 12_700.0
 
-    private static func imageRunXML(relationshipID: String, docPrID: Int, pixelSize: CGSize) -> String {
-        let cx = max(1, Int(pixelSize.width)) * emuPerPixel
-        let cy = max(1, Int(pixelSize.height)) * emuPerPixel
+    private static func imageRunXML(
+        relationshipID: String,
+        docPrID: Int,
+        displaySize: CGSize,
+        position: FloatingImagePosition?,
+        importedPlacementHint: ImportedImagePlacementHint?
+    ) -> String {
+        let cx = max(1, Int((displaySize.width * emuPerPoint).rounded()))
+        let cy = max(1, Int((displaySize.height * emuPerPoint).rounded()))
+        let drawingStart: String
+        let drawingEnd: String
+        if let position {
+            let x = Int((position.origin.x * emuPerPoint).rounded())
+            let y = Int((position.origin.y * emuPerPoint).rounded())
+            drawingStart = """
+            <wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="0" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1">\
+            <wp:simplePos x="0" y="0"/>\
+            <wp:positionH relativeFrom="page"><wp:posOffset>\(x)</wp:posOffset></wp:positionH>\
+            <wp:positionV relativeFrom="page"><wp:posOffset>\(y)</wp:posOffset></wp:positionV>
+            """
+            drawingEnd = "</wp:anchor>"
+        } else if let hint = importedPlacementHint {
+            drawingStart = """
+            <wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="0" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1">\
+            <wp:simplePos x="0" y="0"/>\
+            \(positionXML(axis: "H", reference: hint.horizontalReference, alignment: hint.horizontalAlignment, offset: hint.horizontalOffset))\
+            \(positionXML(axis: "V", reference: hint.verticalReference, alignment: hint.verticalAlignment, offset: hint.verticalOffset))
+            """
+            drawingEnd = "</wp:anchor>"
+        } else {
+            drawingStart = #"<wp:inline distT="0" distB="0" distL="0" distR="0">"#
+            drawingEnd = "</wp:inline>"
+        }
+        let wrap = position == nil && importedPlacementHint == nil
+            ? ""
+            : #"<wp:wrapSquare wrapText="bothSides"/>"#
         return """
-        <w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0">\
+        <w:r><w:drawing>\(drawingStart)\
         <wp:extent cx="\(cx)" cy="\(cy)"/>\
+        \(wrap)\
         <wp:docPr id="\(docPrID)" name="Picture \(docPrID)"/>\
         <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">\
         <pic:pic><pic:nvPicPr><pic:cNvPr id="\(docPrID)" name="Picture \(docPrID)"/><pic:cNvPicPr/></pic:nvPicPr>\
         <pic:blipFill><a:blip r:embed="\(relationshipID)"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>\
         <pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="\(cx)" cy="\(cy)"/></a:xfrm>\
         <a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>\
-        </pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>
+        </pic:pic></a:graphicData></a:graphic>\(drawingEnd)</w:drawing></w:r>
         """
     }
 
-    private static func pngData(from attachment: NSTextAttachment) -> (data: Data, pixelSize: CGSize)? {
+    private static func positionXML(
+        axis: String,
+        reference: ImportedImageReference,
+        alignment: ImportedImageAlignment?,
+        offset: Double?
+    ) -> String {
+        let relativeFrom: String
+        switch reference {
+        case .page: relativeFrom = "page"
+        case .margin: relativeFrom = "margin"
+        case .column: relativeFrom = axis == "H" ? "column" : "margin"
+        case .character: relativeFrom = axis == "H" ? "character" : "paragraph"
+        case .paragraph: relativeFrom = axis == "V" ? "paragraph" : "column"
+        case .line: relativeFrom = axis == "V" ? "line" : "column"
+        }
+        let value: String
+        if let offset {
+            value = "<wp:posOffset>\(Int((offset * emuPerPoint).rounded()))</wp:posOffset>"
+        } else {
+            let wordAlignment: String
+            switch alignment {
+            case .center: wordAlignment = "center"
+            case .end: wordAlignment = axis == "H" ? "right" : "bottom"
+            case .start, nil: wordAlignment = axis == "H" ? "left" : "top"
+            }
+            value = "<wp:align>\(wordAlignment)</wp:align>"
+        }
+        return "<wp:position\(axis) relativeFrom=\"\(relativeFrom)\">\(value)</wp:position\(axis)>"
+    }
+
+    private static func pngData(from attachment: NSTextAttachment) -> (data: Data, displaySize: CGSize)? {
         let image = attachment.image
             ?? (attachment.attachmentCell as? NSTextAttachmentCell)?.image
             ?? attachment.fileWrapper?.regularFileContents.flatMap(NSImage.init(data:))
@@ -274,8 +341,17 @@ enum WordDocumentExporter {
               let rep = NSBitmapImageRep(data: tiff),
               let data = rep.representation(using: .png, properties: [:])
         else { return nil }
-        let pixelSize = CGSize(width: rep.pixelsWide, height: rep.pixelsHigh)
-        return (data, pixelSize)
+        let displaySize: CGSize
+        if let floating = attachment as? FloatingImageAttachment,
+           floating.displaySize.width > 0,
+           floating.displaySize.height > 0 {
+            displaySize = floating.displaySize
+        } else if attachment.bounds.width > 0, attachment.bounds.height > 0 {
+            displaySize = attachment.bounds.size
+        } else {
+            displaySize = image.size
+        }
+        return (data, displaySize)
     }
 
     private static func documentXML(bodyXML: String) -> String {

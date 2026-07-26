@@ -238,6 +238,14 @@ struct PagedEditorLayout: Equatable {
 }
 
 struct ImageResizeGeometry {
+    /// `maximumHeight` defaults to unbounded because most callers only know
+    /// about page width (an un-positioned, anchor-line image reflows to the
+    /// next page instead of overflowing vertically). Callers resizing a fixed
+    /// `position`ed image — which does not reflow — must pass the page's
+    /// remaining height below that position, or growth here can push the
+    /// image past the page's bottom edge with no text layout able to contain
+    /// it, collapsing the page (this is how a resize used to make a
+    /// positioned image effectively vanish).
     static func resizedSize(
         original: NSSize,
         horizontalDelta: CGFloat,
@@ -245,7 +253,8 @@ struct ImageResizeGeometry {
         draggingLeftEdge: Bool,
         draggingTopEdge: Bool,
         minimumWidth: CGFloat,
-        maximumWidth: CGFloat
+        maximumWidth: CGFloat,
+        maximumHeight: CGFloat = .greatestFiniteMagnitude
     ) -> NSSize {
         guard original.width > 0, original.height > 0 else { return original }
         let horizontalWidth = original.width + (draggingLeftEdge ? -horizontalDelta : horizontalDelta)
@@ -254,7 +263,9 @@ struct ImageResizeGeometry {
         let horizontalChange = abs(horizontalWidth - original.width) / original.width
         let verticalChange = abs(verticalWidth - original.width) / original.width
         let proposedWidth = verticalChange > horizontalChange ? verticalWidth : horizontalWidth
-        let width = min(maximumWidth, max(minimumWidth, proposedWidth))
+        let heightLimitedWidth = maximumHeight * original.width / original.height
+        let upperBound = min(maximumWidth, heightLimitedWidth)
+        let width = min(upperBound, max(minimumWidth, proposedWidth))
         return NSSize(width: width, height: width * original.height / original.width)
     }
 }
@@ -349,6 +360,9 @@ final class PagedTextView: NSTextView, NSLayoutManagerDelegate {
         let handle: ImageResizeHandle
         let startPoint: NSPoint
         let originalSize: NSSize
+        let originalPosition: FloatingImagePosition?
+        let originalImportedPlacementHint: ImportedImagePlacementHint?
+        let effectivePosition: FloatingImagePosition
     }
 
     /// Tracks a drag that repositions a floating image. `startDisplayOrigin` is
@@ -361,6 +375,7 @@ final class PagedTextView: NSTextView, NSLayoutManagerDelegate {
         let startDisplayOrigin: NSPoint
         let size: NSSize
         let startPosition: FloatingImagePosition?
+        let startImportedPlacementHint: ImportedImagePlacementHint?
     }
 
     init(frame frameRect: NSRect, textContainer container: NSTextContainer, pageLayout: PagedEditorLayout) {
@@ -440,6 +455,11 @@ final class PagedTextView: NSTextView, NSLayoutManagerDelegate {
                 at: range.location,
                 effectiveRange: nil
             ) as? FloatingImagePosition
+            floating.importedPlacementHint = storage.attribute(
+                .inklingImportedImagePlacementHint,
+                at: range.location,
+                effectiveRange: nil
+            ) as? ImportedImagePlacementHint
             replacements.append((range, floating))
         }
 
@@ -447,7 +467,24 @@ final class PagedTextView: NSTextView, NSLayoutManagerDelegate {
             storage.addAttribute(.attachment, value: attachment, range: range)
             collapseImageOnlyLineBreaks(around: range.location, in: storage)
         }
-        rebuildFloatingImageLayout()
+        if !replacements.isEmpty || hasAnchorRelativeImage(in: storage) {
+            rebuildFloatingImageLayout()
+        }
+    }
+
+    private func hasAnchorRelativeImage(in storage: NSTextStorage) -> Bool {
+        var found = false
+        storage.enumerateAttribute(
+            .attachment,
+            in: NSRange(location: 0, length: storage.length)
+        ) { value, _, stop in
+            if let floating = value as? FloatingImageAttachment,
+               floating.position == nil {
+                found = true
+                stop.pointee = true
+            }
+        }
+        return found
     }
 
     private func collapseImageOnlyLineBreaks(around location: Int, in storage: NSTextStorage) {
@@ -494,14 +531,23 @@ final class PagedTextView: NSTextView, NSLayoutManagerDelegate {
            shouldChangeText(in: selectedImageRange, replacementString: nil) {
             let boundsSize = (attachment as? FloatingImageAttachment)?.displaySize
                 ?? attachment.bounds.size
+            let originalRect = imageAttachmentRect(for: selectedImageRange)
             let originalSize = boundsSize.width > 0 && boundsSize.height > 0
                 ? boundsSize
-                : imageAttachmentRect(for: selectedImageRange)?.size ?? .zero
+                : originalRect?.size ?? .zero
+            guard let originalRect else { return }
+            let floating = attachment as? FloatingImageAttachment
             resizeSession = ImageResizeSession(
                 range: selectedImageRange,
                 handle: handle,
                 startPoint: point,
-                originalSize: originalSize
+                originalSize: originalSize,
+                originalPosition: floating?.position,
+                originalImportedPlacementHint: floating?.importedPlacementHint,
+                effectivePosition: pageLayout.position(
+                    forDisplayOrigin: originalRect.origin,
+                    size: originalSize
+                )
             )
             return
         }
@@ -521,7 +567,8 @@ final class PagedTextView: NSTextView, NSLayoutManagerDelegate {
                     startPoint: point,
                     startDisplayOrigin: startRect.origin,
                     size: floating.displaySize,
-                    startPosition: floating.position
+                    startPosition: floating.position,
+                    startImportedPlacementHint: floating.importedPlacementHint
                 )
             }
             needsDisplay = true
@@ -536,7 +583,13 @@ final class PagedTextView: NSTextView, NSLayoutManagerDelegate {
         in affectedCharRange: NSRange,
         replacementString: String?
     ) -> Bool {
-        if replacementString == "",
+        // A non-nil replacement string rewrites the character range, which
+        // would take any floating-image anchor in it with it — whether that's a
+        // deletion ("") or typing/pasting over a selection. Both are guarded.
+        // A nil replacement is an attributes-only change (e.g. bold), which
+        // leaves the anchor intact, so formatting a range that spans an image
+        // stays allowed.
+        if replacementString != nil,
            containsProtectedFloatingImage(in: affectedCharRange) {
             return false
         }
@@ -579,6 +632,32 @@ final class PagedTextView: NSTextView, NSLayoutManagerDelegate {
 
         if let session = resizeSession {
             let point = convert(event.locationInWindow, from: nil)
+            // See the matching comment in `PageStackView.continueImageResize`:
+            // a positioned image's origin is fixed during a resize, so growth
+            // must stay within the room left between that origin and the
+            // page's edges, not just the page's full width. `position.origin`
+            // is in paper coordinates, so it has to be translated into
+            // content-column coordinates before comparing against
+            // `contentWidth`/`contentHeight`, or the remaining room is
+            // under-counted by a full margin.
+            // Moving an image only clamps it to stay within the paper, not the
+            // printable content area, so a dropped image can end up with an
+            // edge already slightly past the content bounds. These figures
+            // must never come out smaller than the image's own current size,
+            // or starting a resize with no drag at all would immediately
+            // shrink it to fit a bound it already exceeded.
+            let contentOrigin = CGPoint(
+                x: session.effectivePosition.origin.x - pageLayout.leftMargin,
+                y: session.effectivePosition.origin.y - pageLayout.topMargin
+            )
+            let maximumWidth = max(
+                session.originalSize.width,
+                pageLayout.contentWidth - contentOrigin.x
+            )
+            let maximumHeight = max(
+                session.originalSize.height,
+                pageLayout.contentHeight - contentOrigin.y
+            )
             let size = ImageResizeGeometry.resizedSize(
                 original: session.originalSize,
                 horizontalDelta: point.x - session.startPoint.x,
@@ -586,9 +665,31 @@ final class PagedTextView: NSTextView, NSLayoutManagerDelegate {
                 draggingLeftEdge: session.handle.dragsLeftEdge,
                 draggingTopEdge: session.handle.dragsTopEdge,
                 minimumWidth: 32,
-                maximumWidth: pageLayout.contentWidth
+                maximumWidth: max(32, maximumWidth),
+                maximumHeight: max(32, maximumHeight)
             )
-            setImageAttachmentSize(size, at: session.range)
+            guard size != session.originalSize else { return }
+            var origin = session.effectivePosition.origin
+            if session.handle.dragsLeftEdge {
+                origin.x += session.originalSize.width - size.width
+            }
+            if session.handle.dragsTopEdge {
+                origin.y += session.originalSize.height - size.height
+            }
+            let position = FloatingImagePosition(
+                page: session.effectivePosition.page,
+                origin: FloatingImagePlacement.clampedOrigin(
+                    origin,
+                    imageSize: size,
+                    paperSize: pageLayout.paperSize
+                )
+            )
+            setImageAttachmentGeometry(
+                size: size,
+                position: position,
+                importedPlacementHint: nil,
+                at: session.range
+            )
             return
         }
 
@@ -618,8 +719,20 @@ final class PagedTextView: NSTextView, NSLayoutManagerDelegate {
             return
         }
 
-        if resizeSession != nil {
+        if let session = resizeSession {
             resizeSession = nil
+            if let floating = imageAttachment(at: session.range) as? FloatingImageAttachment,
+               floating.displaySize != session.originalSize {
+                registerImageResizeUndo(
+                    size: session.originalSize,
+                    position: session.originalPosition,
+                    importedPlacementHint: session.originalImportedPlacementHint,
+                    replacingSize: floating.displaySize,
+                    replacingPosition: floating.position,
+                    replacingImportedPlacementHint: floating.importedPlacementHint,
+                    at: session.range
+                )
+            }
             didChangeText()
             updatePageLayout()
             needsDisplay = true
@@ -632,8 +745,15 @@ final class PagedTextView: NSTextView, NSLayoutManagerDelegate {
             // Persist the move (with undo) only if the image actually moved, so a
             // plain click that merely selects an image doesn't dirty the document.
             if let attachment = imageAttachment(at: session.range) as? FloatingImageAttachment,
-               attachment.position != session.startPosition {
-                setFloatingPosition(attachment.position, from: session.startPosition, at: session.range)
+               attachment.position != session.startPosition
+                || attachment.importedPlacementHint != session.startImportedPlacementHint {
+                setFloatingPosition(
+                    attachment.position,
+                    importedPlacementHint: attachment.importedPlacementHint,
+                    from: session.startPosition,
+                    previousImportedPlacementHint: session.startImportedPlacementHint,
+                    at: session.range
+                )
             }
             needsDisplay = true
             return
@@ -664,6 +784,7 @@ final class PagedTextView: NSTextView, NSLayoutManagerDelegate {
         let position = pageLayout.position(forDisplayOrigin: origin, size: session.size)
         guard let attachment = imageAttachment(at: session.range) as? FloatingImageAttachment else { return }
         attachment.position = position
+        attachment.importedPlacementHint = nil
         rebuildFloatingImageLayout()
         needsDisplay = true
     }
@@ -672,13 +793,22 @@ final class PagedTextView: NSTextView, NSLayoutManagerDelegate {
     /// back to the previous position, and dirties the document so it re-saves.
     private func setFloatingPosition(
         _ new: FloatingImagePosition?,
+        importedPlacementHint newHint: ImportedImagePlacementHint?,
         from old: FloatingImagePosition?,
+        previousImportedPlacementHint oldHint: ImportedImagePlacementHint?,
         at range: NSRange
     ) {
         guard let attachment = imageAttachment(at: range) as? FloatingImageAttachment else { return }
         attachment.position = new
+        attachment.importedPlacementHint = newHint
         undoManager?.registerUndo(withTarget: self) { view in
-            view.setFloatingPosition(old, from: new, at: range)
+            view.setFloatingPosition(
+                old,
+                importedPlacementHint: oldHint,
+                from: new,
+                previousImportedPlacementHint: newHint,
+                at: range
+            )
         }
         undoManager?.setActionName("Move Image")
         rebuildFloatingImageLayout()
@@ -967,11 +1097,28 @@ final class PagedTextView: NSTextView, NSLayoutManagerDelegate {
     }
 
     func setImageAttachmentSize(_ size: NSSize, at range: NSRange) {
+        let floating = imageAttachment(at: range) as? FloatingImageAttachment
+        setImageAttachmentGeometry(
+            size: size,
+            position: floating?.position,
+            importedPlacementHint: floating?.importedPlacementHint,
+            at: range
+        )
+    }
+
+    private func setImageAttachmentGeometry(
+        size: NSSize,
+        position: FloatingImagePosition?,
+        importedPlacementHint: ImportedImagePlacementHint?,
+        at range: NSRange
+    ) {
         guard let attachment = imageAttachment(at: range),
               let storage = textStorage
         else { return }
         if let floating = attachment as? FloatingImageAttachment {
             floating.displaySize = size
+            floating.position = position
+            floating.importedPlacementHint = importedPlacementHint
             floating.bounds = NSRect(x: 0, y: 0, width: 0.1, height: 0.1)
         } else {
             attachment.bounds = NSRect(origin: .zero, size: size)
@@ -989,6 +1136,36 @@ final class PagedTextView: NSTextView, NSLayoutManagerDelegate {
         rebuildFloatingImageLayout()
         updatePageLayout()
         needsDisplay = true
+    }
+
+    private func registerImageResizeUndo(
+        size: NSSize,
+        position: FloatingImagePosition?,
+        importedPlacementHint: ImportedImagePlacementHint?,
+        replacingSize: NSSize,
+        replacingPosition: FloatingImagePosition?,
+        replacingImportedPlacementHint: ImportedImagePlacementHint?,
+        at range: NSRange
+    ) {
+        undoManager?.registerUndo(withTarget: self) { view in
+            view.setImageAttachmentGeometry(
+                size: size,
+                position: position,
+                importedPlacementHint: importedPlacementHint,
+                at: range
+            )
+            view.registerImageResizeUndo(
+                size: replacingSize,
+                position: replacingPosition,
+                importedPlacementHint: replacingImportedPlacementHint,
+                replacingSize: size,
+                replacingPosition: position,
+                replacingImportedPlacementHint: importedPlacementHint,
+                at: range
+            )
+            view.didChangeText()
+        }
+        undoManager?.setActionName("Resize Image")
     }
 
     private func rebuildFloatingImageLayout() {
@@ -1042,6 +1219,35 @@ final class PagedTextView: NSTextView, NSLayoutManagerDelegate {
                     forGlyphAt: glyphRange.location,
                     effectiveRange: nil
                 )
+                if let hint = floating.importedPlacementHint {
+                    let page = pageLayout.pageIndex(atY: lineRect.minY)
+                    let pageLineRect = NSRect(
+                        x: lineRect.minX,
+                        y: lineRect.minY - pageLayout.contentTop(forPage: page),
+                        width: lineRect.width,
+                        height: lineRect.height
+                    )
+                    let origin = FloatingImagePlacement.approximatedOrigin(
+                        for: hint,
+                        anchorLineRect: pageLineRect,
+                        imageSize: floating.displaySize,
+                        paperSize: pageLayout.paperSize,
+                        leftMargin: pageLayout.leftMargin,
+                        topMargin: pageLayout.topMargin,
+                        contentWidth: pageLayout.contentWidth,
+                        contentHeight: pageLayout.contentHeight
+                    )
+                    imageRect = pageLayout.displayRect(
+                        forPage: page,
+                        origin: origin,
+                        size: floating.displaySize
+                    )
+                    rects[range.location] = imageRect
+                    paths.append(NSBezierPath(
+                        rect: pageLayout.exclusionRect(forImageRect: imageRect)
+                    ))
+                    return
+                }
                 // If the image can't fit in what's left of its paragraph's page
                 // before the bottom margin, park it at the top of the next page
                 // instead of drawing it past the page's physical edge — the same

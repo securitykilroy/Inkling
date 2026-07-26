@@ -432,6 +432,38 @@ final class ManuscriptPrintView: NSView {
             // being lifted to the paragraph's top.
             let lineRect = layoutManager.lineFragmentRect(forGlyphAt: glyphIndex, effectiveRange: nil)
 
+            if let hint = storage.attribute(
+                .inklingImportedImagePlacementHint,
+                at: range.location,
+                effectiveRange: nil
+            ) as? ImportedImagePlacementHint {
+                let paperSize = NSSize(
+                    width: pageSize.width + leftMargin * 2,
+                    height: pageSize.height + topMargin * 2
+                )
+                let origin = FloatingImagePlacement.approximatedOrigin(
+                    for: hint,
+                    anchorLineRect: lineRect,
+                    imageSize: size,
+                    paperSize: paperSize,
+                    leftMargin: leftMargin,
+                    topMargin: topMargin,
+                    contentWidth: pageSize.width,
+                    contentHeight: pageSize.height
+                )
+                placements.append(FloatingPlacement(
+                    page: page,
+                    contentRect: FloatingImagePlacement.contentRect(
+                        origin: origin,
+                        imageSize: size,
+                        leftMargin: leftMargin,
+                        topMargin: topMargin
+                    ),
+                    image: image
+                ))
+                return
+            }
+
             let fits = lineRect.minY + size.height <= pageSize.height
             let placedPage = fits ? page : page + 1
             let y: CGFloat = fits ? lineRect.minY : 0

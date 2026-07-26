@@ -807,6 +807,49 @@ struct PageStackViewTests {
         #expect(stack.handleRects(for: selected.rect).count == 4)
     }
 
+    @Test func pressingAnImageSelectsItsAnchorInTheSharedTextStorage() throws {
+        let stack = Self.stackWithImage(paragraphs: 200, at: 40)
+        let selected = try #require(Self.selectImage(in: stack, onPage: 0))
+
+        #expect(selected.view.selectedRange() == NSRange(location: selected.location, length: 1))
+    }
+
+    @Test func ordinaryTextDeletionCannotSilentlyConsumeAFloatingImageAnchor() throws {
+        let stack = Self.stackWithImage(paragraphs: 200, at: 40)
+        let selected = try #require(Self.selectImage(in: stack, onPage: 0))
+        let spanningRange = NSRange(location: selected.location - 1, length: 2)
+
+        #expect(selected.view.shouldChangeText(in: spanningRange, replacementString: "") == false)
+        #expect(
+            selected.view.shouldChangeText(
+                in: NSRange(location: selected.location, length: 1),
+                replacementString: ""
+            )
+        )
+    }
+
+    @Test func typingOverASelectionCannotSilentlyConsumeAFloatingImageAnchor() throws {
+        // Regression: the protection used to key off an empty replacement
+        // string, so typing (or pasting) over a selection that spanned an image
+        // slipped past it and deleted the image. Any non-nil replacement that
+        // covers an unselected image anchor must be blocked, just like Delete.
+        let stack = Self.stackWithImage(paragraphs: 200, at: 40)
+        let selected = try #require(Self.selectImage(in: stack, onPage: 0))
+        let spanningRange = NSRange(location: selected.location - 1, length: 2)
+
+        #expect(selected.view.shouldChangeText(in: spanningRange, replacementString: "x") == false)
+        // The explicitly selected image itself can still be typed over.
+        #expect(
+            selected.view.shouldChangeText(
+                in: NSRange(location: selected.location, length: 1),
+                replacementString: "x"
+            )
+        )
+        // A nil replacement is an attributes-only change (e.g. bold) and must
+        // stay allowed even across the image anchor.
+        #expect(selected.view.shouldChangeText(in: spanningRange, replacementString: nil))
+    }
+
     @Test func handlesSitOnTheImageCorners() throws {
         let stack = Self.stackWithImage(paragraphs: 200, at: 40)
         let selected = try #require(Self.selectImage(in: stack, onPage: 0))
@@ -824,7 +867,11 @@ struct PageStackViewTests {
         let selected = try #require(Self.selectImage(in: stack, onPage: 0))
 
         let corner = NSPoint(x: selected.rect.maxX, y: selected.rect.maxY)
-        #expect(stack.beginImageResize(at: corner, in: selected.view))
+        #expect(stack.beginImageResize(
+            at: corner,
+            windowPoint: selected.view.convert(corner, to: nil),
+            in: selected.view
+        ))
         #expect(stack.continueImageResize(
             with: Self.dragEvent(NSPoint(x: corner.x + 60, y: corner.y + 45), in: selected.view),
             in: selected.view
@@ -844,7 +891,11 @@ struct PageStackViewTests {
         let selected = try #require(Self.selectImage(in: stack, onPage: 0))
 
         let corner = NSPoint(x: selected.rect.minX, y: selected.rect.minY)
-        #expect(stack.beginImageResize(at: corner, in: selected.view))
+        #expect(stack.beginImageResize(
+            at: corner,
+            windowPoint: selected.view.convert(corner, to: nil),
+            in: selected.view
+        ))
         #expect(stack.continueImageResize(
             with: Self.dragEvent(NSPoint(x: corner.x + 50, y: corner.y + 38), in: selected.view),
             in: selected.view
@@ -853,6 +904,18 @@ struct PageStackViewTests {
 
         let resized = try #require(stack.floatingAttachment(at: selected.location))
         #expect(resized.displaySize.width < size.width)
+        let resizedRect = try #require(stack.selectedImageRect(in: selected.view))
+        #expect(abs(resizedRect.maxX - selected.rect.maxX) < 0.5)
+        #expect(abs(resizedRect.maxY - selected.rect.maxY) < 0.5)
+    }
+
+    @Test func preparingAnAlreadyFloatingImageDoesNotRelayoutTheChapter() {
+        let stack = Self.stackWithImage(paragraphs: 200, at: 40)
+        let before = stack.floatingLayoutRebuildCount
+
+        stack.prepareFloatingImages()
+
+        #expect(stack.floatingLayoutRebuildCount == before)
     }
 
     @Test func resizingNeverExceedsTheColumnOrCollapsesTheImage() throws {
@@ -864,7 +927,11 @@ struct PageStackViewTests {
         let corner = NSPoint(x: selected.rect.maxX, y: selected.rect.maxY)
 
         // Way too big.
-        #expect(stack.beginImageResize(at: corner, in: selected.view))
+        #expect(stack.beginImageResize(
+            at: corner,
+            windowPoint: selected.view.convert(corner, to: nil),
+            in: selected.view
+        ))
         _ = stack.continueImageResize(
             with: Self.dragEvent(NSPoint(x: corner.x + 5_000, y: corner.y + 5_000), in: selected.view),
             in: selected.view
@@ -876,7 +943,11 @@ struct PageStackViewTests {
         // Way too small.
         let now = try #require(stack.selectedImageRect(in: selected.view))
         let corner2 = NSPoint(x: now.maxX, y: now.maxY)
-        #expect(stack.beginImageResize(at: corner2, in: selected.view))
+        #expect(stack.beginImageResize(
+            at: corner2,
+            windowPoint: selected.view.convert(corner2, to: nil),
+            in: selected.view
+        ))
         _ = stack.continueImageResize(
             with: Self.dragEvent(NSPoint(x: corner2.x - 5_000, y: corner2.y - 5_000), in: selected.view),
             in: selected.view
@@ -896,7 +967,11 @@ struct PageStackViewTests {
         )
 
         let corner = NSPoint(x: selected.rect.maxX, y: selected.rect.maxY)
-        #expect(stack.beginImageResize(at: corner, in: selected.view))
+        #expect(stack.beginImageResize(
+            at: corner,
+            windowPoint: selected.view.convert(corner, to: nil),
+            in: selected.view
+        ))
         _ = stack.continueImageResize(
             with: Self.dragEvent(NSPoint(x: corner.x + 120, y: corner.y + 90), in: selected.view),
             in: selected.view
@@ -926,7 +1001,12 @@ struct PageStackViewTests {
         let rect = pageView.viewRect(forFloating: pageView.floatingImages[0].rect)
 
         // No selection yet, so the corner is not a handle.
-        #expect(stack.beginImageResize(at: NSPoint(x: rect.maxX, y: rect.maxY), in: pageView) == false)
+        let corner = NSPoint(x: rect.maxX, y: rect.maxY)
+        #expect(stack.beginImageResize(
+            at: corner,
+            windowPoint: pageView.convert(corner, to: nil),
+            in: pageView
+        ) == false)
         #expect(stack.resizeSession == nil)
     }
 
@@ -1464,11 +1544,9 @@ struct PageStackViewTests {
 
     // MARK: - Word-import-shaped images
     //
-    // WordDocumentImporter creates plain attachments with no saved position —
-    // "no attempt is made to reproduce Word's on-page pixel position" — so
-    // imported images take the anchor-relative float path rather than the
-    // explicitly-placed one. That path is precisely what the old editor
-    // expressed in pre-pagination coordinates and got wrong near a page top.
+    // WordDocumentImporter creates plain attachments with no fixed Inkling
+    // position. Inline images use the anchor-relative float path; anchored Word
+    // images add a relative placement hint until the user moves or resizes them.
 
     /// Inserts un-placed attachments (what an import produces) at several
     /// mid-paragraph anchors spread through a long chapter.
@@ -1490,6 +1568,33 @@ struct PageStackViewTests {
         stack.setAttributedString(text)
         stack.prepareFloatingImages()
         return stack
+    }
+
+    @Test func importedWordAnchorAlignmentControlsInitialPageLocalPlacement() throws {
+        let stack = Self.stackWithImportedImages(
+            size: NSSize(width: 144, height: 72),
+            anchors: [500]
+        )
+        let attachment = try #require(
+            stack.storage.attribute(.attachment, at: 500, effectiveRange: nil)
+                as? FloatingImageAttachment
+        )
+        attachment.importedPlacementHint = ImportedImagePlacementHint(
+            horizontalReference: .margin,
+            horizontalAlignment: .end,
+            horizontalOffset: nil,
+            verticalReference: .paragraph,
+            verticalAlignment: nil,
+            verticalOffset: 36
+        )
+        stack.rebuildFloatingImageLayout()
+
+        let host = try #require(stack.pageViews.first { !$0.floatingImages.isEmpty })
+        let rect = try #require(host.floatingImages.first?.rect)
+
+        // Right-aligned within 468pt margins: 468 - 144 = 324 content points.
+        #expect(abs(rect.minX - 324) < 0.5)
+        #expect(rect.minY > 36)
     }
 
     @Test func importedImagesLandPageLocallyWithNoTextLost() throws {
@@ -1631,38 +1736,6 @@ struct PageStackViewTests {
 
         // Find has already set its own selection; revealing must not move it.
         #expect(stack.pageViews[0].selectedRange() == chosen)
-    }
-
-    // MARK: - Which editor is the default
-
-    @Test func thePerPageEditorIsOnWhenNothingHasBeenChosen() {
-        let defaults = UserDefaults.standard
-        let key = PageStackView.defaultsKey
-        let original = defaults.object(forKey: key)
-        defer {
-            if let original { defaults.set(original, forKey: key) }
-            else { defaults.removeObject(forKey: key) }
-        }
-
-        // An unset key must read as ON. `bool(forKey:)` would report false here,
-        // silently keeping every existing install on the old editor.
-        defaults.removeObject(forKey: key)
-        #expect(PageStackView.isEnabled)
-    }
-
-    @Test func theOldEditorCanStillBeChosenExplicitly() {
-        let defaults = UserDefaults.standard
-        let key = PageStackView.defaultsKey
-        let original = defaults.object(forKey: key)
-        defer {
-            if let original { defaults.set(original, forKey: key) }
-            else { defaults.removeObject(forKey: key) }
-        }
-
-        defaults.set(false, forKey: key)
-        #expect(PageStackView.isEnabled == false)
-        defaults.set(true, forKey: key)
-        #expect(PageStackView.isEnabled)
     }
 
     // MARK: - NSTextFinderClient across pages

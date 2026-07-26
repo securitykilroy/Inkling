@@ -89,12 +89,19 @@ enum RichTextImageInserter {
     /// `maximumWidth`. Used both for live insertion into an editor and for
     /// offline construction of an attributed string (e.g. Word import) before
     /// any NSTextView exists.
-    static func makeAttachment(for image: NSImage, maximumWidth: CGFloat) -> NSTextAttachment {
+    static func makeAttachment(
+        for image: NSImage,
+        preferredDisplaySize: NSSize? = nil,
+        maximumWidth: CGFloat
+    ) -> NSTextAttachment {
         let attachment = NSTextAttachment(
             data: image.tiffRepresentation,
             ofType: UTType.tiff.identifier
         )
-        let displaySize = fittedSize(image.size, maximumWidth: maximumWidth)
+        let requestedSize = preferredDisplaySize.flatMap {
+            $0.width > 0 && $0.height > 0 ? $0 : nil
+        } ?? image.size
+        let displaySize = fittedSize(requestedSize, maximumWidth: maximumWidth)
         let displayImage = (image.copy() as? NSImage) ?? image
         displayImage.size = displaySize
         attachment.image = displayImage

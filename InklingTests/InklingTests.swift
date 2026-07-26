@@ -378,6 +378,27 @@ struct InklingTests {
         #expect(size == NSSize(width: 300, height: 150))
     }
 
+    @Test func imageResizeClampsToRemainingPageHeight() {
+        // A positioned image's origin is fixed during a resize (only its size
+        // changes), so growth has to respect whatever room is left below that
+        // origin. Regression test for a bug where a positioned image resized
+        // near the bottom of the page could grow past the page's edge with no
+        // room left for text to lay out, effectively vanishing.
+        let size = ImageResizeGeometry.resizedSize(
+            original: NSSize(width: 200, height: 400),
+            horizontalDelta: 0,
+            verticalDelta: 300,
+            draggingLeftEdge: false,
+            draggingTopEdge: false,
+            minimumWidth: 32,
+            maximumWidth: 468,
+            maximumHeight: 500
+        )
+
+        #expect(size.height == 500)
+        #expect(size.width == 250)
+    }
+
     @Test func floatingImageExclusionMatchesImageHeightBelowFirstLine() {
         // An image laid out partway down page 1 (well below the page's first
         // line) must reserve exactly its own displayed height — plus the wrap
@@ -1775,6 +1796,36 @@ struct InklingTests {
         #expect(position == nil)
     }
 
+    @Test @MainActor func codecRoundTripsAnImportedImagePlacementHint() throws {
+        let imageData = testPNGData()
+        let attachment = NSTextAttachment(data: imageData, ofType: "public.png")
+        attachment.image = NSImage(data: imageData)
+        attachment.bounds = NSRect(x: 0, y: 0, width: 144, height: 72)
+        let attributed = NSMutableAttributedString(attachment: attachment)
+        let expected = ImportedImagePlacementHint(
+            horizontalReference: .margin,
+            horizontalAlignment: .end,
+            horizontalOffset: nil,
+            verticalReference: .paragraph,
+            verticalAlignment: nil,
+            verticalOffset: 36
+        )
+        attributed.addAttribute(
+            .inklingImportedImagePlacementHint,
+            value: expected,
+            range: NSRange(location: 0, length: 1)
+        )
+
+        let encoded = try #require(RichTextCodec.encode(attributed))
+        let decoded = try #require(RichTextCodec.decode(encoded))
+        let actual = try #require(
+            decoded.attribute(.inklingImportedImagePlacementHint, at: 0, effectiveRange: nil)
+                as? ImportedImagePlacementHint
+        )
+
+        #expect(actual == expected)
+    }
+
     @Test func displayRectStacksPagesAndOffsetsByLeftMargin() {
         let layout = PagedEditorLayout.letter  // paper 612x792, 72pt margins, 24pt gap
         let rect = layout.displayRect(
@@ -2307,6 +2358,93 @@ struct InklingTests {
         #expect(location < afterStart)
     }
 
+    @Test @MainActor func importerUsesWordsDisplayedImageExtentInsteadOfBitmapSize() throws {
+        let imageData = testPNGData()
+        let xml = wrapInDocument("""
+            <w:p><w:r><w:drawing><wp:inline>
+            <wp:extent cx="1828800" cy="914400"/>
+            <a:graphic><a:graphicData><a:blip r:embed="rId1"/></a:graphicData></a:graphic>
+            </wp:inline></w:drawing></w:r></w:p>
+            """)
+        let url = try writeTempFile(makeDocx(documentXML: xml, media: ["pic.png": imageData]))
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let attributed = try WordDocumentImporter.importChapterBody(from: url, maximumImageWidth: 468)
+        let attachment = try #require(
+            attributed.attribute(.attachment, at: 0, effectiveRange: nil) as? NSTextAttachment
+        )
+
+        // 1,828,800 × 914,400 EMU is exactly 144 × 72 points (2 × 1 inches).
+        #expect(abs(attachment.bounds.width - 144) < 0.01)
+        #expect(abs(attachment.bounds.height - 72) < 0.01)
+    }
+
+    @Test @MainActor func importerPreservesWordAnchorPlacementAsAnEditableHint() throws {
+        let imageData = testPNGData()
+        let xml = wrapInDocument("""
+            <w:p><w:r><w:drawing>
+            <wp:anchor>
+              <wp:positionH relativeFrom="margin"><wp:align>right</wp:align></wp:positionH>
+              <wp:positionV relativeFrom="paragraph"><wp:posOffset>457200</wp:posOffset></wp:positionV>
+              <wp:extent cx="1828800" cy="914400"/>
+              <wp:wrapSquare wrapText="bothSides"/>
+              <a:graphic><a:graphicData><a:blip r:embed="rId1"/></a:graphicData></a:graphic>
+            </wp:anchor>
+            </w:drawing></w:r></w:p>
+            """)
+        let url = try writeTempFile(makeDocx(documentXML: xml, media: ["pic.png": imageData]))
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let attributed = try WordDocumentImporter.importChapterBody(from: url, maximumImageWidth: 468)
+        let hint = try #require(
+            attributed.attribute(.inklingImportedImagePlacementHint, at: 0, effectiveRange: nil)
+                as? ImportedImagePlacementHint
+        )
+
+        #expect(hint.horizontalReference == .margin)
+        #expect(hint.horizontalAlignment == .end)
+        #expect(hint.verticalReference == .paragraph)
+        #expect(hint.verticalOffset == 36)
+    }
+
+    @Test func importedAnchorHintResolvesRelativeToItsInklingParagraphAndMargins() {
+        let hint = ImportedImagePlacementHint(
+            horizontalReference: .margin,
+            horizontalAlignment: .end,
+            horizontalOffset: nil,
+            verticalReference: .paragraph,
+            verticalAlignment: nil,
+            verticalOffset: 36
+        )
+
+        let origin = FloatingImagePlacement.approximatedOrigin(
+            for: hint,
+            anchorLineRect: CGRect(x: 0, y: 200, width: 468, height: 20),
+            imageSize: CGSize(width: 144, height: 72),
+            paperSize: CGSize(width: 612, height: 792),
+            leftMargin: 72,
+            topMargin: 72,
+            contentWidth: 468,
+            contentHeight: 648
+        )
+
+        #expect(origin == CGPoint(x: 396, y: 308))
+    }
+
+    @Test @MainActor func importerReadsParagraphsInTablesAndRunsInsideHyperlinks() throws {
+        let xml = wrapInDocument("""
+            <w:tbl><w:tr><w:tc><w:p><w:r><w:t>Table text.</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
+            <w:p><w:hyperlink r:id="rIdLink"><w:r><w:t>Linked text.</w:t></w:r></w:hyperlink></w:p>
+            """)
+        let url = try writeTempFile(makeDocx(documentXML: xml))
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let attributed = try WordDocumentImporter.importChapterBody(from: url, maximumImageWidth: 468)
+
+        #expect(attributed.string.contains("Table text."))
+        #expect(attributed.string.contains("Linked text."))
+    }
+
     @Test @MainActor func importerThrowsForANonZipFile() throws {
         let url = try writeTempFile(Data("not a docx".utf8))
         defer { try? FileManager.default.removeItem(at: url) }
@@ -2361,6 +2499,54 @@ struct InklingTests {
 
         #expect(documentXML.contains(#"r:embed="rId1""#))
         #expect(try reader.contents(of: "word/media/image1.png").isEmpty == false)
+    }
+
+    @Test @MainActor func wordExporterUsesTheAttachmentsDisplaySizeForExtent() throws {
+        let imageData = testPNGData()
+        let attachment = NSTextAttachment(data: imageData, ofType: "public.png")
+        attachment.image = NSImage(data: imageData)
+        attachment.bounds = NSRect(x: 0, y: 0, width: 200, height: 100)
+        let data = try #require(RichTextCodec.encode(NSAttributedString(attachment: attachment)))
+
+        let docx = try WordDocumentExporter.docxData(
+            for: PrintableChapter(title: "Chapter", bodyData: data)
+        )
+        let reader = try MinimalZipReader(data: docx)
+        let documentXML = try #require(
+            String(data: reader.contents(of: "word/document.xml"), encoding: .utf8)
+        )
+
+        // Word drawing extents use 12,700 EMU per point.
+        #expect(documentXML.contains(#"<wp:extent cx="2540000" cy="1270000"/>"#))
+    }
+
+    @Test @MainActor func wordExporterApproximatesPositionedImagesAsAnchoredDrawings() throws {
+        let imageData = testPNGData()
+        let source = NSTextAttachment(data: imageData, ofType: "public.png")
+        source.image = NSImage(data: imageData)
+        source.bounds = NSRect(x: 0, y: 0, width: 200, height: 100)
+        let attachment = FloatingImageAttachment(
+            copying: source,
+            displaySize: NSSize(width: 200, height: 100)
+        )
+        attachment.position = FloatingImagePosition(
+            page: 2,
+            origin: CGPoint(x: 90, y: 144)
+        )
+        let data = try #require(RichTextCodec.encode(NSAttributedString(attachment: attachment)))
+
+        let docx = try WordDocumentExporter.docxData(
+            for: PrintableChapter(title: "Chapter", bodyData: data)
+        )
+        let reader = try MinimalZipReader(data: docx)
+        let documentXML = try #require(
+            String(data: reader.contents(of: "word/document.xml"), encoding: .utf8)
+        )
+
+        #expect(documentXML.contains("<wp:anchor"))
+        #expect(documentXML.contains(#"<wp:posOffset>1143000</wp:posOffset>"#))
+        #expect(documentXML.contains(#"<wp:posOffset>1828800</wp:posOffset>"#))
+        #expect(documentXML.contains("<wp:wrapSquare"))
     }
 
     private func writeTempFile(_ data: Data) throws -> URL {

@@ -14,6 +14,7 @@ extension NSAttributedString.Key {
     /// that builds `FloatingImageAttachment`s (the editor and the printer). This
     /// attribute lives only in memory — it is never serialized into RTFD.
     nonisolated static let inklingFloatingImagePosition = NSAttributedString.Key("inklingFloatingImagePosition")
+    nonisolated static let inklingImportedImagePlacementHint = NSAttributedString.Key("inklingImportedImagePlacementHint")
 }
 
 final class FloatingImageAttachment: NSTextAttachment {
@@ -23,6 +24,7 @@ final class FloatingImageAttachment: NSTextAttachment {
     /// automatic left-edge placement (legacy files and freshly inserted images
     /// the user hasn't moved yet).
     var position: FloatingImagePosition?
+    var importedPlacementHint: ImportedImagePlacementHint?
 
     init(copying source: NSTextAttachment, displaySize: NSSize) {
         self.displaySize = displaySize

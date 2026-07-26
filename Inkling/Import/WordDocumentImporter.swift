@@ -11,11 +11,10 @@
 //
 //  Scope matches what Inkling's own editor toolbar can produce: paragraph
 //  text, bold/italic, Word's Title/Heading styles, a flat bullet marker for
-//  any list paragraph, and images (dropped in at their paragraph's position
-//  and left to Inkling's existing auto-float, not given an explicit page
-//  position). Tables, footnotes, comments, track changes, headers/footers,
-//  colors, and underline are not read — those paragraphs' plain text (if any
-//  reachable as ordinary runs) is skipped along with them.
+//  any list paragraph, and images. Image display extents and relative anchors
+//  become editable Inkling placement hints. Paragraphs inside tables and runs
+//  inside hyperlinks are retained; footnotes, comments, headers/footers,
+//  colors, and underline are not modeled.
 //
 
 import AppKit
@@ -65,7 +64,7 @@ enum WordDocumentImporter {
             .flatMap(relationshipTargets(from:)) ?? [:]
 
         let result = NSMutableAttributedString()
-        let paragraphs = (body.children ?? []).compactMap { $0 as? XMLElement }.filter { $0.localName == "p" }
+        let paragraphs = paragraphsInDocumentOrder(from: body)
         for paragraph in paragraphs {
             result.append(attributedString(
                 for: paragraph, reader: reader, relationships: relationships, maximumImageWidth: maximumImageWidth
@@ -103,7 +102,7 @@ enum WordDocumentImporter {
             result.append(NSAttributedString(string: "•\t", attributes: [.font: style.font]))
         }
 
-        let runs = (paragraph.children ?? []).compactMap { $0 as? XMLElement }.filter { $0.localName == "r" }
+        let runs = runsInDocumentOrder(from: paragraph)
         for run in runs {
             result.append(attributedString(
                 for: run, baseFont: style.font, reader: reader, relationships: relationships,
@@ -161,7 +160,15 @@ enum WordDocumentImporter {
                 if let attachment = attachment(
                     for: node, reader: reader, relationships: relationships, maximumImageWidth: maximumImageWidth
                 ) {
-                    result.append(NSAttributedString(attachment: attachment))
+                    let image = NSMutableAttributedString(attachment: attachment)
+                    if let hint = placementHint(of: node) {
+                        image.addAttribute(
+                            .inklingImportedImagePlacementHint,
+                            value: hint,
+                            range: NSRange(location: 0, length: image.length)
+                        )
+                    }
+                    result.append(image)
                 }
             default:
                 break
@@ -190,11 +197,6 @@ enum WordDocumentImporter {
 
     // MARK: - Images
 
-    /// Every image — inline or floating in Word — becomes a plain attachment
-    /// dropped at this exact position in its paragraph. Inkling's own
-    /// paragraph-first-line auto-float (the same behavior a freshly pasted
-    /// image gets) takes it from there; no attempt is made to reproduce
-    /// Word's on-page pixel position.
     private static func attachment(
         for drawing: XMLElement,
         reader: MinimalZipReader,
@@ -208,10 +210,106 @@ enum WordDocumentImporter {
               let image = NSImage(data: imageData)
         else { return nil }
 
-        return RichTextImageInserter.makeAttachment(for: image, maximumWidth: maximumImageWidth)
+        return RichTextImageInserter.makeAttachment(
+            for: image,
+            preferredDisplaySize: displayedSize(of: drawing),
+            maximumWidth: maximumImageWidth
+        )
     }
 
     // MARK: - XML helpers
+
+    private static func paragraphsInDocumentOrder(from element: XMLElement) -> [XMLElement] {
+        var result: [XMLElement] = []
+        for case let child as XMLElement in element.children ?? [] {
+            if child.localName == "p" {
+                result.append(child)
+            } else {
+                result.append(contentsOf: paragraphsInDocumentOrder(from: child))
+            }
+        }
+        return result
+    }
+
+    private static func runsInDocumentOrder(from element: XMLElement) -> [XMLElement] {
+        var result: [XMLElement] = []
+        for case let child as XMLElement in element.children ?? [] {
+            if child.localName == "r" {
+                result.append(child)
+            } else if !["del", "moveFrom"].contains(child.localName ?? "") {
+                result.append(contentsOf: runsInDocumentOrder(from: child))
+            }
+        }
+        return result
+    }
+
+    private static func displayedSize(of drawing: XMLElement) -> NSSize? {
+        guard let extent = firstDescendant(of: drawing, localName: "extent"),
+              let cxString = extent.attribute(forName: "cx")?.stringValue,
+              let cyString = extent.attribute(forName: "cy")?.stringValue,
+              let cx = Double(cxString),
+              let cy = Double(cyString),
+              cx > 0,
+              cy > 0
+        else { return nil }
+        let emuPerPoint = 12_700.0
+        return NSSize(width: cx / emuPerPoint, height: cy / emuPerPoint)
+    }
+
+    private static func placementHint(of drawing: XMLElement) -> ImportedImagePlacementHint? {
+        guard firstDescendant(of: drawing, localName: "anchor") != nil else { return nil }
+        let horizontal = firstDescendant(of: drawing, localName: "positionH")
+        let vertical = firstDescendant(of: drawing, localName: "positionV")
+        return ImportedImagePlacementHint(
+            horizontalReference: reference(
+                horizontal?.attribute(forName: "relativeFrom")?.stringValue,
+                vertical: false
+            ),
+            horizontalAlignment: alignment(in: horizontal),
+            horizontalOffset: offset(in: horizontal),
+            verticalReference: reference(
+                vertical?.attribute(forName: "relativeFrom")?.stringValue,
+                vertical: true
+            ),
+            verticalAlignment: alignment(in: vertical),
+            verticalOffset: offset(in: vertical)
+        )
+    }
+
+    private static func reference(_ value: String?, vertical: Bool) -> ImportedImageReference {
+        switch value {
+        case "page": return .page
+        case "column": return .column
+        case "character": return .character
+        case "paragraph": return .paragraph
+        case "line": return .line
+        case "margin", "leftMargin", "rightMargin", "topMargin", "bottomMargin",
+             "insideMargin", "outsideMargin":
+            return .margin
+        default:
+            return vertical ? .paragraph : .margin
+        }
+    }
+
+    private static func alignment(in position: XMLElement?) -> ImportedImageAlignment? {
+        guard let value = position.flatMap({
+            firstDescendant(of: $0, localName: "align")?.stringValue?.lowercased()
+        }) else { return nil }
+        switch value {
+        case "center": return .center
+        case "right", "bottom", "outside": return .end
+        case "left", "top", "inside": return .start
+        default: return nil
+        }
+    }
+
+    private static func offset(in position: XMLElement?) -> Double? {
+        guard let value = position.flatMap({
+            firstDescendant(of: $0, localName: "posOffset")?.stringValue
+        }).flatMap(Double.init)
+        else { return nil }
+        return value / 12_700
+    }
 
     private static func child(of element: XMLElement, localName: String) -> XMLElement? {
         (element.children ?? []).compactMap { $0 as? XMLElement }.first { $0.localName == localName }

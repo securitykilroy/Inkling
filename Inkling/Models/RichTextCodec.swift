@@ -35,6 +35,7 @@ enum RichTextCodec {
         var page: Int?
         var originX: Double?
         var originY: Double?
+        var importedPlacementHint: ImportedImagePlacementHint?
     }
 
     /// A callout run: the paragraph range it covers and its kind. RTF can't
@@ -230,13 +231,20 @@ enum RichTextCodec {
             guard size.width > 0, size.height > 0
             else { return }
             let position = (attachment as? FloatingImageAttachment)?.position
+            let importedPlacementHint = (attachment as? FloatingImageAttachment)?.importedPlacementHint
+                ?? attributedString.attribute(
+                    .inklingImportedImagePlacementHint,
+                    at: range.location,
+                    effectiveRange: nil
+                ) as? ImportedImagePlacementHint
             records.append(AttachmentSizeRecord(
                 location: range.location,
                 width: size.width,
                 height: size.height,
                 page: position?.page,
                 originX: position.map { Double($0.origin.x) },
-                originY: position.map { Double($0.origin.y) }
+                originY: position.map { Double($0.origin.y) },
+                importedPlacementHint: position == nil ? importedPlacementHint : nil
             ))
         }
         return records
@@ -267,6 +275,12 @@ enum RichTextCodec {
                         page: page,
                         origin: CGPoint(x: originX, y: originY)
                     ),
+                    range: NSRange(location: record.location, length: 1)
+                )
+            } else if let hint = record.importedPlacementHint {
+                attributedString.addAttribute(
+                    .inklingImportedImagePlacementHint,
+                    value: hint,
                     range: NSRange(location: record.location, length: 1)
                 )
             }

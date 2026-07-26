@@ -39,9 +39,10 @@ struct RichTextEditor: NSViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeNSView(context: Context) -> NSScrollView {
-        // Experimental per-page-container editor, opt-in from Project Settings.
-        // Text-only for now: images, sidebars, and callouts don't render yet.
-        if presentation == .paged, PageStackView.isEnabled {
+        // The paged presentation lays each page out in its own text container
+        // (see makePerPageEditor); the continuous presentation below is a single
+        // plain NSTextView.
+        if presentation == .paged {
             return makePerPageEditor(context: context)
         }
 
@@ -202,6 +203,7 @@ struct RichTextEditor: NSViewRepresentable {
         func textDidChange(_ notification: Notification) {
             guard !isLoading, let textView = notification.object as? NSTextView else { return }
             (textView as? PagedTextView)?.prepareFloatingImages()
+            (textView as? PageTextView)?.pageStack?.prepareFloatingImages()
             let attributed = textView.attributedString()
             let encoded = RichTextCodec.encode(attributed)
             parent.data = encoded

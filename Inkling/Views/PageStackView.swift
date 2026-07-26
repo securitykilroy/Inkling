@@ -156,7 +156,7 @@ final class PageTextView: NSTextView {
         // then image handles — handles sit on the image's corners and extend
         // past its edge, so an image-body hit test would swallow them.
         if stack?.handleSidebarMouseDown(at: point, in: self, event: event) == true { return }
-        if stack?.beginImageResize(at: point, in: self) == true { return }
+        if stack?.beginImageResize(at: point, windowPoint: event.locationInWindow, in: self) == true { return }
         if stack?.beginImageDrag(at: point, in: self) == true { return }
         stack?.clearImageSelection()
         super.mouseDown(with: event)
@@ -174,6 +174,26 @@ final class PageTextView: NSTextView {
         if stack?.endImageResize() == true { return }
         if stack?.endImageDrag() == true { return }
         super.mouseUp(with: event)
+    }
+
+    override func shouldChangeText(
+        in affectedCharRange: NSRange,
+        replacementString: String?
+    ) -> Bool {
+        // A non-nil replacement string rewrites the character range, which
+        // would take any floating-image anchor in it with it — whether that's a
+        // deletion ("") or typing/pasting over a selection. Both are guarded.
+        // A nil replacement is an attributes-only change (e.g. bold), which
+        // leaves the anchor intact, so formatting a range that spans an image
+        // stays allowed.
+        if replacementString != nil,
+           stack?.containsProtectedFloatingImage(in: affectedCharRange) == true {
+            return false
+        }
+        return super.shouldChangeText(
+            in: affectedCharRange,
+            replacementString: replacementString
+        )
     }
 
     /// All page views share the stack's undo manager, so undo is one stack for
@@ -304,18 +324,6 @@ final class PageStackView: NSView, NSTextStorageDelegate {
     /// doesn't sit flush against the scroll view. Matches `PagedTextView`.
     static let canvasPadding: CGFloat = 16
 
-    /// Selects the per-page editor, surfaced in Project Settings. This is now
-    /// the default; turning it off falls back to the older single-container
-    /// `PagedTextView`, which is kept for the moment as a comparison point when
-    /// diagnosing layout differences.
-    static let defaultsKey = "InklingUsePerPageEditor"
-
-    /// Absent means on. `bool(forKey:)` would report false for an unset key,
-    /// which would silently keep every existing install on the old editor.
-    static var isEnabled: Bool {
-        UserDefaults.standard.object(forKey: defaultsKey) as? Bool ?? true
-    }
-
     let pageLayout: PagedEditorLayout
     let storage: NSTextStorage
     let sharedLayoutManager: CalloutLayoutManager
@@ -383,7 +391,28 @@ final class PageStackView: NSView, NSTextStorageDelegate {
         changeInLength delta: Int
     ) {
         guard editedMask.contains(.editedCharacters) else { return }
-        schedulePagination()
+        if hasAnchorRelativeImage(atOrAfter: editedRange.location) {
+            scheduleFloatingRebuild()
+        } else {
+            schedulePagination()
+        }
+    }
+
+    private func hasAnchorRelativeImage(atOrAfter location: Int) -> Bool {
+        guard storage.length > 0 else { return false }
+        let start = min(max(0, location), storage.length - 1)
+        var found = false
+        storage.enumerateAttribute(
+            .attachment,
+            in: NSRange(location: start, length: storage.length - start)
+        ) { value, _, stop in
+            if let floating = value as? FloatingImageAttachment,
+               floating.position == nil {
+                found = true
+                stop.pointee = true
+            }
+        }
+        return found
     }
 
     /// Repaginates on the next pass of the run loop. Adding or removing text
@@ -808,13 +837,18 @@ extension PageStackView {
             floating.position = storage.attribute(
                 .inklingFloatingImagePosition, at: range.location, effectiveRange: nil
             ) as? FloatingImagePosition
+            floating.importedPlacementHint = storage.attribute(
+                .inklingImportedImagePlacementHint, at: range.location, effectiveRange: nil
+            ) as? ImportedImagePlacementHint
             replacements.append((range, floating))
         }
 
         for (range, attachment) in replacements.sorted(by: { $0.0.location > $1.0.location }) {
             storage.addAttribute(.attachment, value: attachment, range: range)
         }
-        rebuildFloatingImageLayout()
+        if !replacements.isEmpty {
+            rebuildFloatingImageLayout()
+        }
     }
 
     /// Coalesces a floating-layout rebuild to the next run-loop pass, so a burst
@@ -942,6 +976,29 @@ extension PageStackView {
         let lineRect = sharedLayoutManager.lineFragmentRect(
             forGlyphAt: glyphRange.location, effectiveRange: nil
         )
+        if let hint = floating.importedPlacementHint {
+            let origin = FloatingImagePlacement.approximatedOrigin(
+                for: hint,
+                anchorLineRect: lineRect,
+                imageSize: floating.displaySize,
+                paperSize: pageLayout.paperSize,
+                leftMargin: pageLayout.leftMargin,
+                topMargin: pageLayout.topMargin,
+                contentWidth: pageLayout.contentWidth,
+                contentHeight: pageLayout.contentHeight
+            )
+            return FloatingPlacement(
+                location: location,
+                page: page,
+                contentRect: FloatingImagePlacement.contentRect(
+                    origin: origin,
+                    imageSize: floating.displaySize,
+                    leftMargin: pageLayout.leftMargin,
+                    topMargin: pageLayout.topMargin
+                ),
+                image: image
+            )
+        }
         // If the image can't fit in what's left of this page, park it at the top
         // of the next one rather than let it run past the bottom margin.
         let fits = lineRect.minY + floating.displaySize.height <= pageLayout.contentHeight
@@ -977,6 +1034,7 @@ extension PageStackView {
         let grabOffset: NSSize
         let size: NSSize
         let startPosition: FloatingImagePosition?
+        let startImportedPlacementHint: ImportedImagePlacementHint?
     }
 
     private static let snapThreshold: CGFloat = 10
@@ -992,11 +1050,13 @@ extension PageStackView {
             location: hit.location,
             grabOffset: NSSize(width: point.x - rect.minX, height: point.y - rect.minY),
             size: attachment.displaySize,
-            startPosition: attachment.position
+            startPosition: attachment.position,
+            startImportedPlacementHint: attachment.importedPlacementHint
         )
         // Pressing an image also selects it, which is what reveals the resize
         // handles for the next gesture.
         selectedImageLocation = hit.location
+        pageView.setSelectedRange(NSRange(location: hit.location, length: 1))
         pageViews.forEach { $0.needsDisplay = true }
         window?.makeFirstResponder(pageView)
         return true
@@ -1036,6 +1096,7 @@ extension PageStackView {
                 origin, imageSize: session.size, paperSize: pageLayout.paperSize
             )
         )
+        attachment.importedPlacementHint = nil
         rebuildFloatingImageLayout()
         return true
     }
@@ -1051,21 +1112,37 @@ extension PageStackView {
 
         guard let attachment = floatingAttachment(at: session.location),
               attachment.position != session.startPosition
+                || attachment.importedPlacementHint != session.startImportedPlacementHint
         else { return true }
 
-        setFloatingPosition(attachment.position, from: session.startPosition, at: session.location)
+        setFloatingPosition(
+            attachment.position,
+            importedPlacementHint: attachment.importedPlacementHint,
+            from: session.startPosition,
+            previousImportedPlacementHint: session.startImportedPlacementHint,
+            at: session.location
+        )
         return true
     }
 
     private func setFloatingPosition(
         _ new: FloatingImagePosition?,
+        importedPlacementHint newHint: ImportedImagePlacementHint?,
         from old: FloatingImagePosition?,
+        previousImportedPlacementHint oldHint: ImportedImagePlacementHint?,
         at location: Int
     ) {
         guard let attachment = floatingAttachment(at: location) else { return }
         attachment.position = new
+        attachment.importedPlacementHint = newHint
         undoManager?.registerUndo(withTarget: self) { stack in
-            stack.setFloatingPosition(old, from: new, at: location)
+            stack.setFloatingPosition(
+                old,
+                importedPlacementHint: oldHint,
+                from: new,
+                previousImportedPlacementHint: newHint,
+                at: location
+            )
         }
         undoManager?.setActionName("Move Image")
         rebuildFloatingImageLayout()
@@ -1085,6 +1162,23 @@ extension PageStackView {
         return storage.attribute(
             .attachment, at: location, effectiveRange: nil
         ) as? FloatingImageAttachment
+    }
+
+    func containsProtectedFloatingImage(in range: NSRange) -> Bool {
+        guard range.location != NSNotFound,
+              range.length > 0,
+              NSMaxRange(range) <= storage.length,
+              !(range.length == 1 && range.location == selectedImageLocation)
+        else { return false }
+
+        var containsImage = false
+        storage.enumerateAttribute(.attachment, in: range) { value, _, stop in
+            if value is FloatingImageAttachment {
+                containsImage = true
+                stop.pointee = true
+            }
+        }
+        return containsImage
     }
 
     /// Draws the vertical snap guide on the page currently being dragged over.
@@ -1109,9 +1203,17 @@ extension PageStackView {
     struct ImageResizeSession {
         let location: Int
         let handle: PageResizeHandle
-        /// Press point, in the page view's coordinates.
+        /// Press point, in the page view's coordinates. Used only for the
+        /// initial handle hit-test at mouse-down.
         let startPoint: NSPoint
+        /// Press point in window coordinates, used for every drag delta
+        /// afterward — see the comment in `continueImageResize` on why the
+        /// delta can't be recomputed through the page view on each step.
+        let startWindowPoint: NSPoint
         let originalSize: NSSize
+        let originalPosition: FloatingImagePosition?
+        let originalImportedPlacementHint: ImportedImagePlacementHint?
+        let effectivePosition: FloatingImagePosition
     }
 
     /// Clears any image selection and cancels an in-flight gesture.
@@ -1155,7 +1257,10 @@ extension PageStackView {
     }
 
     /// Starts a resize if `point` is on a handle of the selected image.
-    func beginImageResize(at point: NSPoint, in pageView: PageTextView) -> Bool {
+    /// `windowPoint` is the same event's location in window coordinates —
+    /// see the comment in `continueImageResize` for why the drag tracks that
+    /// instead of re-converting through `pageView` on every step.
+    func beginImageResize(at point: NSPoint, windowPoint: NSPoint, in pageView: PageTextView) -> Bool {
         guard let location = selectedImageLocation,
               let imageRect = selectedImageRect(in: pageView),
               let attachment = floatingAttachment(at: location)
@@ -1164,7 +1269,8 @@ extension PageStackView {
         // Generous slop so the small corner targets are easy to grab, scaled so
         // they stay a constant size on screen at any zoom.
         let slop = 8 / max(enclosingScrollView?.magnification ?? 1, 0.01)
-        guard let handle = handleRects(for: imageRect).first(where: {
+        let rects = handleRects(for: imageRect)
+        guard let handle = rects.first(where: {
             $0.1.insetBy(dx: -slop, dy: -slop).contains(point)
         })?.0 else { return false }
 
@@ -1172,24 +1278,106 @@ extension PageStackView {
             location: location,
             handle: handle,
             startPoint: point,
-            originalSize: attachment.displaySize
+            startWindowPoint: windowPoint,
+            originalSize: attachment.displaySize,
+            originalPosition: attachment.position,
+            originalImportedPlacementHint: attachment.importedPlacementHint,
+            effectivePosition: FloatingImagePosition(
+                page: pageView.pageIndex,
+                origin: imageRect.origin
+            )
         )
         return true
     }
 
     func continueImageResize(with event: NSEvent, in pageView: PageTextView) -> Bool {
         guard let session = resizeSession else { return false }
-        let point = pageView.convert(event.locationInWindow, from: nil)
+        // The delta is computed from window coordinates, not by re-converting
+        // through `pageView` on every drag step. Resizing calls `setImageSize`,
+        // which triggers `rebuildFloatingImageLayout` — and repagination trims
+        // the page stack down to `minimumPageCount` before growing it back out
+        // to fit floating images, which can tear down and recreate the very
+        // page view hosting this drag, mid-gesture. Converting through a page
+        // view that got replaced out from under the drag produced wild,
+        // discontinuous jumps (observed: a single drag step landing ~1000pt
+        // away with the x coordinate unchanged) — that was the "jumps to a
+        // different page" / "shrinks to a thumbnail" reports, not a problem
+        // with the resize math itself. Window coordinates don't depend on any
+        // page view's identity, so they stay correct across a mid-drag rebuild.
+        let magnification = max(enclosingScrollView?.magnification ?? 1, 0.01)
+        let windowDelta = NSPoint(
+            x: event.locationInWindow.x - session.startWindowPoint.x,
+            y: event.locationInWindow.y - session.startWindowPoint.y
+        )
+        // Page content coordinates are flipped (y grows downward); window
+        // coordinates are not, so the vertical component inverts.
+        let horizontalDelta = windowDelta.x / magnification
+        let verticalDelta = -windowDelta.y / magnification
+        // A positioned image's origin is fixed during a resize (only its size
+        // changes), so growth has to stay within whatever room is left between
+        // that origin and the page's own edges — not just the page's full
+        // width. Without this, growing a positioned image sitting anywhere but
+        // the top-left corner pushes it past the page's content bounds with no
+        // room left for text to lay out, which is how a resize used to make
+        // the image disappear entirely.
+        //
+        // `position.origin` is in paper coordinates (margins included); the
+        // content column starts `leftMargin`/`topMargin` in from that, so the
+        // origin has to be translated before comparing it against
+        // `contentWidth`/`contentHeight` — comparing raw paper coordinates
+        // against content-space bounds under-counts the remaining room by a
+        // full margin and clamps the image far smaller than it should be.
+        // Moving an image only clamps it to stay within the *paper*
+        // (`FloatingImagePlacement.clampedOrigin`), not the printable content
+        // area, so a dropped image can legitimately end up with an edge
+        // slightly past the content bounds already. The room-to-grow figures
+        // below must never come out smaller than the image's own current
+        // size, or merely starting a resize — even with no drag at all —
+        // would immediately shrink it to fit a bound it already exceeded.
+        let contentOrigin = CGPoint(
+            x: session.effectivePosition.origin.x - pageLayout.leftMargin,
+            y: session.effectivePosition.origin.y - pageLayout.topMargin
+        )
+        let maximumWidth = max(
+            session.originalSize.width,
+            pageLayout.contentWidth - contentOrigin.x
+        )
+        let maximumHeight = max(
+            session.originalSize.height,
+            pageLayout.contentHeight - contentOrigin.y
+        )
         let size = ImageResizeGeometry.resizedSize(
             original: session.originalSize,
-            horizontalDelta: point.x - session.startPoint.x,
-            verticalDelta: point.y - session.startPoint.y,
+            horizontalDelta: horizontalDelta,
+            verticalDelta: verticalDelta,
             draggingLeftEdge: session.handle.dragsLeftEdge,
             draggingTopEdge: session.handle.dragsTopEdge,
             minimumWidth: 32,
-            maximumWidth: pageLayout.contentWidth
+            maximumWidth: max(32, maximumWidth),
+            maximumHeight: max(32, maximumHeight)
         )
-        setImageSize(size, at: session.location)
+        guard size != session.originalSize else { return true }
+        var origin = session.effectivePosition.origin
+        if session.handle.dragsLeftEdge {
+            origin.x += session.originalSize.width - size.width
+        }
+        if session.handle.dragsTopEdge {
+            origin.y += session.originalSize.height - size.height
+        }
+        let position = FloatingImagePosition(
+            page: session.effectivePosition.page,
+            origin: FloatingImagePlacement.clampedOrigin(
+                origin,
+                imageSize: size,
+                paperSize: pageLayout.paperSize
+            )
+        )
+        setImageGeometry(
+            size: size,
+            position: position,
+            importedPlacementHint: nil,
+            at: session.location
+        )
         return true
     }
 
@@ -1203,8 +1391,16 @@ extension PageStackView {
 
         // One undo per gesture rather than per drag event.
         let newSize = attachment.displaySize
+        let newPosition = attachment.position
         undoManager?.registerUndo(withTarget: self) { stack in
-            stack.resizeImage(to: session.originalSize, from: newSize, at: session.location)
+            stack.resizeImage(
+                to: session.originalSize,
+                position: session.originalPosition,
+                importedPlacementHint: session.originalImportedPlacementHint,
+                from: newSize,
+                previousPosition: newPosition,
+                at: session.location
+            )
         }
         undoManager?.setActionName("Resize Image")
         pageViews.first?.didChangeText()
@@ -1212,10 +1408,30 @@ extension PageStackView {
     }
 
     /// Undo/redo-able resize.
-    private func resizeImage(to size: NSSize, from previous: NSSize, at location: Int) {
-        setImageSize(size, at: location)
+    private func resizeImage(
+        to size: NSSize,
+        position: FloatingImagePosition?,
+        importedPlacementHint: ImportedImagePlacementHint?,
+        from previous: NSSize,
+        previousPosition: FloatingImagePosition?,
+        at location: Int
+    ) {
+        let currentHint = floatingAttachment(at: location)?.importedPlacementHint
+        setImageGeometry(
+            size: size,
+            position: position,
+            importedPlacementHint: importedPlacementHint,
+            at: location
+        )
         undoManager?.registerUndo(withTarget: self) { stack in
-            stack.resizeImage(to: previous, from: size, at: location)
+            stack.resizeImage(
+                to: previous,
+                position: previousPosition,
+                importedPlacementHint: currentHint,
+                from: size,
+                previousPosition: position,
+                at: location
+            )
         }
         undoManager?.setActionName("Resize Image")
         pageViews.first?.didChangeText()
@@ -1223,11 +1439,28 @@ extension PageStackView {
 
     /// Applies a new display size to a floating image and relays it out.
     func setImageSize(_ size: NSSize, at location: Int) {
+        guard let attachment = floatingAttachment(at: location) else { return }
+        setImageGeometry(
+            size: size,
+            position: attachment.position,
+            importedPlacementHint: attachment.importedPlacementHint,
+            at: location
+        )
+    }
+
+    private func setImageGeometry(
+        size: NSSize,
+        position: FloatingImagePosition?,
+        importedPlacementHint: ImportedImagePlacementHint?,
+        at location: Int
+    ) {
         guard let attachment = floatingAttachment(at: location),
               location < storage.length
         else { return }
 
         attachment.displaySize = size
+        attachment.position = position
+        attachment.importedPlacementHint = importedPlacementHint
         attachment.image?.size = size
         // The inline anchor stays tiny — the visible image is drawn as an
         // overlay, not as a glyph.
