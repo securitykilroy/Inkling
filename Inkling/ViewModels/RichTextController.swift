@@ -250,21 +250,32 @@ final class RichTextController: ObservableObject {
         // Only body carries the first-line indent; a Title or Heading sits
         // flush. Without this, switching a paragraph to a heading would leave
         // the body indent behind on it.
+        // A callout sets its own indents to inset its box, so leave those
+        // paragraphs' indentation alone — otherwise re-styling text inside a
+        // callout flattens the box against the margin.
         let indent: CGFloat = style == .body ? RichTextCodec.defaultFirstLineIndent : 0
         storage.enumerateAttribute(.paragraphStyle, in: paragraphRange) { value, range, _ in
+            guard !Self.isInCallout(storage, at: range.location) else { return }
             storage.addAttribute(
                 .paragraphStyle,
                 value: Self.paragraphStyle(value as? NSParagraphStyle, firstLineIndent: indent),
                 range: range
             )
         }
-        textView.typingAttributes[.paragraphStyle] = Self.paragraphStyle(
-            textView.typingAttributes[.paragraphStyle] as? NSParagraphStyle,
-            firstLineIndent: indent
-        )
+        if !Self.isInCallout(storage, at: paragraphRange.location) {
+            textView.typingAttributes[.paragraphStyle] = Self.paragraphStyle(
+                textView.typingAttributes[.paragraphStyle] as? NSParagraphStyle,
+                firstLineIndent: indent
+            )
+        }
 
         textView.didChangeText()
         selectionDidChange()
+    }
+
+    private static func isInCallout(_ storage: NSTextStorage, at location: Int) -> Bool {
+        guard location >= 0, location < storage.length else { return false }
+        return storage.attribute(.inklingCallout, at: location, effectiveRange: nil) != nil
     }
 
     /// `base` with its first-line indent replaced, keeping everything else.

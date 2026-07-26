@@ -227,6 +227,87 @@ struct InklingTests {
         #expect(controller.currentStyle == .heading)
     }
 
+    @Test @MainActor func applyingAHeadingStyleClearsAnExistingBodyIndent() throws {
+        let scrollView = PagedTextView.makePagedScrollView()
+        let textView = try #require(scrollView.documentView as? PagedTextView)
+        let controller = RichTextController()
+        controller.textView = textView
+
+        // A normal indented body paragraph.
+        textView.textStorage?.setAttributedString(NSAttributedString(
+            string: "Some text",
+            attributes: [
+                .font: TextStyle.body.font(familyName: nil),
+                .paragraphStyle: RichTextCodec.defaultParagraphStyle,
+            ]
+        ))
+        textView.setSelectedRange(NSRange(location: 0, length: 0))
+        let before = try #require(
+            textView.textStorage?.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle
+        )
+        #expect(before.firstLineHeadIndent == RichTextCodec.defaultFirstLineIndent)
+
+        controller.applyStyle(.heading)
+
+        let after = try #require(
+            textView.textStorage?.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle
+        )
+        #expect(after.firstLineHeadIndent == 0)
+        // The paragraph gap is untouched.
+        #expect(after.paragraphSpacing == RichTextCodec.defaultParagraphSpacing)
+    }
+
+    @Test @MainActor func applyingBodyStyleRestoresTheIndentOnAFormerHeading() throws {
+        let scrollView = PagedTextView.makePagedScrollView()
+        let textView = try #require(scrollView.documentView as? PagedTextView)
+        let controller = RichTextController()
+        controller.textView = textView
+
+        let flush = NSMutableParagraphStyle()
+        flush.paragraphSpacing = RichTextCodec.defaultParagraphSpacing
+        flush.firstLineHeadIndent = 0
+        textView.textStorage?.setAttributedString(NSAttributedString(
+            string: "A Heading",
+            attributes: [.font: TextStyle.heading.font(familyName: nil), .paragraphStyle: flush]
+        ))
+        textView.setSelectedRange(NSRange(location: 0, length: 0))
+
+        controller.applyStyle(.body)
+
+        let after = try #require(
+            textView.textStorage?.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle
+        )
+        #expect(after.firstLineHeadIndent == RichTextCodec.defaultFirstLineIndent)
+    }
+
+    /// A callout indents its own paragraphs by `CalloutStyling.sideInset`.
+    /// Re-styling text inside one must not overwrite that with the body indent.
+    @Test @MainActor func applyingAStyleInsideACalloutKeepsTheCalloutInset() throws {
+        let scrollView = PagedTextView.makePagedScrollView()
+        let textView = try #require(scrollView.documentView as? PagedTextView)
+        let storage = try #require(textView.textStorage)
+        let controller = RichTextController()
+        controller.textView = textView
+
+        storage.setAttributedString(NSAttributedString(
+            string: "Callout body text",
+            attributes: [.font: TextStyle.body.font(familyName: nil)]
+        ))
+        CalloutStyling.apply(.note, to: storage, range: NSRange(location: 0, length: storage.length))
+        let inset = try #require(
+            storage.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle
+        ).firstLineHeadIndent
+        #expect(inset == CalloutStyling.sideInset)
+
+        textView.setSelectedRange(NSRange(location: 0, length: 0))
+        controller.applyStyle(.body)
+
+        let after = try #require(
+            storage.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle
+        )
+        #expect(after.firstLineHeadIndent == CalloutStyling.sideInset)
+    }
+
     @Test @MainActor func applyStyleRespectsTheControllersFontFamily() throws {
         let scrollView = PagedTextView.makePagedScrollView()
         let textView = try #require(scrollView.documentView as? PagedTextView)
