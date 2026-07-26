@@ -295,25 +295,36 @@ final class ManuscriptPrintView: NSView {
             let explicitPlacements = floatingPlacementsWithSavedPosition(in: baseText, sizes: sizes)
             let sidebarsByPage = sidebarPlacements(in: baseText)
 
-            let discovery = layOutPages(
+            // Discover the auto-floated images one at a time, in document
+            // order, re-laying out after each so the next is measured against
+            // a page layout that already includes its predecessors' wrapping.
+            // Mirrors `PageStackView.rebuildFloatingImageLayout`; see the
+            // comment there for why this is a single ordered sweep rather than
+            // one pass or a fixed-point iteration.
+            var final = layOutPages(
                 chapterIndex: chapterIndex,
                 text: baseText,
                 placements: Self.groupedByPage(explicitPlacements),
                 sidebars: sidebarsByPage
             )
-            let discoveredPlacements = discoverUnplacedPlacements(
-                in: discovery.storage,
-                layoutManager: discovery.layoutManager,
-                pages: discovery.pages,
-                sizes: sizes
-            )
+            var discovered: [FloatingPlacement] = []
+            for location in unplacedAttachmentLocations(in: baseText, sizes: sizes) {
+                guard let placement = discoverPlacement(
+                    at: location,
+                    in: final.storage,
+                    layoutManager: final.layoutManager,
+                    pages: final.pages,
+                    sizes: sizes
+                ) else { continue }
+                discovered.append(placement)
+                final = layOutPages(
+                    chapterIndex: chapterIndex,
+                    text: baseText,
+                    placements: Self.groupedByPage(explicitPlacements + discovered),
+                    sidebars: sidebarsByPage
+                )
+            }
 
-            let final = layOutPages(
-                chapterIndex: chapterIndex,
-                text: baseText,
-                placements: Self.groupedByPage(explicitPlacements + discoveredPlacements),
-                sidebars: sidebarsByPage
-            )
             layouts.append(ChapterLayout(textStorage: final.storage, layoutManager: final.layoutManager))
             pages.append(contentsOf: final.pages)
         }
@@ -404,39 +415,69 @@ final class ManuscriptPrintView: NSView {
     /// auto-float anchor. An image that can't fit in what's left of its
     /// paragraph's page moves to the top of the next page instead of printing
     /// past the page's bottom edge.
-    private func discoverUnplacedPlacements(
+    /// Character locations of the attachments with no saved position, in
+    /// document order — the order they have to be measured and wrapped in.
+    private func unplacedAttachmentLocations(
+        in text: NSAttributedString,
+        sizes: [ObjectIdentifier: NSSize]
+    ) -> [Int] {
+        var locations: [Int] = []
+        text.enumerateAttribute(
+            .attachment, in: NSRange(location: 0, length: text.length)
+        ) { value, range, _ in
+            guard let attachment = value as? NSTextAttachment,
+                  !(attachment is SidebarAttachment),
+                  text.attribute(.inklingFloatingImagePosition, at: range.location, effectiveRange: nil) == nil,
+                  sizes[ObjectIdentifier(attachment)] != nil,
+                  attachment.image != nil
+            else { return }
+            locations.append(range.location)
+        }
+        return locations
+    }
+
+    private func discoverPlacement(
+        at location: Int,
         in storage: NSTextStorage,
         layoutManager: NSLayoutManager,
         pages: [PageLayout],
         sizes: [ObjectIdentifier: NSSize]
-    ) -> [FloatingPlacement] {
-        var placements: [FloatingPlacement] = []
-        let fullRange = NSRange(location: 0, length: storage.length)
-        storage.enumerateAttribute(.attachment, in: fullRange) { value, range, _ in
+    ) -> FloatingPlacement? {
+        var placement: FloatingPlacement?
+        let range = NSRange(location: location, length: 1)
+        storage.enumerateAttribute(.attachment, in: range) { value, range, _ in
             guard let attachment = value as? NSTextAttachment,
                   !(attachment is SidebarAttachment),
-                  storage.attribute(.inklingFloatingImagePosition, at: range.location, effectiveRange: nil) == nil,
                   let size = sizes[ObjectIdentifier(attachment)],
                   let image = attachment.image
             else { return }
 
+            let hint = storage.attribute(
+                .inklingImportedImagePlacementHint,
+                at: range.location,
+                effectiveRange: nil
+            ) as? ImportedImagePlacementHint
+
+            // Float beside the image's own line (matching the editor), so an
+            // image referenced mid-paragraph lands beside that text rather than
+            // being lifted to the paragraph's top — except for an imported
+            // Word anchor that is explicitly paragraph-relative, which Word
+            // itself draws at the paragraph's top.
+            let measurementLocation = ImportedImageAnchor.measurementLocation(
+                for: hint,
+                attachmentLocation: range.location,
+                in: storage
+            )
             let glyphIndex = layoutManager.glyphRange(
-                forCharacterRange: NSRange(location: range.location, length: 1),
+                forCharacterRange: NSRange(location: measurementLocation, length: 1),
                 actualCharacterRange: nil
             ).location
             guard let page = pages.firstIndex(where: { NSLocationInRange(glyphIndex, $0.glyphRange) })
             else { return }
 
-            // Float beside the image's own line (matching the editor), so an
-            // image referenced mid-paragraph lands beside that text rather than
-            // being lifted to the paragraph's top.
             let lineRect = layoutManager.lineFragmentRect(forGlyphAt: glyphIndex, effectiveRange: nil)
 
-            if let hint = storage.attribute(
-                .inklingImportedImagePlacementHint,
-                at: range.location,
-                effectiveRange: nil
-            ) as? ImportedImagePlacementHint {
+            if let hint {
                 let paperSize = NSSize(
                     width: pageSize.width + leftMargin * 2,
                     height: pageSize.height + topMargin * 2
@@ -451,16 +492,21 @@ final class ManuscriptPrintView: NSView {
                     contentWidth: pageSize.width,
                     contentHeight: pageSize.height
                 )
-                placements.append(FloatingPlacement(
-                    page: page,
-                    contentRect: FloatingImagePlacement.contentRect(
-                        origin: origin,
-                        imageSize: size,
-                        leftMargin: leftMargin,
-                        topMargin: topMargin
-                    ),
-                    image: image
-                ))
+                var rect = FloatingImagePlacement.contentRect(
+                    origin: origin,
+                    imageSize: size,
+                    leftMargin: leftMargin,
+                    topMargin: topMargin
+                )
+                var targetPage = page
+                // Matches the editor: an imported offset can drop a tall image
+                // past the bottom of the page its paragraph landed on, so park
+                // it at the top of the next page instead of bleeding over.
+                if rect.minY > 0, rect.maxY > pageSize.height {
+                    targetPage = page + 1
+                    rect.origin.y = 0
+                }
+                placement = FloatingPlacement(page: targetPage, contentRect: rect, image: image)
                 return
             }
 
@@ -468,9 +514,9 @@ final class ManuscriptPrintView: NSView {
             let placedPage = fits ? page : page + 1
             let y: CGFloat = fits ? lineRect.minY : 0
             let contentRect = NSRect(x: 0, y: y, width: min(size.width, pageSize.width), height: size.height)
-            placements.append(FloatingPlacement(page: placedPage, contentRect: contentRect, image: image))
+            placement = FloatingPlacement(page: placedPage, contentRect: contentRect, image: image)
         }
-        return placements
+        return placement
     }
 
     /// Lays out one chapter's pages given every floating image's page number

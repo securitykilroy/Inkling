@@ -164,6 +164,13 @@ enum FloatingImagePlacement {
         )
     }
 
+    /// A strip of text column narrower than this isn't worth flowing text into.
+    /// TextKit will happily lay a line fragment into a 10pt gap and fit one
+    /// character per line, which is what an image positioned just short of the
+    /// right margin used to produce: a ladder of orphaned single letters down
+    /// the page edge, with the words they came from broken on the other side.
+    static let minimumWrappedColumnWidth: CGFloat = 72
+
     /// The rectangle text should avoid, clipped to the text column
     /// `[0, contentWidth]` and grown by `gutter` so text keeps a small gap.
     /// Returns nil when the image doesn't overlap the text column at all
@@ -174,9 +181,13 @@ enum FloatingImagePlacement {
         gutter: CGFloat
     ) -> CGRect? {
         let grown = contentRect.insetBy(dx: -gutter, dy: -gutter)
-        let minX = max(0, grown.minX)
-        let maxX = min(contentWidth, grown.maxX)
+        var minX = max(0, grown.minX)
+        var maxX = min(contentWidth, grown.maxX)
         guard maxX > minX else { return nil }
+        // Swallow a residual column too narrow to hold real text, so the text
+        // flows past the image instead of dribbling down beside it.
+        if minX < minimumWrappedColumnWidth { minX = 0 }
+        if contentWidth - maxX < minimumWrappedColumnWidth { maxX = contentWidth }
         return CGRect(x: minX, y: grown.minY, width: maxX - minX, height: grown.height)
     }
 

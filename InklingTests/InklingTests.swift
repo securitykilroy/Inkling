@@ -1699,6 +1699,32 @@ struct InklingTests {
         #expect(rect?.maxX == 468)  // clipped to the column, not 508
     }
 
+    /// A right-positioned image that stops just short of the right margin
+    /// leaves a strip a few points wide. TextKit lays a line fragment into it
+    /// and fits one character per line, so the page grows a ladder of orphaned
+    /// letters down its edge while the words they belong to break on the other
+    /// side of the image. Two images in a real manuscript did exactly this.
+    @Test func aSliverOfColumnBesideAnImageIsSwallowedRatherThanFilledWithText() throws {
+        let rect = try #require(FloatingImagePlacement.exclusionRect(
+            contentRect: CGRect(x: 253.7, y: 100, width: 196, height: 293),
+            contentWidth: 468, gutter: 8))
+
+        // The ~10pt strip on the right is absorbed…
+        #expect(rect.maxX == 468)
+        // …while the usable column on the left is untouched.
+        #expect(abs(rect.minX - 245.7) < 0.5)
+    }
+
+    @Test func aUsableColumnBesideAnImageStillWrapsText() throws {
+        let rect = try #require(FloatingImagePlacement.exclusionRect(
+            contentRect: CGRect(x: 0, y: 100, width: 200, height: 200),
+            contentWidth: 468, gutter: 8))
+
+        // 260pt of column remains to the right — plenty to wrap into.
+        #expect(rect.maxX == 208)
+        #expect(rect.minX == 0)
+    }
+
     @Test func exclusionRectIsNilWhenImageSitsEntirelyInAMargin() {
         // Entirely left of the column (negative maxX after clipping).
         #expect(FloatingImagePlacement.exclusionRect(
@@ -2429,6 +2455,53 @@ struct InklingTests {
         )
 
         #expect(origin == CGPoint(x: 396, y: 308))
+    }
+
+    /// Word measures a `relativeFrom="paragraph"` anchor from the top of the
+    /// whole paragraph and draws the image there however deep inside the
+    /// paragraph the drawing run sits. Real manuscripts put it deep — one
+    /// sample had drawing runs 438 and 640 characters in.
+    @Test func aParagraphRelativeImportedAnchorMeasuresFromItsParagraphsStart() {
+        let text = NSAttributedString(string: "First paragraph.\nSecond paragraph is longer.\nThird.")
+        let hint = ImportedImagePlacementHint(
+            horizontalReference: .column,
+            horizontalAlignment: nil,
+            horizontalOffset: 0,
+            verticalReference: .paragraph,
+            verticalAlignment: nil,
+            verticalOffset: 0
+        )
+
+        // A location partway through the second paragraph resolves to its start.
+        #expect(
+            ImportedImageAnchor.measurementLocation(
+                for: hint, attachmentLocation: 30, in: text
+            ) == 17
+        )
+    }
+
+    @Test func anAnchorThatIsNotParagraphRelativeKeepsInklingsBesideTheLineRule() {
+        let text = NSAttributedString(string: "First paragraph.\nSecond paragraph is longer.\nThird.")
+        let hint = ImportedImagePlacementHint(
+            horizontalReference: .column,
+            horizontalAlignment: nil,
+            horizontalOffset: 0,
+            verticalReference: .line,
+            verticalAlignment: nil,
+            verticalOffset: 0
+        )
+
+        #expect(
+            ImportedImageAnchor.measurementLocation(
+                for: hint, attachmentLocation: 30, in: text
+            ) == 30
+        )
+        // And an image that never came from Word is untouched.
+        #expect(
+            ImportedImageAnchor.measurementLocation(
+                for: nil, attachmentLocation: 30, in: text
+            ) == 30
+        )
     }
 
     @Test @MainActor func importerReadsParagraphsInTablesAndRunsInsideHyperlinks() throws {

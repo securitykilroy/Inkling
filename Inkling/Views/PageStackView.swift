@@ -865,6 +865,19 @@ extension PageStackView {
 
     /// Recomputes every floating image's page + rect and installs the resulting
     /// exclusion paths on the page containers they belong to.
+    ///
+    /// Images are placed in document order, and each one's exclusion is
+    /// installed before the next one is measured. That ordering matters twice
+    /// over. Measuring every image against a single unwrapped baseline let the
+    /// error accumulate — in a real 23-page chapter with eight images, the last
+    /// ones were drawn two full pages before the paragraph that introduced
+    /// them, because the wrapping added by the earlier seven had pushed the
+    /// text down underneath them. But iterating the whole set to a fixed point
+    /// instead is unstable: a full-column-width image's own exclusion pushes
+    /// down the very paragraph its anchor is measured from, so the image chases
+    /// itself down the document and never settles. Measuring each image against
+    /// its predecessors only — never against itself — removes the drift without
+    /// introducing the feedback.
     func rebuildFloatingImageLayout() {
         floatingLayoutRebuildCount += 1
         // Start from an unwrapped baseline, so a previous exclusion can't
@@ -876,51 +889,103 @@ extension PageStackView {
         minimumPageCount = 1
         rebuildPages()
 
-        let placements = floatingPlacements()
         syncSidebarViews()
-        let sidebarExclusions = layoutSidebars()
+        var exclusions = layoutSidebars()
 
-        // An image or sidebar may be parked on a page beyond where the text
-        // reaches; that page has to exist, and has to survive trimming.
-        let lastImagePage = placements.map(\.page).max() ?? -1
-        let lastSidebarPage = sidebarPlacements.values.map(\.page).max() ?? -1
-        let lastAnchoredPage = max(lastImagePage, lastSidebarPage)
-        if lastAnchoredPage >= 0 {
-            minimumPageCount = max(1, lastAnchoredPage + 1)
-            while pageCount < minimumPageCount { appendPage() }
+        // Dragged images and sidebars are pinned to a saved spot, so they don't
+        // depend on where the text falls and are in place before any measuring.
+        var placements = explicitFloatingPlacements()
+        for placement in placements { appendExclusion(for: placement, to: &exclusions) }
+        installExclusions(exclusions, growingToFit: placements)
+
+        for (location, floating, image) in anchoredFloatingImages() {
+            guard let placement = anchoredPlacement(for: floating, at: location, image: image)
+            else { continue }
+            placements.append(placement)
+            appendExclusion(for: placement, to: &exclusions)
+            installExclusions(exclusions, growingToFit: placements)
         }
 
-        var exclusions = sidebarExclusions
         var drawables: [Int: [(location: Int, rect: NSRect, image: NSImage)]] = [:]
         for placement in placements {
-            if let rect = FloatingImagePlacement.exclusionRect(
-                contentRect: placement.contentRect,
-                contentWidth: pageLayout.contentWidth,
-                gutter: Self.imageGutter
-            ) {
-                exclusions[placement.page, default: []].append(NSBezierPath(rect: rect))
-            }
             drawables[placement.page, default: []].append(
                 (placement.location, placement.contentRect, placement.image)
             )
         }
+        for (index, view) in pageViews.enumerated() {
+            view.floatingImages = drawables[index] ?? []
+        }
 
-        for (index, view) in pageViews.enumerated() {
-            view.textContainer?.exclusionPaths = exclusions[index] ?? []
-            view.floatingImages = drawables[index] ?? []
-        }
-        // Wrapping pushes text down, which can need another page.
-        rebuildPages()
-        for (index, view) in pageViews.enumerated() {
-            view.floatingImages = drawables[index] ?? []
-        }
         positionSidebarViews()
         needsDisplay = true
     }
 
-    /// Resolves every floating attachment to a page and a page-local rect.
-    private func floatingPlacements() -> [FloatingPlacement] {
+    private func appendExclusion(
+        for placement: FloatingPlacement,
+        to exclusions: inout [Int: [NSBezierPath]]
+    ) {
+        guard let rect = FloatingImagePlacement.exclusionRect(
+            contentRect: placement.contentRect,
+            contentWidth: pageLayout.contentWidth,
+            gutter: Self.imageGutter
+        ) else { return }
+        exclusions[placement.page, default: []].append(NSBezierPath(rect: rect))
+    }
+
+    /// Installs the exclusions gathered so far and re-paginates, keeping alive
+    /// any page that exists only to hold a parked image or sidebar.
+    private func installExclusions(
+        _ exclusions: [Int: [NSBezierPath]],
+        growingToFit placements: [FloatingPlacement]
+    ) {
+        let lastImagePage = placements.map(\.page).max() ?? -1
+        let lastSidebarPage = sidebarPlacements.values.map(\.page).max() ?? -1
+        let lastAnchoredPage = max(lastImagePage, lastSidebarPage)
+        minimumPageCount = lastAnchoredPage >= 0 ? max(1, lastAnchoredPage + 1) : 1
+        while pageCount < minimumPageCount { appendPage() }
+
+        for (index, view) in pageViews.enumerated() {
+            view.textContainer?.exclusionPaths = exclusions[index] ?? []
+        }
+        // Wrapping pushes text down, which can need another page.
+        rebuildPages()
+    }
+
+    /// Images the user has dragged to a fixed spot on a page.
+    private func explicitFloatingPlacements() -> [FloatingPlacement] {
         var placements: [FloatingPlacement] = []
+        forEachFloatingImage { location, floating, image in
+            guard let position = floating.position else { return }
+            // The paper origin converts straight to container coordinates.
+            placements.append(FloatingPlacement(
+                location: location,
+                page: position.page,
+                contentRect: FloatingImagePlacement.contentRect(
+                    origin: position.origin,
+                    imageSize: floating.displaySize,
+                    leftMargin: pageLayout.leftMargin,
+                    topMargin: pageLayout.topMargin
+                ),
+                image: image
+            ))
+        }
+        return placements
+    }
+
+    /// Images with no saved position, in document order — the order they have
+    /// to be measured and wrapped in.
+    private func anchoredFloatingImages() -> [(Int, FloatingImageAttachment, NSImage)] {
+        var result: [(Int, FloatingImageAttachment, NSImage)] = []
+        forEachFloatingImage { location, floating, image in
+            guard floating.position == nil else { return }
+            result.append((location, floating, image))
+        }
+        return result
+    }
+
+    private func forEachFloatingImage(
+        _ body: (Int, FloatingImageAttachment, NSImage) -> Void
+    ) {
         storage.enumerateAttribute(
             .attachment, in: NSRange(location: 0, length: storage.length)
         ) { value, range, _ in
@@ -929,41 +994,29 @@ extension PageStackView {
                   floating.displaySize.width > 0,
                   floating.displaySize.height > 0
             else { return }
-
-            if let position = floating.position {
-                // The user placed this image at a fixed spot on its page. The
-                // paper origin converts straight to container coordinates.
-                placements.append(FloatingPlacement(
-                    location: range.location,
-                    page: position.page,
-                    contentRect: FloatingImagePlacement.contentRect(
-                        origin: position.origin,
-                        imageSize: floating.displaySize,
-                        leftMargin: pageLayout.leftMargin,
-                        topMargin: pageLayout.topMargin
-                    ),
-                    image: image
-                ))
-            } else if let anchored = anchoredPlacement(
-                for: floating, at: range.location, image: image
-            ) {
-                placements.append(anchored)
-            }
+            body(range.location, floating, image)
         }
-        return placements
     }
 
     /// An un-placed image floats beside its anchor character's own line, so it
     /// lands where the text actually references it. The line's rect is already
     /// page-local, so this needs no translation — the case the single-container
     /// editor had to special-case and got wrong.
+    ///
+    /// An image imported from Word with a paragraph-relative anchor is measured
+    /// from its paragraph's first line instead; see `ImportedImageAnchor`.
     private func anchoredPlacement(
         for floating: FloatingImageAttachment,
         at location: Int,
         image: NSImage
     ) -> FloatingPlacement? {
+        let measurementLocation = ImportedImageAnchor.measurementLocation(
+            for: floating.importedPlacementHint,
+            attachmentLocation: location,
+            in: storage
+        )
         let glyphRange = sharedLayoutManager.glyphRange(
-            forCharacterRange: NSRange(location: location, length: 1),
+            forCharacterRange: NSRange(location: measurementLocation, length: 1),
             actualCharacterRange: nil
         )
         guard glyphRange.length > 0,
@@ -987,15 +1040,27 @@ extension PageStackView {
                 contentWidth: pageLayout.contentWidth,
                 contentHeight: pageLayout.contentHeight
             )
+            var rect = FloatingImagePlacement.contentRect(
+                origin: origin,
+                imageSize: floating.displaySize,
+                leftMargin: pageLayout.leftMargin,
+                topMargin: pageLayout.topMargin
+            )
+            var targetPage = page
+            // Word paginated this document differently than Inkling does, so an
+            // imported offset can drop a tall image past the bottom of the page
+            // its paragraph landed on. Same rule as an un-hinted image: park it
+            // at the top of the next page rather than let it bleed. Skipping
+            // this left the image hanging off the page bottom *and* pushed its
+            // own paragraph onto the following page, stranding the two apart.
+            if rect.minY > 0, rect.maxY > pageLayout.contentHeight {
+                targetPage = page + 1
+                rect.origin.y = 0
+            }
             return FloatingPlacement(
                 location: location,
-                page: page,
-                contentRect: FloatingImagePlacement.contentRect(
-                    origin: origin,
-                    imageSize: floating.displaySize,
-                    leftMargin: pageLayout.leftMargin,
-                    topMargin: pageLayout.topMargin
-                ),
+                page: targetPage,
+                contentRect: rect,
                 image: image
             )
         }

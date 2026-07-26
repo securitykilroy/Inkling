@@ -1570,6 +1570,106 @@ struct PageStackViewTests {
         return stack
     }
 
+    /// Inserts un-placed attachments carrying a Word-style paragraph-relative
+    /// anchor at the *start* of the given filler paragraphs — the shape a real
+    /// `.docx` import produces.
+    private static func stackWithAnchoredWordImages(
+        size: NSSize,
+        atParagraphs paragraphIndices: [Int],
+        paragraphs: Int = 200
+    ) -> PageStackView {
+        let text = NSMutableAttributedString(attributedString: filler(paragraphs: paragraphs))
+        let hint = ImportedImagePlacementHint(
+            horizontalReference: .column,
+            horizontalAlignment: nil,
+            horizontalOffset: 0,
+            verticalReference: .paragraph,
+            verticalAlignment: nil,
+            verticalOffset: 0
+        )
+
+        var starts: [Int] = []
+        (text.string as NSString).enumerateSubstrings(
+            in: NSRange(location: 0, length: text.length), options: .byParagraphs
+        ) { _, _, enclosing, _ in starts.append(enclosing.location) }
+
+        // Descending, so an insertion never shifts a start we haven't used yet.
+        for index in paragraphIndices.sorted(by: >) where index < starts.count {
+            let attachment = NSTextAttachment()
+            attachment.image = image(size)
+            attachment.bounds = NSRect(origin: .zero, size: size)
+            let piece = NSMutableAttributedString(attachment: attachment)
+            piece.addAttribute(
+                .inklingImportedImagePlacementHint,
+                value: hint,
+                range: NSRange(location: 0, length: piece.length)
+            )
+            text.insert(piece, at: starts[index])
+        }
+
+        let stack = PageStackView()
+        stack.setAttributedString(text)
+        stack.prepareFloatingImages()
+        return stack
+    }
+
+    /// Each image's exclusion pushes the following text down, so measuring
+    /// every image against one unwrapped baseline strands the later ones pages
+    /// before the paragraph that introduces them. A real eight-image chapter
+    /// drifted two full pages by the end.
+    @Test func importedImagesDoNotDriftPagesAheadOfTheirParagraph() throws {
+        let stack = Self.stackWithAnchoredWordImages(
+            size: NSSize(width: 460, height: 200),
+            atParagraphs: [20, 50, 80, 110, 140]
+        )
+        let manager = stack.sharedLayoutManager
+
+        var pagesEarly: [Int] = []
+        stack.storage.enumerateAttribute(
+            .attachment, in: NSRange(location: 0, length: stack.storage.length)
+        ) { value, range, _ in
+            guard value is FloatingImageAttachment,
+                  let imagePage = stack.pageViews.firstIndex(where: { view in
+                      view.floatingImages.contains { $0.location == range.location }
+                  })
+            else { return }
+
+            let glyph = manager.glyphRange(
+                forCharacterRange: NSRange(location: range.location, length: 1),
+                actualCharacterRange: nil
+            ).location
+            guard let container = manager.textContainer(forGlyphAt: glyph, effectiveRange: nil),
+                  let textPage = stack.pageViews.firstIndex(where: { $0.textContainer === container })
+            else { return }
+            pagesEarly.append(textPage - imagePage)
+        }
+
+        #expect(pagesEarly.count == 5)
+        // A full-width image legitimately pushes its own paragraph onto the next
+        // page, so one is fine. Two or more means the drift is back.
+        #expect(pagesEarly.allSatisfy { $0 <= 1 })
+    }
+
+    /// The imported-hint path used to skip the fits-on-its-page rule that
+    /// un-hinted images already had, so a tall image anchored low on a page
+    /// hung off the bottom edge *and* shoved its own paragraph forward.
+    @Test func noImportedImageIsDrawnPastItsPagesBottomEdge() throws {
+        let stack = Self.stackWithAnchoredWordImages(
+            size: NSSize(width: 300, height: 260),
+            atParagraphs: [17, 34, 51, 68, 85, 102, 119]
+        )
+        let contentHeight = PagedEditorLayout.letter.contentHeight
+
+        var drawn = 0
+        for view in stack.pageViews {
+            for item in view.floatingImages {
+                drawn += 1
+                #expect(item.rect.maxY <= contentHeight + 0.5)
+            }
+        }
+        #expect(drawn == 7)
+    }
+
     @Test func importedWordAnchorAlignmentControlsInitialPageLocalPlacement() throws {
         let stack = Self.stackWithImportedImages(
             size: NSSize(width: 144, height: 72),
