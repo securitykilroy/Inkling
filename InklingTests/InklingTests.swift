@@ -301,6 +301,61 @@ struct InklingTests {
         #expect(style.paragraphSpacing == RichTextCodec.defaultParagraphSpacing)
     }
 
+    /// Chapters saved before the indent existed already carry non-zero
+    /// paragraph spacing. The backfill has to test the two properties
+    /// separately or the indent never reaches any existing chapter.
+    @Test @MainActor func decodeBackfillsTheIndentOntoTextThatAlreadyHasSpacing() throws {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.paragraphSpacing = RichTextCodec.defaultParagraphSpacing
+        // No indent — exactly what a chapter saved before this feature looks like.
+        let original = NSAttributedString(
+            string: "Spacing but no indent.",
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 14),
+                .paragraphStyle: paragraph,
+            ]
+        )
+        let rtf = try #require(original.rtf(
+            from: NSRange(location: 0, length: original.length), documentAttributes: [:]
+        ))
+
+        let decoded = try #require(RichTextCodec.decode(rtf))
+        let style = try #require(
+            decoded.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle
+        )
+        #expect(style.firstLineHeadIndent == RichTextCodec.defaultFirstLineIndent)
+        #expect(style.paragraphSpacing == RichTextCodec.defaultParagraphSpacing)
+    }
+
+    /// An indented Title or Heading reads as a mistake, so headings stay flush.
+    @Test @MainActor func decodeLeavesHeadingsFlushWhileIndentingBody() throws {
+        let original = NSMutableAttributedString()
+        original.append(NSAttributedString(
+            string: "A Heading\n", attributes: [.font: NSFont.boldSystemFont(ofSize: 22)]
+        ))
+        original.append(NSAttributedString(
+            string: "Body text follows.", attributes: [.font: NSFont.systemFont(ofSize: 14)]
+        ))
+        let rtf = try #require(original.rtf(
+            from: NSRange(location: 0, length: original.length), documentAttributes: [:]
+        ))
+
+        let decoded = try #require(RichTextCodec.decode(rtf))
+        let headingStyle = try #require(
+            decoded.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle
+        )
+        let bodyStyle = try #require(
+            decoded.attribute(
+                .paragraphStyle, at: decoded.length - 1, effectiveRange: nil
+            ) as? NSParagraphStyle
+        )
+
+        #expect(headingStyle.firstLineHeadIndent == 0)
+        #expect(bodyStyle.firstLineHeadIndent == RichTextCodec.defaultFirstLineIndent)
+        // Both still get the paragraph gap.
+        #expect(headingStyle.paragraphSpacing == RichTextCodec.defaultParagraphSpacing)
+    }
+
     @Test @MainActor func richTextCodecEmbedsAndRestoresAnImage() throws {
         let image = NSImage(size: NSSize(width: 40, height: 20), flipped: false) { rect in
             NSColor.systemBlue.setFill()

@@ -246,8 +246,38 @@ final class RichTextController: ObservableObject {
         let font = style.font(familyName: fontFamilyName)
         storage.addAttribute(.font, value: font, range: paragraphRange)
         textView.typingAttributes[.font] = font
+
+        // Only body carries the first-line indent; a Title or Heading sits
+        // flush. Without this, switching a paragraph to a heading would leave
+        // the body indent behind on it.
+        let indent: CGFloat = style == .body ? RichTextCodec.defaultFirstLineIndent : 0
+        storage.enumerateAttribute(.paragraphStyle, in: paragraphRange) { value, range, _ in
+            storage.addAttribute(
+                .paragraphStyle,
+                value: Self.paragraphStyle(value as? NSParagraphStyle, firstLineIndent: indent),
+                range: range
+            )
+        }
+        textView.typingAttributes[.paragraphStyle] = Self.paragraphStyle(
+            textView.typingAttributes[.paragraphStyle] as? NSParagraphStyle,
+            firstLineIndent: indent
+        )
+
         textView.didChangeText()
         selectionDidChange()
+    }
+
+    /// `base` with its first-line indent replaced, keeping everything else.
+    /// A missing base starts from the document default rather than a blank
+    /// style, so this can't silently drop the paragraph spacing.
+    private static func paragraphStyle(
+        _ base: NSParagraphStyle?,
+        firstLineIndent: CGFloat
+    ) -> NSParagraphStyle {
+        let source = base ?? RichTextCodec.defaultParagraphStyle
+        let updated = (source.mutableCopy() as? NSMutableParagraphStyle) ?? NSMutableParagraphStyle()
+        updated.firstLineHeadIndent = firstLineIndent
+        return updated
     }
 
     // MARK: - Callouts

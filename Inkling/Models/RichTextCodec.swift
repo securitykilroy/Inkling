@@ -17,11 +17,25 @@ enum RichTextCodec {
     /// reads as a paragraph break rather than a line break. Applied to newly
     /// typed text (via typing attributes) and backfilled on decode for
     /// chapters written before this existed, including Word imports.
-    nonisolated static let defaultParagraphSpacing: CGFloat = 6
+    ///
+    /// Half a line: body text is 14pt, so a line box is ~17pt. Paragraphs are
+    /// marked by this gap alone — there is deliberately no first-line indent,
+    /// and adding one would be redundant. This started at 6pt, which is only a
+    /// third of a line: too small to read unambiguously as a break, and dense
+    /// pages of long paragraphs ran together as a result.
+    nonisolated static let defaultParagraphSpacing: CGFloat = 9
+
+    /// First-line indent for body paragraphs. Deliberately smaller than the
+    /// ~1em a book would use if the indent were the *only* paragraph marker:
+    /// the gap above already does that job, so this is texture on the left
+    /// edge rather than a signal, and a full-size indent alongside a gap reads
+    /// as a mistake. Headings stay flush — see `applyDefaultParagraphStyling`.
+    nonisolated static let defaultFirstLineIndent: CGFloat = 12
 
     nonisolated static var defaultParagraphStyle: NSParagraphStyle {
         let style = NSMutableParagraphStyle()
         style.paragraphSpacing = defaultParagraphSpacing
+        style.firstLineHeadIndent = defaultFirstLineIndent
         return style
     }
 
@@ -67,7 +81,7 @@ enum RichTextCodec {
         else { return nil }
         let mutable = NSMutableAttributedString(attributedString: attributed)
         restoreAttachmentSizes(in: mutable, from: data)
-        applyDefaultParagraphSpacing(in: mutable)
+        applyDefaultParagraphStyling(in: mutable)
         restoreCallouts(in: mutable, from: data)
         restoreSidebars(in: mutable, from: data)
         return mutable
@@ -129,21 +143,60 @@ enum RichTextCodec {
         }
     }
 
-    /// Backfills the default paragraph spacing onto any paragraph that
-    /// doesn't already carry non-zero spacing, preserving any other
-    /// paragraph-style properties (alignment, etc.) already present. Safe to
-    /// run on every decode: a paragraph that already has spacing (from a
-    /// prior save, once this exists) is left untouched.
-    nonisolated private static func applyDefaultParagraphSpacing(in attributedString: NSMutableAttributedString) {
+    /// Backfills the default paragraph spacing and body first-line indent onto
+    /// any paragraph missing them, preserving any other paragraph-style
+    /// properties (alignment, etc.) already present. Safe to run on every
+    /// decode: whatever a paragraph already carries is left untouched.
+    ///
+    /// The two properties are checked **independently**. Chapters saved before
+    /// the indent existed already carry non-zero spacing, so a combined test
+    /// would skip them and the indent would only ever reach newly typed text.
+    ///
+    /// Headings keep a flush left edge — an indented Title/Heading reads as a
+    /// mistake — using the same bold-and-≥17pt test the sidebar outline uses.
+    /// Callout styling runs after this and sets its own indents, so callouts
+    /// are unaffected.
+    nonisolated private static func applyDefaultParagraphStyling(in attributedString: NSMutableAttributedString) {
         guard attributedString.length > 0 else { return }
-        let fullRange = NSRange(location: 0, length: attributedString.length)
-        attributedString.enumerateAttribute(.paragraphStyle, in: fullRange) { value, range, _ in
-            let existing = value as? NSParagraphStyle
-            guard (existing?.paragraphSpacing ?? 0) == 0 else { return }
-            let updated = (existing?.mutableCopy() as? NSMutableParagraphStyle) ?? NSMutableParagraphStyle()
-            updated.paragraphSpacing = defaultParagraphSpacing
-            attributedString.addAttribute(.paragraphStyle, value: updated, range: range)
+        let string = attributedString.string as NSString
+
+        var location = 0
+        while location < attributedString.length {
+            let paragraph = string.paragraphRange(for: NSRange(location: location, length: 0))
+            guard paragraph.length > 0 else { break }
+
+            let existing = attributedString.attribute(
+                .paragraphStyle, at: paragraph.location, effectiveRange: nil
+            ) as? NSParagraphStyle
+            let updated = (existing?.mutableCopy() as? NSMutableParagraphStyle)
+                ?? NSMutableParagraphStyle()
+            var changed = false
+
+            if (existing?.paragraphSpacing ?? 0) == 0 {
+                updated.paragraphSpacing = defaultParagraphSpacing
+                changed = true
+            }
+            if (existing?.firstLineHeadIndent ?? 0) == 0,
+               !isHeadingParagraph(paragraph, in: attributedString) {
+                updated.firstLineHeadIndent = defaultFirstLineIndent
+                changed = true
+            }
+            if changed {
+                attributedString.addAttribute(.paragraphStyle, value: updated, range: paragraph)
+            }
+            location = paragraph.location + paragraph.length
         }
+    }
+
+    /// The same bold-and-large test `ChapterOutline` uses to spot headings.
+    nonisolated private static func isHeadingParagraph(
+        _ range: NSRange,
+        in attributedString: NSAttributedString
+    ) -> Bool {
+        guard let font = attributedString.attribute(
+            .font, at: range.location, effectiveRange: nil
+        ) as? NSFont else { return false }
+        return font.fontDescriptor.symbolicTraits.contains(.bold) && font.pointSize >= 17
     }
 
     nonisolated static func encode(_ attributedString: NSAttributedString) -> Data? {
