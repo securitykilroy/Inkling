@@ -334,6 +334,10 @@ final class ManuscriptPrintView: NSView {
         let page: Int
         let contentRect: NSRect
         let image: NSImage
+        /// Mirrors `PageStackView.FloatingPlacement.anchoredToParagraph`: an
+        /// image sitting at its paragraph's top must not let its exclusion
+        /// reach into the line above, or that line gets narrowed and shoved.
+        var anchoredToParagraph = false
     }
 
     private struct LayoutPass {
@@ -506,7 +510,8 @@ final class ManuscriptPrintView: NSView {
                     targetPage = page + 1
                     rect.origin.y = 0
                 }
-                placement = FloatingPlacement(page: targetPage, contentRect: rect, image: image)
+                placement = FloatingPlacement(page: targetPage, contentRect: rect, image: image,
+                                             anchoredToParagraph: true)
                 return
             }
 
@@ -514,7 +519,8 @@ final class ManuscriptPrintView: NSView {
             let placedPage = fits ? page : page + 1
             let y: CGFloat = fits ? lineRect.minY : 0
             let contentRect = NSRect(x: 0, y: y, width: min(size.width, pageSize.width), height: size.height)
-            placement = FloatingPlacement(page: placedPage, contentRect: contentRect, image: image)
+            placement = FloatingPlacement(page: placedPage, contentRect: contentRect, image: image,
+                                         anchoredToParagraph: true)
         }
         return placement
     }
@@ -538,11 +544,17 @@ final class ManuscriptPrintView: NSView {
         var drawables: [Int: [PlacedImage]] = [:]
         for (page, list) in placements {
             for placement in list {
-                if let rect = FloatingImagePlacement.exclusionRect(
+                if var rect = FloatingImagePlacement.exclusionRect(
                     contentRect: placement.contentRect,
                     contentWidth: pageSize.width,
-                    gutter: 8
+                    gutter: 8,
+                    topGutter: placement.anchoredToParagraph ? 0 : nil
                 ) {
+                    if placement.anchoredToParagraph {
+                        let snapped = rect.minY.rounded(.up)
+                        rect = CGRect(x: rect.minX, y: snapped,
+                                      width: rect.width, height: max(0, rect.maxY - snapped))
+                    }
                     exclusions[page, default: []].append(NSBezierPath(rect: rect))
                 }
                 drawables[page, default: []].append(

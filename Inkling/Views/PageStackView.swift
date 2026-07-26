@@ -826,6 +826,10 @@ extension PageStackView {
         let page: Int
         let contentRect: NSRect
         let image: NSImage
+        /// True when the image sits where its anchor paragraph starts, rather
+        /// than at a spot the user dragged it to. Such an image must not let
+        /// its exclusion reach up into the line above — see `appendExclusion`.
+        var anchoredToParagraph = false
     }
 
     /// Gutter between an image and the text that wraps around it. Matches the
@@ -939,11 +943,27 @@ extension PageStackView {
         for placement: FloatingPlacement,
         to exclusions: inout [Int: [NSBezierPath]]
     ) {
-        guard let rect = FloatingImagePlacement.exclusionRect(
+        guard var rect = FloatingImagePlacement.exclusionRect(
             contentRect: placement.contentRect,
             contentWidth: pageLayout.contentWidth,
-            gutter: Self.imageGutter
+            gutter: Self.imageGutter,
+            topGutter: placement.anchoredToParagraph ? 0 : nil
         ) else { return }
+
+        if placement.anchoredToParagraph {
+            // Placements are measured before the final layout settles, so an
+            // image's top can land a fraction of a point above its own
+            // paragraph's line. That is enough for TextKit to count the line
+            // *above* as overlapped and narrow it. Rounding the exclusion's top
+            // down-page absorbs that noise; a sub-point shift is invisible.
+            let snapped = rect.minY.rounded(.up)
+            rect = CGRect(
+                x: rect.minX,
+                y: snapped,
+                width: rect.width,
+                height: max(0, rect.maxY - snapped)
+            )
+        }
         exclusions[placement.page, default: []].append(NSBezierPath(rect: rect))
     }
 
@@ -1102,7 +1122,8 @@ extension PageStackView {
                 location: location,
                 page: targetPage,
                 contentRect: rect,
-                image: image
+                image: image,
+                anchoredToParagraph: true
             )
         }
         // If the image can't fit in what's left of this page, park it at the top
@@ -1120,7 +1141,8 @@ extension PageStackView {
                 width: min(floating.displaySize.width, pageLayout.contentWidth),
                 height: floating.displaySize.height
             ),
-            image: image
+            image: image,
+            anchoredToParagraph: true
         )
     }
 

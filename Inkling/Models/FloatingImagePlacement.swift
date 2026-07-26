@@ -175,12 +175,27 @@ enum FloatingImagePlacement {
     /// `[0, contentWidth]` and grown by `gutter` so text keeps a small gap.
     /// Returns nil when the image doesn't overlap the text column at all
     /// (e.g. parked entirely in a side margin), so no exclusion is needed.
+    /// - Parameter topGutter: how far *above* the image the exclusion reaches.
+    ///   Defaults to `gutter`. Pass 0 for an image anchored to a paragraph's
+    ///   top: TextKit narrows any line whose fragment the exclusion touches,
+    ///   and the previous paragraph's fragment extends down to this one's top
+    ///   (it includes the trailing paragraph spacing), so an upward gutter
+    ///   reaches into the line above and shoves it sideways. A chapter heading
+    ///   directly above an image was being pushed 201pt to the right by exactly
+    ///   this. Nothing is lost: paragraph spacing already separates them.
     static func exclusionRect(
         contentRect: CGRect,
         contentWidth: CGFloat,
-        gutter: CGFloat
+        gutter: CGFloat,
+        topGutter: CGFloat? = nil
     ) -> CGRect? {
-        let grown = contentRect.insetBy(dx: -gutter, dy: -gutter)
+        let top = contentRect.minY - (topGutter ?? gutter)
+        let grown = CGRect(
+            x: contentRect.minX - gutter,
+            y: top,
+            width: contentRect.width + gutter * 2,
+            height: (contentRect.maxY + gutter) - top
+        )
         var minX = max(0, grown.minX)
         var maxX = min(contentWidth, grown.maxX)
         guard maxX > minX else { return nil }

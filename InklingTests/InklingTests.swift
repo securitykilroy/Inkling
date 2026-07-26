@@ -1780,6 +1780,35 @@ struct InklingTests {
         #expect(rect.minX == 0)
     }
 
+    /// An image sitting at its paragraph's top must not let its exclusion reach
+    /// *above* the image. TextKit narrows any line whose fragment the exclusion
+    /// touches, and the previous paragraph's fragment reaches down to this
+    /// one's top (it carries the trailing paragraph spacing), so an upward
+    /// gutter grabs the line above. In a real chapter that shoved the heading
+    /// "Chapter 2 - Running" 201pt to the right of the margin.
+    @Test func aParagraphAnchoredExclusionNeverReachesAboveTheImage() throws {
+        let image = CGRect(x: 0, y: 104, width: 193, height: 129)
+        let anchored = try #require(FloatingImagePlacement.exclusionRect(
+            contentRect: image, contentWidth: 468, gutter: 8, topGutter: 0))
+
+        // Flush with the image's own top...
+        #expect(abs(anchored.minY - 104) < 0.001)
+        // ...while the other three sides keep their gutter.
+        #expect(abs(anchored.maxY - 241) < 0.001)
+        #expect(abs(anchored.maxX - 201) < 0.001)
+    }
+
+    /// A dragged image keeps the gutter on all four sides: there is no
+    /// paragraph boundary above it doing the separating.
+    @Test func aFreelyPlacedExclusionStillGrowsUpward() throws {
+        let image = CGRect(x: 100, y: 104, width: 193, height: 129)
+        let free = try #require(FloatingImagePlacement.exclusionRect(
+            contentRect: image, contentWidth: 468, gutter: 8))
+
+        #expect(abs(free.minY - 96) < 0.001)
+        #expect(abs(free.maxY - 241) < 0.001)
+    }
+
     @Test func exclusionRectIsNilWhenImageSitsEntirelyInAMargin() {
         // Entirely left of the column (negative maxX after clipping).
         #expect(FloatingImagePlacement.exclusionRect(
