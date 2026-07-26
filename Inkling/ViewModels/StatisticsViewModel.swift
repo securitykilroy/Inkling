@@ -35,9 +35,36 @@ final class StatisticsViewModel: ObservableObject {
         for chapter in chapters {
             if let id = chapter.id {
                 words[id] = TextStatistics.wordCount(inRTF: chapter.bodyData)
-                pages[id] = PagedTextView.pageCount(forRTF: chapter.bodyData)
+                pages[id] = PageStackView.pageCount(forRTF: chapter.bodyData)
             }
         }
+        wordCounts = words
+        pageCounts = pages
+    }
+
+    /// Computes counts for chapters that don't have them yet, leaving existing
+    /// entries alone. Call whenever the chapter set changes — importing a book
+    /// adds chapters that `primeAll`'s one-time `onAppear` never sees.
+    ///
+    /// Must be called *outside* a view body. Both counts decode the chapter's
+    /// RTF and one of them lays the whole chapter out; doing that during a
+    /// render is what made a single keystroke re-paginate the entire book.
+    func primeMissing(for chapters: [Chapter]) {
+        var words = wordCounts
+        var pages = pageCounts
+        var added = false
+        for chapter in chapters {
+            guard let id = chapter.id else { continue }
+            if words[id] == nil {
+                words[id] = TextStatistics.wordCount(inRTF: chapter.bodyData)
+                added = true
+            }
+            if pages[id] == nil {
+                pages[id] = PageStackView.pageCount(forRTF: chapter.bodyData)
+                added = true
+            }
+        }
+        guard added else { return }
         wordCounts = words
         pageCounts = pages
     }
@@ -56,14 +83,25 @@ final class StatisticsViewModel: ObservableObject {
         pageCounts[id] = pages
     }
 
+    // These are read from view bodies, so they must stay cheap: cache hit or a
+    // trivial fallback, never a decode or a layout. They previously fell back to
+    // computing the real value, and because the result was never stored, an
+    // un-primed chapter recomputed on *every* SwiftUI render. After importing a
+    // book none of the new chapters were primed, so each keystroke in the
+    // sidebar re-decoded and re-paginated all of them — measured at ~0.4-0.8s
+    // per chapter, several seconds per keystroke. `primeMissing(for:)` fills
+    // these in from outside the render pass.
+
     func wordCount(for chapter: Chapter) -> Int {
-        if let id = chapter.id, let cached = wordCounts[id] { return cached }
-        return TextStatistics.wordCount(inRTF: chapter.bodyData)
+        guard let id = chapter.id else { return 0 }
+        return wordCounts[id] ?? 0
     }
 
+    /// Every chapter occupies at least one page, so an un-primed chapter reads
+    /// as 1 rather than 0 — the total is briefly low instead of briefly absurd.
     func pageCount(for chapter: Chapter) -> Int {
-        if let id = chapter.id, let cached = pageCounts[id] { return cached }
-        return PagedTextView.pageCount(forRTF: chapter.bodyData)
+        guard let id = chapter.id else { return 1 }
+        return pageCounts[id] ?? 1
     }
 
     func totalWords(for chapters: [Chapter]) -> Int {

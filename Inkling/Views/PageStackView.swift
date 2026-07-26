@@ -635,6 +635,22 @@ final class PageStackView: NSView, NSTextStorageDelegate {
 
     /// Builds the scrolling, magnifying canvas that hosts the page stack —
     /// the per-page-container counterpart to `PagedTextView.makePagedScrollView`.
+    /// The number of pages `data` (RTF/RTFD) occupies, laid out off-screen by
+    /// the *same* code the on-screen editor uses.
+    ///
+    /// This deliberately goes through `PageStackView` rather than the retired
+    /// single-container `PagedTextView`. The two have separate floating-image
+    /// placement logic, so counting with the other one let the sidebar disagree
+    /// with the editor — a real chapter measured 22 pages here and 23 on screen.
+    /// An empty or undecodable chapter is one page, matching the editor footer.
+    static func pageCount(forRTF data: Data?, pageLayout: PagedEditorLayout = .letter) -> Int {
+        let stack = PageStackView(pageLayout: pageLayout)
+        guard let attributed = RichTextCodec.decode(data) else { return 1 }
+        stack.setAttributedString(NSMutableAttributedString(attributedString: attributed))
+        stack.prepareFloatingImages()
+        return max(1, stack.pageCount)
+    }
+
     static func makeScrollView(pageLayout: PagedEditorLayout = .letter) -> PagedEditorScrollView {
         let stack = PageStackView(pageLayout: pageLayout)
         let scrollView = PagedEditorScrollView(canvasWidth: stack.canvasWidth)
@@ -881,11 +897,10 @@ extension PageStackView {
     func rebuildFloatingImageLayout() {
         floatingLayoutRebuildCount += 1
         // Start from an unwrapped baseline, so a previous exclusion can't
-        // influence the anchor used to build its replacement.
-        for view in pageViews {
-            view.textContainer?.exclusionPaths = []
-            view.floatingImages = []
-        }
+        // influence the anchor used to build its replacement. Routed through
+        // `syncExclusions` so pages that already had none aren't invalidated.
+        syncExclusions([:])
+        for view in pageViews { view.floatingImages = [] }
         minimumPageCount = 1
         rebuildPages()
 
@@ -944,11 +959,37 @@ extension PageStackView {
         minimumPageCount = lastAnchoredPage >= 0 ? max(1, lastAnchoredPage + 1) : 1
         while pageCount < minimumPageCount { appendPage() }
 
-        for (index, view) in pageViews.enumerated() {
-            view.textContainer?.exclusionPaths = exclusions[index] ?? []
-        }
+        syncExclusions(exclusions)
         // Wrapping pushes text down, which can need another page.
         rebuildPages()
+    }
+
+    /// Assigns each page's exclusion paths, skipping pages whose paths are
+    /// already what they should be.
+    ///
+    /// The skip matters a great deal. Setting `exclusionPaths` invalidates that
+    /// container's layout whether or not the value actually changed, and the
+    /// document-order sweep calls this once per image. Reassigning every page
+    /// every time therefore re-laid-out the whole chapter once per image —
+    /// quadratic in a chapter's image count, and the dominant cost of a rebuild
+    /// in an image-heavy chapter. Only the page an image lands on changes on
+    /// any given pass.
+    private func syncExclusions(_ exclusions: [Int: [NSBezierPath]]) {
+        for (index, view) in pageViews.enumerated() {
+            guard let container = view.textContainer else { continue }
+            let wanted = exclusions[index] ?? []
+            if !Self.exclusionPathsMatch(container.exclusionPaths, wanted) {
+                container.exclusionPaths = wanted
+            }
+        }
+    }
+
+    /// Every path this class builds is a plain rect, so comparing bounds in
+    /// order is an exact comparison.
+    private static func exclusionPathsMatch(_ lhs: [NSBezierPath], _ rhs: [NSBezierPath]) -> Bool {
+        guard lhs.count == rhs.count else { return false }
+        for (a, b) in zip(lhs, rhs) where a.bounds != b.bounds { return false }
+        return true
     }
 
     /// Images the user has dragged to a fixed spot on a page.

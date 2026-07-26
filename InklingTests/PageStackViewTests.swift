@@ -1670,6 +1670,53 @@ struct PageStackViewTests {
         #expect(drawn == 7)
     }
 
+    /// The sidebar's off-screen page count and the on-screen editor must agree.
+    /// They used to be computed by two different editors with independent
+    /// floating-image placement, and once the placement sweep was fixed in only
+    /// one of them a real chapter measured 22 pages in the sidebar and 23 in the
+    /// editor.
+    ///
+    /// Note this is a weaker guard than it looks: the real guarantee is
+    /// structural — both now run the same code, so they cannot disagree. I could
+    /// not build a synthetic chapter that reproduced the original 22/23 split,
+    /// so this would not have caught it. It does catch the counter being
+    /// re-pointed at a differently-behaving implementation.
+    @Test func offScreenPageCountMatchesTheLiveEditor() throws {
+        let text = NSMutableAttributedString(attributedString: Self.filler(paragraphs: 260))
+        // Word-imported images specifically: it is the imported-anchor path that
+        // the two editors resolve differently.
+        let hint = ImportedImagePlacementHint(
+            horizontalReference: .column,
+            horizontalAlignment: nil,
+            horizontalOffset: 0,
+            verticalReference: .paragraph,
+            verticalAlignment: nil,
+            verticalOffset: 0
+        )
+        for location in [15_000, 13_000, 11_000, 9_000, 7_000, 5_000, 3_000, 900] {
+            let size = NSSize(width: 300, height: 320)
+            let attachment = NSTextAttachment()
+            attachment.image = Self.image(size)
+            attachment.bounds = NSRect(origin: .zero, size: size)
+            let piece = NSMutableAttributedString(attachment: attachment)
+            piece.addAttribute(
+                .inklingImportedImagePlacementHint, value: hint,
+                range: NSRange(location: 0, length: piece.length)
+            )
+            text.insert(piece, at: min(location, text.length))
+        }
+        let data = try #require(RichTextCodec.encode(text))
+
+        let live = PageStackView()
+        live.setAttributedString(
+            NSMutableAttributedString(attributedString: try #require(RichTextCodec.decode(data)))
+        )
+        live.prepareFloatingImages()
+
+        #expect(PageStackView.pageCount(forRTF: data) == live.pageCount)
+        #expect(live.pageCount > 1)
+    }
+
     @Test func importedWordAnchorAlignmentControlsInitialPageLocalPlacement() throws {
         let stack = Self.stackWithImportedImages(
             size: NSSize(width: 144, height: 72),

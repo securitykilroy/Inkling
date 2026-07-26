@@ -47,6 +47,12 @@ struct ChapterSidebar: View {
         }
         .navigationTitle(viewModel.project.title ?? "Inkling")
         .onAppear { statistics.primeAll() }
+        // Importing a book adds chapters long after `onAppear`. Priming them
+        // here — outside the view body — is what keeps the totals below from
+        // having to compute anything during a render.
+        .onChange(of: chapters.map(\.objectID)) { _, _ in
+            statistics.primeMissing(for: Array(chapters))
+        }
         .safeAreaInset(edge: .bottom) {
             let words = statistics.totalWords(for: Array(chapters))
             let pages = statistics.totalPages(for: Array(chapters))
