@@ -1947,6 +1947,128 @@ struct PageStackViewTests {
         _ = scrollView
     }
 
+    // MARK: - Heading styles are one-line styles
+
+    /// Return at the end of a Title/Heading/Subheading must start the next
+    /// paragraph in plain body, the way word processors treat heading styles.
+    /// `PagedTextView` has always done this; the per-page editor that replaced
+    /// it as the chapter body never did, so a Title at the top of a chapter
+    /// carried on into every paragraph after it.
+    @Test func returnAfterATitleStartsTheNextParagraphInBody() throws {
+        let stack = PageStackView()
+        stack.setAttributedString(NSAttributedString(
+            string: "Coming Home",
+            attributes: [.font: TextStyle.title.font(familyName: nil)]
+        ))
+        let page = stack.pageViews[0]
+        page.setSelectedRange(NSRange(location: page.string.count, length: 0))
+
+        page.insertNewline(nil)
+        page.insertText("Body text.", replacementRange: page.selectedRange())
+
+        let bodyRange = (page.string as NSString).range(of: "Body text.")
+        let font = try #require(
+            stack.storage.attribute(.font, at: bodyRange.location, effectiveRange: nil) as? NSFont
+        )
+        #expect(font.pointSize == TextStyle.body.pointSize)
+        #expect(!font.fontDescriptor.symbolicTraits.contains(.bold))
+    }
+
+    /// The demoted paragraph is body, so it gets the body first-line indent
+    /// back — a Title sits flush, and inheriting that leaves the first real
+    /// paragraph of a chapter un-indented while every later one is indented.
+    @Test func returnAfterATitleRestoresTheBodyFirstLineIndent() throws {
+        let stack = PageStackView()
+        let flush = NSMutableParagraphStyle()
+        flush.paragraphSpacing = RichTextCodec.defaultParagraphSpacing
+        flush.firstLineHeadIndent = 0
+        stack.setAttributedString(NSAttributedString(
+            string: "Coming Home",
+            attributes: [.font: TextStyle.title.font(familyName: nil), .paragraphStyle: flush]
+        ))
+        let page = stack.pageViews[0]
+        page.setSelectedRange(NSRange(location: page.string.count, length: 0))
+
+        page.insertNewline(nil)
+        page.insertText("Body text.", replacementRange: page.selectedRange())
+
+        let bodyRange = (page.string as NSString).range(of: "Body text.")
+        let style = try #require(
+            stack.storage.attribute(.paragraphStyle, at: bodyRange.location, effectiveRange: nil) as? NSParagraphStyle
+        )
+        #expect(style.firstLineHeadIndent == RichTextCodec.defaultFirstLineIndent)
+    }
+
+    /// Return inside a *body* paragraph must not be touched — only headings
+    /// are one-line styles.
+    @Test func returnAfterBodyTextKeepsTheBodyFont() throws {
+        let stack = PageStackView()
+        stack.setAttributedString(NSAttributedString(
+            string: "First line.",
+            attributes: [.font: TextStyle.body.font(familyName: "Georgia")]
+        ))
+        let page = stack.pageViews[0]
+        page.setSelectedRange(NSRange(location: page.string.count, length: 0))
+
+        page.insertNewline(nil)
+        page.insertText("Second line.", replacementRange: page.selectedRange())
+
+        let range = (page.string as NSString).range(of: "Second line.")
+        let font = try #require(
+            stack.storage.attribute(.font, at: range.location, effectiveRange: nil) as? NSFont
+        )
+        #expect(font.familyName == "Georgia")
+        #expect(font.pointSize == TextStyle.body.pointSize)
+    }
+
+    /// Demotion keeps the project's typeface: only weight and size change.
+    @Test func returnAfterATitleKeepsTheProjectTypeface() throws {
+        let stack = PageStackView()
+        stack.setAttributedString(NSAttributedString(
+            string: "Coming Home",
+            attributes: [.font: TextStyle.title.font(familyName: "Georgia")]
+        ))
+        let page = stack.pageViews[0]
+        page.setSelectedRange(NSRange(location: page.string.count, length: 0))
+
+        page.insertNewline(nil)
+        page.insertText("Body text.", replacementRange: page.selectedRange())
+
+        let bodyRange = (page.string as NSString).range(of: "Body text.")
+        let font = try #require(
+            stack.storage.attribute(.font, at: bodyRange.location, effectiveRange: nil) as? NSFont
+        )
+        #expect(font.familyName == "Georgia")
+        #expect(!font.fontDescriptor.symbolicTraits.contains(.bold))
+    }
+
+    /// The Style menu must also work from the caret on the empty paragraph a
+    /// Return leaves behind — there is no text there to restyle, so the fix
+    /// has to land on the typing attributes.
+    @Test func choosingBodyOnAnEmptyTrailingParagraphTypesInBody() throws {
+        let stack = PageStackView()
+        stack.setAttributedString(NSAttributedString(
+            string: "Coming Home\n",
+            attributes: [.font: TextStyle.title.font(familyName: nil)]
+        ))
+        let page = stack.pageViews[0]
+        page.setSelectedRange(NSRange(location: page.string.count, length: 0))
+        page.typingAttributes[.font] = TextStyle.title.font(familyName: nil)
+
+        let controller = RichTextController()
+        controller.textView = page
+        controller.applyStyle(.body)
+        page.insertText("Body text.", replacementRange: page.selectedRange())
+
+        let bodyRange = (page.string as NSString).range(of: "Body text.")
+        let font = try #require(
+            stack.storage.attribute(.font, at: bodyRange.location, effectiveRange: nil) as? NSFont
+        )
+        #expect(font.pointSize == TextStyle.body.pointSize)
+        #expect(!font.fontDescriptor.symbolicTraits.contains(.bold))
+        #expect(controller.currentStyle == .body)
+    }
+
     @Test func editingOnAnEarlyPageRepaginatesLaterPages() {
         let stack = Self.makeStack(paragraphs: 200)
         let before = Self.characterRange(ofPage: 1, in: stack)

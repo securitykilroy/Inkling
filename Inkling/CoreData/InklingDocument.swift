@@ -81,9 +81,20 @@ final class InklingDocument: NSPersistentDocument {
 
         let hosting = NSHostingController(rootView: rootView)
         let window = NSWindow(contentViewController: hosting)
-        // Matches the comfortable working size chosen while testing. The
-        // title bar brings the complete window to roughly 984 x 967 points.
-        window.setContentSize(NSSize(width: 984, height: 915))
+        // The sidebar's `.toolbar` gives this window a toolbar, and macOS 26
+        // then parks a 52pt-tall scroll pocket (a blur that scrolling content
+        // is meant to pass under) at the top of each split-view column. In a
+        // window without this style mask those pocket views land *inside* the
+        // content area and are ordered above the detail column, so they blur
+        // the top of it — which is where the chapter title sits, rendering it
+        // as an illegible smear. Full-size content is what SwiftUI's own
+        // windows use: it puts the pockets behind the real title bar, where
+        // they belong.
+        window.styleMask.insert(.fullSizeContentView)
+        // Matches the comfortable working size chosen while testing. With
+        // full-size content the title bar overlays the content view, so this
+        // is the complete window size rather than the area below the bar.
+        window.setContentSize(NSSize(width: 984, height: 967))
         window.minSize = NSSize(width: 760, height: 480)
         window.title = displayName
 

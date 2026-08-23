@@ -314,6 +314,36 @@ final class PageTextView: NSTextView {
         guard !stillSelectingFlag else { return }
         pageStack?.scrollCaretToTypewriterPosition()
     }
+
+    /// After Return, AppKit carries the previous line's attributes into
+    /// `typingAttributes`. If that line was a Title/Heading/Subheading (bold,
+    /// above body size — the same threshold `RichTextController.currentStyle`
+    /// classifies by), the new paragraph starts in plain body instead of
+    /// continuing the heading, matching how word processors treat headings as
+    /// one-line styles. The typeface is kept; only weight and size change.
+    ///
+    /// `PagedTextView` has carried this since headings were added, but the
+    /// per-page editor that replaced it as the chapter body did not, so a
+    /// Title at the top of a chapter ran on into everything typed after it.
+    override func insertNewline(_ sender: Any?) {
+        super.insertNewline(sender)
+        guard let font = typingAttributes[.font] as? NSFont,
+              font.fontDescriptor.symbolicTraits.contains(.bold),
+              font.pointSize >= 15
+        else { return }
+
+        let plainDescriptor = font.fontDescriptor.withSymbolicTraits([])
+        typingAttributes[.font] = NSFont(descriptor: plainDescriptor, size: TextStyle.body.pointSize)
+            ?? TextStyle.body.font
+        // A heading sits flush, so the inherited paragraph style has no
+        // first-line indent. Body paragraphs carry one, and without this the
+        // first paragraph of a chapter is the only un-indented one.
+        let base = typingAttributes[.paragraphStyle] as? NSParagraphStyle
+            ?? RichTextCodec.defaultParagraphStyle
+        let restored = (base.mutableCopy() as? NSMutableParagraphStyle) ?? NSMutableParagraphStyle()
+        restored.firstLineHeadIndent = RichTextCodec.defaultFirstLineIndent
+        typingAttributes[.paragraphStyle] = restored
+    }
 }
 
 /// The scrolling document view: a vertical stack of fixed-size page views, all

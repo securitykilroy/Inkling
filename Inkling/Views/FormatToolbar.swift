@@ -14,18 +14,18 @@ struct FormatToolbar: View {
 
     var body: some View {
         HStack(spacing: 12) {
+            // An inline Picker, not Buttons: a Button's `Label` image is not
+            // drawn inside a menu, so the hand-rolled checkmark that used to
+            // mark the current style never appeared and the menu gave no clue
+            // which style the caret was in. A Picker draws the mark itself.
             Menu {
-                ForEach(TextStyle.allCases) { style in
-                    Button {
-                        controller.applyStyle(style)
-                    } label: {
-                        if style == controller.currentStyle {
-                            Label(style.label, systemImage: "checkmark")
-                        } else {
-                            Text(style.label)
-                        }
+                Picker("Style", selection: styleSelection) {
+                    ForEach(TextStyle.allCases) { style in
+                        Text(style.label).tag(style)
                     }
                 }
+                .pickerStyle(.inline)
+                .labelsHidden()
             } label: {
                 Label("Style", systemImage: "textformat")
             }
@@ -54,17 +54,17 @@ struct FormatToolbar: View {
             Divider().frame(height: 16)
 
             Menu {
-                ForEach(CalloutKind.allCases) { kind in
-                    Button {
-                        controller.applyCallout(kind)
-                    } label: {
-                        if kind == controller.currentCallout {
-                            Label(kind.menuLabel, systemImage: "checkmark")
-                        } else {
-                            Label(kind.menuLabel, systemImage: kind.symbolName)
-                        }
+                // Same reason as the Style menu above: only a Picker marks the
+                // current choice. The selection is optional because the caret
+                // is usually not in a callout at all.
+                Picker("Callout", selection: calloutSelection) {
+                    ForEach(CalloutKind.allCases) { kind in
+                        Label(kind.menuLabel, systemImage: kind.symbolName)
+                            .tag(CalloutKind?.some(kind))
                     }
                 }
+                .pickerStyle(.inline)
+                .labelsHidden()
                 Divider()
                 Button("Remove Callout") { controller.removeCallout() }
                     .disabled(controller.currentCallout == nil)
@@ -90,6 +90,26 @@ struct FormatToolbar: View {
         .buttonStyle(.borderless)
         .labelStyle(.titleAndIcon)
         .background(styleShortcuts)
+    }
+
+    /// Reads the style at the caret and applies the one the user picks.
+    /// Picking the style that's already current is a no-op — SwiftUI only
+    /// writes through a Picker's binding when the selection actually changes.
+    private var styleSelection: Binding<TextStyle> {
+        Binding(
+            get: { controller.currentStyle },
+            set: { controller.applyStyle($0) }
+        )
+    }
+
+    /// Optional because the caret is usually not inside a callout, in which
+    /// case no row is marked. Clearing goes through Remove Callout, so a nil
+    /// write never reaches here.
+    private var calloutSelection: Binding<CalloutKind?> {
+        Binding(
+            get: { controller.currentCallout },
+            set: { if let kind = $0 { controller.applyCallout(kind) } }
+        )
     }
 
     /// Keyboard shortcuts for the paragraph styles. These live in the regular
