@@ -108,10 +108,18 @@ struct ChapterSidebar: View {
             selection = viewModel.addChapter()
         }
         .sheet(isPresented: $commands.settingsPresented) {
-            ProjectSettingsView(project: viewModel.project, documentName: documentName)
+            ProjectSettingsView(
+                project: viewModel.project,
+                statistics: statistics,
+                documentName: documentName
+            )
         }
         .sheet(isPresented: $commands.findReplacePresented) {
-            ProjectFindReplaceView(navigator: navigator, selection: $selection)
+            ProjectFindReplaceView(
+                navigator: navigator,
+                statistics: statistics,
+                selection: $selection
+            )
         }
         .overlay {
             if chapters.isEmpty {
@@ -127,29 +135,12 @@ struct ChapterSidebar: View {
     /// A chapter row, expandable into its outline (headings) when it has any.
     @ViewBuilder
     private func row(for chapter: Chapter) -> some View {
-        let headings = ChapterOutline.headings(in: chapter.bodyData)
-        if headings.isEmpty {
-            ChapterRow(chapter: chapter, statistics: statistics)
-        } else {
-            DisclosureGroup(isExpanded: expansionBinding(for: chapter)) {
-                ForEach(headings) { heading in
-                    Button {
-                        jump(to: chapter, heading: heading)
-                    } label: {
-                        Text(heading.text)
-                            .lineLimit(1)
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                            .padding(.leading, CGFloat(max(0, heading.level - 1)) * 10)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                }
-            } label: {
-                ChapterRow(chapter: chapter, statistics: statistics)
-            }
-        }
+        ChapterOutlineRow(
+            chapter: chapter,
+            statistics: statistics,
+            isExpanded: expansionBinding(for: chapter),
+            onJump: { jump(to: chapter, heading: $0) }
+        )
     }
 
     private func jump(to chapter: Chapter, heading: OutlineHeading) {
@@ -174,6 +165,48 @@ struct ChapterSidebar: View {
             selection = nil
         }
         viewModel.deleteChapters(toDelete)
+    }
+}
+
+/// Caches parsed headings as view state. Decoding RTF in `ChapterSidebar.body`
+/// made every unrelated sidebar render reparse every chapter in the project.
+private struct ChapterOutlineRow: View {
+    @ObservedObject var chapter: Chapter
+    @ObservedObject var statistics: StatisticsViewModel
+    @Binding var isExpanded: Bool
+    let onJump: (OutlineHeading) -> Void
+
+    @State private var headings: [OutlineHeading] = []
+
+    var body: some View {
+        Group {
+            if headings.isEmpty {
+                ChapterRow(chapter: chapter, statistics: statistics)
+            } else {
+                DisclosureGroup(isExpanded: $isExpanded) {
+                    ForEach(headings) { heading in
+                        Button { onJump(heading) } label: {
+                            Text(heading.text)
+                                .lineLimit(1)
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                                .padding(.leading, CGFloat(max(0, heading.level - 1)) * 10)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                } label: {
+                    ChapterRow(chapter: chapter, statistics: statistics)
+                }
+            }
+        }
+        .onAppear(perform: refreshHeadings)
+        .onChange(of: chapter.bodyData) { _, _ in refreshHeadings() }
+    }
+
+    private func refreshHeadings() {
+        headings = ChapterOutline.headings(in: chapter.bodyData)
     }
 }
 

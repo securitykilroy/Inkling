@@ -19,6 +19,50 @@ enum RichTextEditorPresentation {
     case paged
 }
 
+/// The continuous editor owns a local undo stack, just as the per-page editor
+/// does. NSTextView typing actions retain character ranges; allowing those
+/// actions to survive a chapter/notes reload can make Undo address the newly
+/// loaded storage with a stale, out-of-bounds range.
+final class ContinuousTextView: NSTextView {
+    private let localUndoManager = UndoManager()
+
+    override var undoManager: UndoManager? { localUndoManager }
+
+    static func makeScrollView() -> NSScrollView {
+        let storage = NSTextStorage()
+        let layoutManager = NSLayoutManager()
+        let container = NSTextContainer(size: NSSize(
+            width: 0,
+            height: CGFloat.greatestFiniteMagnitude
+        ))
+        container.widthTracksTextView = true
+        layoutManager.addTextContainer(container)
+        storage.addLayoutManager(layoutManager)
+
+        let textView = ContinuousTextView(frame: .zero, textContainer: container)
+        textView.minSize = NSSize.zero
+        textView.maxSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+
+        let scrollView = NSScrollView()
+        scrollView.borderType = .noBorder
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.documentView = textView
+        return scrollView
+    }
+
+    func replaceDocument(with attributed: NSAttributedString) {
+        localUndoManager.removeAllActions()
+        textStorage?.setAttributedString(attributed)
+    }
+}
+
 struct RichTextEditor: NSViewRepresentable {
     @Binding var data: Data?
     let documentID: NSManagedObjectID
@@ -49,7 +93,7 @@ struct RichTextEditor: NSViewRepresentable {
         let scrollView: NSScrollView
         switch presentation {
         case .continuous:
-            scrollView = NSTextView.scrollableTextView()
+            scrollView = ContinuousTextView.makeScrollView()
         case .paged:
             scrollView = PagedTextView.makePagedScrollView()
         }
@@ -101,6 +145,7 @@ struct RichTextEditor: NSViewRepresentable {
             .font: bodyFont,
             .paragraphStyle: RichTextCodec.defaultParagraphStyle,
         ]
+        stack.sidebarFontFamilyName = fontFamilyName
         // Applied to every page, including ones repagination adds later — a page
         // that appears mid-typing needs spell checking like any other.
         // Note this must never set `page.font`: NSTextView's font setter applies
@@ -125,6 +170,7 @@ struct RichTextEditor: NSViewRepresentable {
             context.coordinator.parent = self
             stack.isTypewriterScrollingEnabled = isTypewriterScrollingEnabled
             context.coordinator.loadStackIfChanged(data, documentID: documentID, into: stack)
+            context.coordinator.applyFontIfChanged(to: stack)
             return
         }
         guard let textView = scrollView.documentView as? NSTextView else { return }
@@ -134,6 +180,7 @@ struct RichTextEditor: NSViewRepresentable {
         controller?.textView = textView
         (textView as? PagedTextView)?.isTypewriterScrollingEnabled = isTypewriterScrollingEnabled
         context.coordinator.loadIfChanged(data, documentID: documentID, into: textView)
+        context.coordinator.applyFontIfChanged(to: textView)
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
@@ -145,6 +192,7 @@ struct RichTextEditor: NSViewRepresentable {
         /// something else touched this chapter's bodyData" (e.g. a
         /// project-wide Replace All), which does need a reload.
         private var loadedData: Data?
+        private var loadedFontFamilyName: String?
         private var isLoading = false
 
         init(_ parent: RichTextEditor) { self.parent = parent }
@@ -154,10 +202,11 @@ struct RichTextEditor: NSViewRepresentable {
             defer { isLoading = false }
 
             (textView as? PagedTextView)?.clearImageSelection()
-            if let attributed = RichTextCodec.decode(data) {
-                textView.textStorage?.setAttributedString(attributed)
+            let attributed = RichTextCodec.decode(data) ?? NSAttributedString()
+            if let continuous = textView as? ContinuousTextView {
+                continuous.replaceDocument(with: attributed)
             } else {
-                textView.string = ""
+                textView.textStorage?.setAttributedString(attributed)
             }
             (textView as? PagedTextView)?.prepareFloatingImages()
             (textView as? PagedTextView)?.prepareSidebars()
@@ -168,12 +217,22 @@ struct RichTextEditor: NSViewRepresentable {
             (textView as? PagedTextView)?.updatePageLayout()
             loadedID = documentID
             loadedData = data
+            loadedFontFamilyName = parent.fontFamilyName
             parent.controller?.selectionDidChange()
         }
 
         func loadIfChanged(_ data: Data?, documentID: NSManagedObjectID, into textView: NSTextView) {
             guard loadedID != documentID || data != loadedData else { return }
             load(data, documentID: documentID, into: textView)
+        }
+
+        func applyFontIfChanged(to textView: NSTextView) {
+            guard loadedFontFamilyName != parent.fontFamilyName else { return }
+            var attributes = textView.typingAttributes
+            let current = attributes[.font] as? NSFont ?? TextStyle.body.font
+            attributes[.font] = current.withFamily(parent.fontFamilyName)
+            textView.typingAttributes = attributes
+            loadedFontFamilyName = parent.fontFamilyName
         }
 
         // MARK: - Experimental per-page editor
@@ -188,6 +247,7 @@ struct RichTextEditor: NSViewRepresentable {
             stack.prepareSidebars()
             loadedID = documentID
             loadedData = data
+            loadedFontFamilyName = parent.fontFamilyName
             parent.controller?.selectionDidChange()
         }
 
@@ -198,6 +258,16 @@ struct RichTextEditor: NSViewRepresentable {
         ) {
             guard loadedID != documentID || data != loadedData else { return }
             loadStack(data, documentID: documentID, into: stack)
+        }
+
+        func applyFontIfChanged(to stack: PageStackView) {
+            guard loadedFontFamilyName != parent.fontFamilyName else { return }
+            stack.pageTypingAttributes = [
+                .font: TextStyle.body.font(familyName: parent.fontFamilyName),
+                .paragraphStyle: RichTextCodec.defaultParagraphStyle,
+            ]
+            stack.sidebarFontFamilyName = parent.fontFamilyName
+            loadedFontFamilyName = parent.fontFamilyName
         }
 
         func textDidChange(_ notification: Notification) {

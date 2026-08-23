@@ -34,7 +34,7 @@ final class SidebarTextView: NSTextView {
         }
     }
 
-    static func make(width: CGFloat) -> SidebarTextView {
+    static func make(width: CGFloat, fontFamilyName: String? = nil) -> SidebarTextView {
         let storage = NSTextStorage()
         let layoutManager = NSLayoutManager()
         let container = NSTextContainer(size: NSSize(
@@ -61,13 +61,23 @@ final class SidebarTextView: NSTextView {
         view.isAutomaticSpellingCorrectionEnabled = false
         view.textColor = .black
         view.insertionPointColor = .black
-        view.font = NSFont.systemFont(ofSize: 12)
+        let font = NSFont.systemFont(ofSize: 12).withFamily(fontFamilyName)
+        view.font = font
         view.typingAttributes = [
-            .font: NSFont.systemFont(ofSize: 12),
+            .font: font,
             .foregroundColor: NSColor.black,
             .paragraphStyle: RichTextCodec.defaultParagraphStyle,
         ]
         return view
+    }
+
+    /// Updates only future typing. Existing sidebar text is restyled in its
+    /// encoded attachment by `ProjectFontStyler` and reloaded separately.
+    func setTypingFontFamily(_ familyName: String?) {
+        let current = typingAttributes[.font] as? NSFont ?? NSFont.systemFont(ofSize: 12)
+        var attributes = typingAttributes
+        attributes[.font] = current.withFamily(familyName)
+        typingAttributes = attributes
     }
 
     /// Text is inset below the header band and within the side padding.

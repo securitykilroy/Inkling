@@ -32,6 +32,19 @@ struct SearchMatch: Identifiable, Equatable {
     let snippetAfter: String
 }
 
+/// A preview is safe to replace only while its search inputs still match the
+/// controls. Keeping those inputs beside the matches prevents Replace All from
+/// silently applying an edited query that the user has never previewed.
+struct ProjectSearchResult {
+    let query: String
+    let caseSensitive: Bool
+    let matches: [SearchMatch]
+
+    func isCurrent(query: String, caseSensitive: Bool) -> Bool {
+        self.query == query && self.caseSensitive == caseSensitive
+    }
+}
+
 enum ProjectSearch {
     /// Characters of context shown on each side of a match in its snippet.
     static let snippetContextLength = 40

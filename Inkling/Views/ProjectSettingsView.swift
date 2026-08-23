@@ -14,6 +14,7 @@ import CoreData
 
 struct ProjectSettingsView: View {
     @ObservedObject var project: Project
+    @ObservedObject var statistics: StatisticsViewModel
     let documentName: String
 
     @Environment(\.dismiss) private var dismiss
@@ -87,10 +88,17 @@ struct ProjectSettingsView: View {
             chapter.bodyData = updated.bodyData
             chapter.notesData = updated.notesData
         }
+        statistics.primeMissing(for: Array(chapters))
 
         for entry in shelfEntries {
             guard let attributed = RichTextCodec.decode(entry.bodyData) else { continue }
             entry.bodyData = RichTextCodec.encode(ProjectFontStyler.restyled(attributed, familyName: familyName))
+        }
+
+        if let notes = RichTextCodec.decode(project.projectNotesData) {
+            project.projectNotesData = RichTextCodec.encode(
+                ProjectFontStyler.restyled(notes, familyName: familyName)
+            )
         }
     }
 

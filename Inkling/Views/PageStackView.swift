@@ -376,6 +376,12 @@ final class PageStackView: NSView, NSTextStorageDelegate {
         didSet { pageViews.forEach { $0.typingAttributes = pageTypingAttributes } }
     }
 
+    /// Typeface used when a new or empty floating sidebar begins accepting
+    /// text. Existing content arrives already restyled in the attachment data.
+    var sidebarFontFamilyName: String? {
+        didSet { sidebarViews.values.forEach { $0.setTypingFontFamily(sidebarFontFamilyName) } }
+    }
+
     /// Guards against `rebuildPages` re-entering itself by way of the layout it
     /// triggers.
     private var isRebuilding = false
@@ -408,6 +414,11 @@ final class PageStackView: NSView, NSTextStorageDelegate {
 
     /// Replaces the whole document and repaginates.
     func setAttributedString(_ text: NSAttributedString) {
+        // NSTextView typing undo actions store character ranges into this shared
+        // storage. Once the storage is replaced (chapter switch, Replace All,
+        // project font change), those ranges belong to the old document and can
+        // crash or corrupt the new one if Undo invokes them.
+        sharedUndoManager.removeAllActions()
         storage.setAttributedString(text)
         rebuildPages()
     }
@@ -1761,7 +1772,10 @@ extension PageStackView {
     }
 
     private func makeSidebarView(for sidebar: SidebarAttachment) -> SidebarTextView {
-        let view = SidebarTextView.make(width: sidebar.width)
+        let view = SidebarTextView.make(
+            width: sidebar.width,
+            fontFamilyName: sidebarFontFamilyName
+        )
         view.load(sidebar.contentData)
         view.onEdited = { [weak self, weak sidebar, weak view] in
             guard let self, let sidebar, let view else { return }

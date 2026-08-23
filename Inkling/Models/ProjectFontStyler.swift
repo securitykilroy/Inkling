@@ -29,6 +29,29 @@ enum ProjectFontStyler {
             guard let font = value as? NSFont else { return }
             mutable.addAttribute(.font, value: font.withFamily(familyName), range: range)
         }
+
+        // A floating sidebar's text lives inside its attachment rather than in
+        // the chapter's main attributed-string runs, so it needs the same
+        // recursive rewrite explicitly.
+        var sidebarReplacements: [(range: NSRange, attachment: SidebarAttachment)] = []
+        attributed.enumerateAttribute(.attachment, in: full) { value, range, _ in
+            guard let sidebar = value as? SidebarAttachment else { return }
+            let content = sidebar.contentData
+                .flatMap(RichTextCodec.decode)
+                .flatMap { RichTextCodec.encode(restyled($0, familyName: familyName)) }
+            sidebarReplacements.append((
+                range,
+                SidebarAttachment(
+                    contentData: content ?? sidebar.contentData,
+                    width: sidebar.width,
+                    position: sidebar.position,
+                    contentHeight: sidebar.contentHeight
+                )
+            ))
+        }
+        for replacement in sidebarReplacements {
+            mutable.addAttribute(.attachment, value: replacement.attachment, range: replacement.range)
+        }
         return mutable
     }
 

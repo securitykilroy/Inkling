@@ -18,6 +18,7 @@ import CoreData
 
 struct ProjectFindReplaceView: View {
     @ObservedObject var navigator: OutlineNavigator
+    @ObservedObject var statistics: StatisticsViewModel
     @Binding var selection: Chapter?
 
     @Environment(\.dismiss) private var dismiss
@@ -27,10 +28,15 @@ struct ProjectFindReplaceView: View {
     @State private var query = ""
     @State private var replacement = ""
     @State private var caseSensitive = true
-    @State private var matches: [SearchMatch] = []
-    @State private var hasSearched = false
+    @State private var searchResult: ProjectSearchResult?
 
     var body: some View {
+        let currentResult = searchResult.flatMap {
+            $0.isCurrent(query: query, caseSensitive: caseSensitive) ? $0 : nil
+        }
+        let matches = currentResult?.matches ?? []
+        let hasSearched = currentResult != nil
+
         VStack(alignment: .leading, spacing: 12) {
             Text("Find & Replace in Project")
                 .font(.title3.weight(.semibold))
@@ -88,20 +94,29 @@ struct ProjectFindReplaceView: View {
     }
 
     private func find() {
-        matches = ProjectSearch.findMatches(
-            in: searchableChapters(), query: query, caseSensitive: caseSensitive
+        searchResult = ProjectSearchResult(
+            query: query,
+            caseSensitive: caseSensitive,
+            matches: ProjectSearch.findMatches(
+                in: searchableChapters(), query: query, caseSensitive: caseSensitive
+            )
         )
-        hasSearched = true
     }
 
     private func replaceAll() {
+        guard searchResult?.isCurrent(query: query, caseSensitive: caseSensitive) == true else {
+            return
+        }
         let results = ProjectSearch.replaceAll(
             in: searchableChapters(), query: query, replacement: replacement, caseSensitive: caseSensitive
         )
+        var affected: [Chapter] = []
         for chapter in chapters {
             guard let id = chapter.id, let newData = results[id] else { continue }
             chapter.bodyData = newData
+            affected.append(chapter)
         }
+        statistics.primeMissing(for: affected)
         // Re-run so the list reflects the change (matches should now be gone,
         // confirming the replacement worked, unless the replacement text
         // itself still contains the search text).

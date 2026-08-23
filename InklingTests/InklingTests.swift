@@ -6,6 +6,7 @@
 //
 
 import AppKit
+import CoreData
 import ObjectiveC.runtime
 import PDFKit
 import Testing
@@ -2787,6 +2788,42 @@ struct InklingTests {
         #expect(documentXML.contains("<wp:wrapSquare"))
     }
 
+    @Test @MainActor func wordExporterMovesAnImagesAnchorToItsSavedPage() throws {
+        let imageData = testPNGData()
+        let source = NSTextAttachment(data: imageData, ofType: "public.png")
+        source.image = NSImage(data: imageData)
+        source.bounds = NSRect(x: 0, y: 0, width: 120, height: 80)
+        let image = FloatingImageAttachment(
+            copying: source,
+            displaySize: NSSize(width: 120, height: 80)
+        )
+        image.position = FloatingImagePosition(page: 1, origin: CGPoint(x: 90, y: 110))
+
+        let body = NSMutableAttributedString(attachment: image)
+        let paragraph = NSAttributedString(
+            string: "A paragraph long enough to wrap across several lines in the editor.\n",
+            attributes: [
+                .font: TextStyle.body.font,
+                .paragraphStyle: RichTextCodec.defaultParagraphStyle,
+            ]
+        )
+        for _ in 0..<180 { body.append(paragraph) }
+        let data = try #require(RichTextCodec.encode(body))
+
+        let docx = try WordDocumentExporter.docxData(
+            for: PrintableChapter(title: "Chapter", bodyData: data)
+        )
+        let url = try writeTempFile(docx)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let imported = try WordDocumentImporter.importChapterBody(from: url, maximumImageWidth: 468)
+        let stack = PageStackView()
+        stack.setAttributedString(imported)
+        let attachmentRange = (imported.string as NSString).range(of: "\u{fffc}")
+        let page = try #require(stack.pageView(forCharacterIndex: attachmentRange.location)?.pageIndex)
+
+        #expect(page == 1)
+    }
+
     private func writeTempFile(_ data: Data) throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
@@ -2799,6 +2836,14 @@ struct InklingTests {
 
     private func searchableChapter(id: UUID = UUID(), title: String, text: String) -> SearchableChapter {
         SearchableChapter(id: id, title: title, bodyData: RichTextCodec.encode(NSAttributedString(string: text)))
+    }
+
+    @Test func projectSearchResultIsInvalidAfterTheQueryOrCaseOptionChanges() {
+        let result = ProjectSearchResult(query: "Ink", caseSensitive: true, matches: [])
+
+        #expect(result.isCurrent(query: "Ink", caseSensitive: true))
+        #expect(!result.isCurrent(query: "ink", caseSensitive: true))
+        #expect(!result.isCurrent(query: "Ink", caseSensitive: false))
     }
 
     @Test func projectSearchFindsMatchesAcrossMultipleChapters() {
@@ -2876,6 +2921,39 @@ struct InklingTests {
         #expect(decodedOne.string == "The dog sat on the dog mat.")
         let decodedThree = try #require(RichTextCodec.decode(results[idThree]))
         #expect(decodedThree.string == "One dog here.")
+    }
+
+    @Test @MainActor func statisticsRefreshWhenAnExistingChaptersBodyChanges() throws {
+        let model = NSManagedObjectModel()
+        let entity = NSEntityDescription()
+        entity.name = "Chapter"
+        entity.managedObjectClassName = NSStringFromClass(Chapter.self)
+        let idAttribute = NSAttributeDescription()
+        idAttribute.name = "id"
+        idAttribute.attributeType = .UUIDAttributeType
+        idAttribute.isOptional = true
+        let bodyAttribute = NSAttributeDescription()
+        bodyAttribute.name = "bodyData"
+        bodyAttribute.attributeType = .binaryDataAttributeType
+        bodyAttribute.isOptional = true
+        entity.properties = [idAttribute, bodyAttribute]
+        model.entities = [entity]
+
+        let coordinator = NSPersistentStoreCoordinator(managedObjectModel: model)
+        try coordinator.addPersistentStore(ofType: NSInMemoryStoreType, configurationName: nil, at: nil)
+        let context = NSManagedObjectContext(concurrencyType: .mainQueueConcurrencyType)
+        context.persistentStoreCoordinator = coordinator
+        let chapter = Chapter(context: context)
+        chapter.id = UUID()
+        chapter.bodyData = RichTextCodec.encode(NSAttributedString(string: "one"))
+        let statistics = StatisticsViewModel(context: context)
+        statistics.primeMissing(for: [chapter])
+        #expect(statistics.wordCount(for: chapter) == 1)
+
+        chapter.bodyData = RichTextCodec.encode(NSAttributedString(string: "one two three"))
+        statistics.primeMissing(for: [chapter])
+
+        #expect(statistics.wordCount(for: chapter) == 3)
     }
 
     // @MainActor because this resolves fonts and round-trips RTF, which is
@@ -2971,6 +3049,42 @@ struct InklingTests {
         let chapter = FontStyledChapter(id: UUID(), bodyData: nil, notesData: nil)
         let results = ProjectFontStyler.restyledChapters([chapter], familyName: "Georgia")
         #expect(results.isEmpty)
+    }
+
+    @Test @MainActor func projectFontStylerRestylesFloatingSidebarContent() throws {
+        let sidebarContent = NSAttributedString(
+            string: "Sidebar words",
+            attributes: [.font: TextStyle.body.font]
+        )
+        let sidebar = SidebarAttachment(
+            contentData: RichTextCodec.encode(sidebarContent),
+            width: SidebarStyle.defaultWidth,
+            position: FloatingImagePosition(page: 0, origin: CGPoint(x: 350, y: 120)),
+            contentHeight: SidebarStyle.minContentHeight
+        )
+        let body = NSAttributedString(attachment: sidebar)
+
+        let restyled = ProjectFontStyler.restyled(body, familyName: "Georgia")
+
+        let restyledSidebar = try #require(
+            restyled.attribute(.attachment, at: 0, effectiveRange: nil) as? SidebarAttachment
+        )
+        let decodedContent = try #require(RichTextCodec.decode(restyledSidebar.contentData))
+        let font = try #require(decodedContent.attribute(.font, at: 0, effectiveRange: nil) as? NSFont)
+        #expect(font.familyName == "Georgia")
+    }
+
+    @Test @MainActor func bulletCommandStartsAListInAnEmptyDocument() throws {
+        let stack = PageStackView()
+        let page = stack.pageViews[0]
+        page.typingAttributes = [.font: TextStyle.body.font]
+        page.setSelectedRange(NSRange(location: 0, length: 0))
+        let controller = RichTextController()
+        controller.textView = page
+
+        controller.toggleBulletList()
+
+        #expect(stack.storage.string == "•\t")
     }
 
     // MARK: - ShelfDropParser

@@ -22,6 +22,12 @@ final class StatisticsViewModel: ObservableObject {
     /// Primed once on open by laying each chapter out off-screen, then kept
     /// live for the chapter being edited via `updatePageCount`.
     @Published private(set) var pageCounts: [UUID: Int] = [:]
+    private struct BodySnapshot: Equatable {
+        let data: Data?
+    }
+    /// The body each cached count was derived from. This lets an explicit
+    /// refresh update existing chapters without re-laying unchanged ones out.
+    private var bodySnapshots: [UUID: BodySnapshot] = [:]
 
     init(context: NSManagedObjectContext) {
         self.context = context
@@ -32,14 +38,17 @@ final class StatisticsViewModel: ObservableObject {
         guard let chapters = try? context.fetch(Chapter.fetchRequest()) else { return }
         var words: [UUID: Int] = [:]
         var pages: [UUID: Int] = [:]
+        var snapshots: [UUID: BodySnapshot] = [:]
         for chapter in chapters {
             if let id = chapter.id {
                 words[id] = TextStatistics.wordCount(inRTF: chapter.bodyData)
                 pages[id] = PageStackView.pageCount(forRTF: chapter.bodyData)
+                snapshots[id] = BodySnapshot(data: chapter.bodyData)
             }
         }
         wordCounts = words
         pageCounts = pages
+        bodySnapshots = snapshots
     }
 
     /// Computes counts for chapters that don't have them yet, leaving existing
@@ -55,14 +64,17 @@ final class StatisticsViewModel: ObservableObject {
         var added = false
         for chapter in chapters {
             guard let id = chapter.id else { continue }
-            if words[id] == nil {
+            let snapshot = BodySnapshot(data: chapter.bodyData)
+            let bodyChanged = bodySnapshots[id] != snapshot
+            if words[id] == nil || bodyChanged {
                 words[id] = TextStatistics.wordCount(inRTF: chapter.bodyData)
                 added = true
             }
-            if pages[id] == nil {
+            if pages[id] == nil || bodyChanged {
                 pages[id] = PageStackView.pageCount(forRTF: chapter.bodyData)
                 added = true
             }
+            bodySnapshots[id] = snapshot
         }
         guard added else { return }
         wordCounts = words
@@ -74,6 +86,7 @@ final class StatisticsViewModel: ObservableObject {
     func update(_ chapter: Chapter, plainText: String) {
         guard let id = chapter.id else { return }
         wordCounts[id] = TextStatistics.wordCount(in: plainText)
+        bodySnapshots[id] = BodySnapshot(data: chapter.bodyData)
     }
 
     /// Records the real page count the editor laid out for a chapter, so the
@@ -81,6 +94,7 @@ final class StatisticsViewModel: ObservableObject {
     func updatePageCount(_ chapter: Chapter, pages: Int) {
         guard let id = chapter.id else { return }
         pageCounts[id] = pages
+        bodySnapshots[id] = BodySnapshot(data: chapter.bodyData)
     }
 
     // These are read from view bodies, so they must stay cheap: cache hit or a

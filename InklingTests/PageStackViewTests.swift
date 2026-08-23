@@ -1301,6 +1301,34 @@ struct PageStackViewTests {
         }
     }
 
+    @Test func replacingTheDocumentClearsTypingUndoActionsFromThePreviousContent() {
+        let stack = PageStackView()
+        stack.setAttributedString(NSAttributedString(string: "A"))
+        let page = stack.pageViews[0]
+        page.setSelectedRange(NSRange(location: 1, length: 0))
+        page.insertText(" much longer first chapter", replacementRange: page.selectedRange())
+        #expect(stack.sharedUndoManager.canUndo)
+
+        stack.setAttributedString(NSAttributedString(string: "B"))
+
+        // Retaining NSTextView's range-based typing action here makes the next
+        // Undo target the replacement storage and can raise NSRangeException.
+        #expect(!stack.sharedUndoManager.canUndo)
+    }
+
+    @Test func continuousEditorClearsTypingUndoActionsWhenReplacingItsDocument() throws {
+        let scrollView = ContinuousTextView.makeScrollView()
+        let textView = try #require(scrollView.documentView as? ContinuousTextView)
+        textView.replaceDocument(with: NSAttributedString(string: "A"))
+        textView.setSelectedRange(NSRange(location: 1, length: 0))
+        textView.insertText(" much longer first note", replacementRange: textView.selectedRange())
+        #expect(textView.undoManager?.canUndo == true)
+
+        textView.replaceDocument(with: NSAttributedString(string: "B"))
+
+        #expect(textView.undoManager?.canUndo == false)
+    }
+
     @Test func everyPageGetsTheEditorConfigurationIncludingNewOnes() {
         let stack = PageStackView()
         stack.configurePage = { $0.isContinuousSpellCheckingEnabled = true }

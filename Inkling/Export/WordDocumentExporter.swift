@@ -14,6 +14,9 @@ private extension NSAttributedString.Key {
     /// Export-only tag marking paragraphs that came from an expanded floating
     /// sidebar, so they get the bordered Word "Sidebar" style + label.
     nonisolated static let inklingWordSidebar = NSAttributedString.Key("inklingWordSidebar")
+    /// Temporary export-only identity used while moving a floating image's Word
+    /// anchor to the page where Inkling displays it.
+    nonisolated static let inklingWordAnchorID = NSAttributedString.Key("inklingWordAnchorID")
 }
 
 enum WordDocumentExporter {
@@ -43,7 +46,7 @@ enum WordDocumentExporter {
         guard let decoded = RichTextCodec.decode(chapter.bodyData) else {
             throw ExportError.unreadableBody
         }
-        let body = expandSidebars(decoded)
+        let body = expandSidebars(relocatingPositionedImageAnchors(decoded))
 
         let state = ExportState()
         let bodyXML = documentBodyXML(from: body, state: state)
@@ -172,6 +175,78 @@ enum WordDocumentExporter {
         for anchor in anchors.sorted(by: { $0.range.location > $1.range.location }) {
             mutable.replaceCharacters(in: anchor.range, with: anchor.replacement)
         }
+        return mutable
+    }
+
+    /// Word positions a floating drawing relative to the page containing its
+    /// text anchor; OOXML has no independent page-number field. Inkling does — a
+    /// user can drag an image to another page without moving its invisible text
+    /// anchor. Move only the export snapshot's anchor well inside the saved
+    /// page so Word has the same page association, leaving the real chapter and
+    /// the image's page-local x/y untouched.
+    private static func relocatingPositionedImageAnchors(
+        _ attributed: NSAttributedString
+    ) -> NSAttributedString {
+        let mutable = NSMutableAttributedString(attributedString: attributed)
+        var anchors: [(id: String, page: Int)] = []
+        mutable.enumerateAttribute(
+            .attachment,
+            in: NSRange(location: 0, length: mutable.length)
+        ) { value, range, _ in
+            guard value is NSTextAttachment,
+                  !(value is SidebarAttachment),
+                  let position = (value as? FloatingImageAttachment)?.position
+                    ?? mutable.attribute(
+                        .inklingFloatingImagePosition,
+                        at: range.location,
+                        effectiveRange: nil
+                    ) as? FloatingImagePosition
+            else { return }
+            let id = UUID().uuidString
+            mutable.addAttribute(.inklingWordAnchorID, value: id, range: range)
+            anchors.append((id, position.page))
+        }
+
+        for anchor in anchors {
+            let stack = PageStackView()
+            stack.setAttributedString(mutable)
+            stack.prepareFloatingImages()
+            stack.prepareSidebars()
+            guard anchor.page >= 0, anchor.page < stack.pageCount else { continue }
+
+            var source = NSRange(location: NSNotFound, length: 0)
+            stack.storage.enumerateAttribute(
+                .inklingWordAnchorID,
+                in: NSRange(location: 0, length: stack.storage.length)
+            ) { value, range, stop in
+                if value as? String == anchor.id {
+                    source = range
+                    stop.pointee = true
+                }
+            }
+            guard source.location != NSNotFound else { continue }
+            let targetPage = stack.characterRange(ofPage: anchor.page)
+            if targetPage.length > 0, NSLocationInRange(source.location, targetPage) { continue }
+
+            // Use a paragraph comfortably inside the page, not its first
+            // character. Word and TextKit can differ by a line at a page
+            // boundary after style conversion; anchoring at that knife edge
+            // can therefore put the drawing back on the preceding Word page.
+            let midpoint = targetPage.location + targetPage.length / 2
+            var destination = (mutable.string as NSString).paragraphRange(
+                for: NSRange(location: min(midpoint, mutable.length), length: 0)
+            ).location
+            let token = mutable.attributedSubstring(from: source)
+            mutable.deleteCharacters(in: source)
+            if source.location < destination { destination -= source.length }
+            destination = min(max(0, destination), mutable.length)
+            mutable.insert(token, at: destination)
+        }
+
+        mutable.removeAttribute(
+            .inklingWordAnchorID,
+            range: NSRange(location: 0, length: mutable.length)
+        )
         return mutable
     }
 

@@ -355,6 +355,12 @@ final class RichTextController: ObservableObject {
         full.enumerateSubstrings(in: selectionParagraphs, options: [.byParagraphs, .substringNotRequired]) { _, subRange, _, _ in
             paragraphStarts.append(subRange.location)
         }
+        // NSString has no paragraph to enumerate for an empty document or the
+        // trailing empty paragraph after a newline. The caret still names a
+        // valid insertion point where a new list can begin.
+        if paragraphStarts.isEmpty, selectionParagraphs.length == 0 {
+            paragraphStarts = [selectionParagraphs.location]
+        }
 
         let allBulleted = !paragraphStarts.isEmpty && paragraphStarts.allSatisfy { location in
             location + markerLength <= full.length
