@@ -1233,6 +1233,35 @@ struct InklingTests {
         #expect(!InklingDocument.autosavesInPlace)
     }
 
+    // MARK: - Closing a document silences its SwiftUI tree
+
+    @Test @MainActor func aFreshDocumentIsNotMarkedAsClosing() {
+        #expect(!InklingDocument().lifecycle.isClosing)
+    }
+
+    /// A window can be laid out again after its document closes — AppKit's
+    /// display cycle, or the nested event loop `_shouldTerminate` runs to ask
+    /// about unsaved changes. By then the persistent store is gone, and any
+    /// view still reading a fetched Chapter faults it out of a dead store and
+    /// throws inside layout. `close()` must raise the flag the root view uses
+    /// to stop rendering, and must raise it *before* the store goes away.
+    @Test @MainActor func closingADocumentFlagsItBeforeTheStoreGoesAway() throws {
+        let document = InklingDocument()
+        let lifecycle = document.lifecycle
+        #expect(!lifecycle.isClosing)
+        // Guard against the assertion below passing vacuously: the document
+        // has a live context to lose in the first place.
+        let context = try #require(document.managedObjectContext)
+        #expect(context.persistentStoreCoordinator != nil)
+
+        document.close()
+
+        #expect(lifecycle.isClosing)
+        // The state the flag exists to protect against: nothing is left to
+        // fault a managed object out of.
+        #expect(context.persistentStoreCoordinator?.persistentStores.isEmpty == true)
+    }
+
     @Test @MainActor func printableChapterUsesBodyWithoutPrependingTitle() throws {
         let body = NSAttributedString(
             string: "A heading\nBody text",

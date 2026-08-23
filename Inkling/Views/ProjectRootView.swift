@@ -25,6 +25,11 @@ struct ProjectRootView: View {
     /// appear, to reopen at the same chapter and caret.
     private let initialPosition: LastEditPosition?
 
+    /// Set the moment the document starts closing. Everything below reads
+    /// Core Data objects that stop being safe to touch at that point, so the
+    /// whole tree is dropped rather than guarded field by field.
+    @EnvironmentObject private var lifecycle: DocumentLifecycle
+
     init(context: NSManagedObjectContext,
          documentName: String = "",
          initialPosition: LastEditPosition? = nil,
@@ -39,6 +44,16 @@ struct ProjectRootView: View {
     }
 
     var body: some View {
+        // A closed document's window can still be laid out once more — see
+        // `DocumentLifecycle`. An empty view has nothing left to fault.
+        if lifecycle.isClosing {
+            Color.clear
+        } else {
+            projectView
+        }
+    }
+
+    private var projectView: some View {
         NavigationSplitView {
             ChapterSidebar(viewModel: viewModel, statistics: statistics, navigator: navigator, selection: $selection, documentName: documentName)
                 .navigationSplitViewColumnWidth(min: 200, ideal: 240)

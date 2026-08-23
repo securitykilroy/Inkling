@@ -78,6 +78,7 @@ final class InklingDocument: NSPersistentDocument {
         )
         .environment(\.managedObjectContext, context)
         .environmentObject(projectCommands)
+        .environmentObject(lifecycle)
 
         let hosting = NSHostingController(rootView: rootView)
         let window = NSWindow(contentViewController: hosting)
@@ -107,6 +108,11 @@ final class InklingDocument: NSPersistentDocument {
     /// Settings, New Chapter). Injected into the root view's environment in
     /// `makeWindowControllers`; the `@objc` actions below poke it.
     let projectCommands = ProjectCommands()
+
+    /// Signals the SwiftUI layer that this document is closing, so it stops
+    /// reading Core Data objects that a late layout pass would fault out of a
+    /// torn-down store. See `DocumentLifecycle`.
+    let lifecycle = DocumentLifecycle()
 
     /// Raises the Project Settings sheet. Wired to the app menu's Settings…
     /// item (⌘,) through the responder chain, like the print/export actions.
@@ -200,6 +206,10 @@ final class InklingDocument: NSPersistentDocument {
     /// outlive the document. `close()` fires when the document closes for any
     /// reason (window close, quit), so tear the notes window down here.
     override func close() {
+        // First, and synchronously: AppKit can lay this window out again after
+        // `super.close()` has taken the persistent store away, and anything
+        // still reading a fetched Chapter at that point throws inside layout.
+        lifecycle.documentIsClosing()
         persistLastEditPosition()
         projectNotesWindow?.close()
         projectNotesWindow = nil

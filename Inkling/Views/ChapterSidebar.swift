@@ -203,6 +203,14 @@ private struct ChapterOutlineRow: View {
         }
         .onAppear(perform: refreshHeadings)
         .onChange(of: chapter.bodyData) { _, _ in refreshHeadings() }
+        // Reordering the sidebar hands an existing row a *different* chapter
+        // rather than building a new one, and neither hook above fires for
+        // that: `onAppear` already happened, and the new chapter's bodyData is
+        // simply a different value, not a change to the one being watched. The
+        // cached headings then belong to whichever chapter the row showed
+        // before — and since a chapter's first heading is usually its own
+        // title, the row sprouts a neighbouring chapter's name beneath its own.
+        .onChange(of: chapter) { _, _ in refreshHeadings() }
     }
 
     private func refreshHeadings() {
