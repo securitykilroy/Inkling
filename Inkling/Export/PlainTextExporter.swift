@@ -17,18 +17,18 @@ enum PlainTextExporter {
     /// Object-replacement character that stands in for an image attachment.
     nonisolated private static let attachmentMarker = "\u{fffc}"
 
-    nonisolated static func plainText(for chapters: [PrintableChapter]) -> String {
-        let blocks = chapters.map { block(for: $0) }
+    nonisolated static func plainText(for chapters: [PrintableChapter]) throws -> String {
+        let blocks = try chapters.map { try block(for: $0) }
         guard !blocks.isEmpty else { return "" }
         return blocks.joined(separator: "\n\n") + "\n"
     }
 
     /// Title line, a blank line, then the body text. The body is included only
     /// when it has visible content so empty chapters don't trail blank lines.
-    nonisolated private static func block(for chapter: PrintableChapter) -> String {
+    nonisolated private static func block(for chapter: PrintableChapter) throws -> String {
         let title = (chapter.title?.isEmpty == false) ? chapter.title! : "Untitled Chapter"
 
-        let body = RichTextCodec.decode(chapter.bodyData).map(bodyText(from:)) ?? ""
+        let body = bodyText(from: try chapter.decodedBody())
         return body.isEmpty ? title : title + "\n\n" + body
     }
 

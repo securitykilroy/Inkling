@@ -9,6 +9,7 @@ import AppKit
 import CoreData
 import ObjectiveC.runtime
 import PDFKit
+import SwiftUI
 import Testing
 @testable import Inkling
 
@@ -1221,6 +1222,13 @@ struct InklingTests {
         #expect(InklingDocumentDrop.fileURL(from: "not a file URL") == nil)
     }
 
+    @Test func documentDropFindsAValidProjectAfterAnUnrelatedFile() {
+        let text = URL(fileURLWithPath: "/tmp/notes.txt")
+        let project = URL(fileURLWithPath: "/tmp/My Project.inkling")
+
+        #expect(InklingDocumentDrop.firstInklingDocumentURL(in: [text, project]) == project)
+    }
+
     @Test func standardDocumentPrintCommandIsImplementedByInklingDocument() throws {
         let selector = #selector(NSDocument.printOperation(withSettings:))
         let inklingMethod = try #require(class_getInstanceMethod(InklingDocument.self, selector))
@@ -1302,6 +1310,61 @@ struct InklingTests {
         #expect(PrintableChapter(title: "Image", bodyData: imageData).hasContent == true)
     }
 
+    @Test @MainActor func unreadableChapterBodyIsNotMistakenForAnEmptyChapter() {
+        let chapter = PrintableChapter(
+            title: "Damaged",
+            bodyData: Data("not rich text".utf8)
+        )
+
+        #expect(chapter.hasContent)
+        #expect(chapter.hasUnreadableBody)
+    }
+
+    @Test @MainActor func editorProtectsUnreadableRichTextFromBeingOverwritten() throws {
+        let document = InklingDocument()
+        let context = try #require(document.managedObjectContext)
+        let chapter = Chapter(context: context)
+        let original = Data("not rich text".utf8)
+        var stored: Data? = original
+        let editor = RichTextEditor(
+            data: Binding(get: { stored }, set: { stored = $0 }),
+            documentID: chapter.objectID
+        )
+        let coordinator = editor.makeCoordinator()
+        let scrollView = ContinuousTextView.makeScrollView()
+        let textView = try #require(scrollView.documentView as? NSTextView)
+
+        coordinator.load(stored, documentID: chapter.objectID, into: textView)
+        #expect(!textView.isEditable)
+
+        textView.textStorage?.setAttributedString(NSAttributedString(string: "replacement"))
+        coordinator.textDidChange(Notification(name: NSText.didChangeNotification, object: textView))
+        #expect(stored == original)
+    }
+
+    @Test @MainActor func pagedEditorAlsoProtectsUnreadableRichText() throws {
+        let document = InklingDocument()
+        let context = try #require(document.managedObjectContext)
+        let chapter = Chapter(context: context)
+        let original = Data("not rich text".utf8)
+        var stored: Data? = original
+        let editor = RichTextEditor(
+            data: Binding(get: { stored }, set: { stored = $0 }),
+            documentID: chapter.objectID,
+            presentation: .paged
+        )
+        let coordinator = editor.makeCoordinator()
+        let stack = PageStackView()
+
+        coordinator.loadStack(stored, documentID: chapter.objectID, into: stack)
+
+        #expect(stack.pageViews.allSatisfy { !$0.isEditable })
+        let page = try #require(stack.pageViews.first)
+        stack.storage.setAttributedString(NSAttributedString(string: "replacement"))
+        coordinator.textDidChange(Notification(name: NSText.didChangeNotification, object: page))
+        #expect(stored == original)
+    }
+
     @Test @MainActor func everyChapterStartsOnItsOwnPage() {
         let pageSize = NSSize(width: 360, height: 500)
         let chapters = [
@@ -1344,8 +1407,8 @@ struct InklingTests {
         )
     }
 
-    @Test func plainTextExportJoinsTitlesAndBodiesAcrossChapters() {
-        let text = PlainTextExporter.plainText(for: [
+    @Test func plainTextExportJoinsTitlesAndBodiesAcrossChapters() throws {
+        let text = try PlainTextExporter.plainText(for: [
             PrintableChapter(title: "Chapter One", bodyData: rtf("The beginning of it all.")),
             PrintableChapter(title: "Chapter Two", bodyData: rtf("And then it continued."))
         ])
@@ -1362,24 +1425,35 @@ struct InklingTests {
         """)
     }
 
-    @Test func plainTextExportNamesUntitledChaptersAndDropsImageGlyphs() {
-        let text = PlainTextExporter.plainText(for: [
+    @Test func plainTextExportNamesUntitledChaptersAndDropsImageGlyphs() throws {
+        let text = try PlainTextExporter.plainText(for: [
             PrintableChapter(title: "", bodyData: rtf("Look here: \u{fffc} a picture."))
         ])
 
         #expect(text == "Untitled Chapter\n\nLook here:  a picture.\n")
     }
 
-    @Test func plainTextExportEmitsTitleOnlyForEmptyBody() {
-        let text = PlainTextExporter.plainText(for: [
+    @Test func plainTextExportEmitsTitleOnlyForEmptyBody() throws {
+        let text = try PlainTextExporter.plainText(for: [
             PrintableChapter(title: "Prologue", bodyData: nil)
         ])
 
         #expect(text == "Prologue\n")
     }
 
-    @Test func plainTextExportOfNoChaptersIsEmpty() {
-        #expect(PlainTextExporter.plainText(for: []) == "")
+    @Test func plainTextExportOfNoChaptersIsEmpty() throws {
+        #expect(try PlainTextExporter.plainText(for: []) == "")
+    }
+
+    @Test func plainTextExportRefusesToSilentlyOmitUnreadableStoredText() {
+        let chapter = PrintableChapter(
+            title: "Damaged",
+            bodyData: Data("not rich text".utf8)
+        )
+
+        #expect(throws: PrintableChapter.ContentError.unreadableBody("Damaged")) {
+            try PlainTextExporter.plainText(for: [chapter])
+        }
     }
 
     // MARK: - Callouts
@@ -1462,7 +1536,7 @@ struct InklingTests {
     @Test @MainActor func plainTextExportWrapsCalloutsInLabeledMarkers() throws {
         let (body, _) = calloutBody(kind: .note)
         let data = try #require(RichTextCodec.encode(body))
-        let text = PlainTextExporter.plainText(for: [PrintableChapter(title: "Ch", bodyData: data)])
+        let text = try PlainTextExporter.plainText(for: [PrintableChapter(title: "Ch", bodyData: data)])
 
         #expect(text == """
         Ch
@@ -1616,7 +1690,7 @@ struct InklingTests {
 
     @Test @MainActor func plainTextExportWrapsSidebarContentInMarkers() throws {
         let data = try #require(sidebarBody(text: "An aside."))
-        let text = PlainTextExporter.plainText(for: [PrintableChapter(title: "Ch", bodyData: data)])
+        let text = try PlainTextExporter.plainText(for: [PrintableChapter(title: "Ch", bodyData: data)])
         #expect(text.contains("[SIDEBAR]"))
         #expect(text.contains("An aside."))
         #expect(text.contains("[/SIDEBAR]"))
@@ -2453,6 +2527,29 @@ struct InklingTests {
         }
     }
 
+    @Test func zipReaderRejectsAStoredEntryWhoseChecksumDoesNotMatch() throws {
+        let zip = TestZipBuilder.makeZip(
+            entries: [("greeting.txt", Data("hello world".utf8))],
+            corruptFirstPayload: true
+        )
+        let reader = try MinimalZipReader(data: zip)
+
+        #expect(throws: MinimalZipReader.ZipReaderError.corruptEntry("greeting.txt")) {
+            try reader.contents(of: "greeting.txt")
+        }
+    }
+
+    @Test func zipReaderRejectsAnEntryAdvertisingAnUnboundedExpansion() {
+        let zip = TestZipBuilder.makeZip(
+            entries: [("tiny.txt", Data("x".utf8))],
+            advertisedUncompressedSize: UInt32.max
+        )
+
+        #expect(throws: MinimalZipReader.ZipReaderError.corruptEntry("tiny.txt")) {
+            try MinimalZipReader(data: zip)
+        }
+    }
+
     // MARK: - WordDocumentImporter
 
     private func makeDocx(documentXML: String, media: [String: Data] = [:]) -> Data {
@@ -2539,6 +2636,34 @@ struct InklingTests {
         let traits = font.fontDescriptor.symbolicTraits
         #expect(traits.contains(.bold))
         #expect(traits.contains(.italic))
+    }
+
+    @Test @MainActor func importerPreservesAHeadingsBoldTraitWhenARunAddsItalic() throws {
+        let xml = wrapInDocument("""
+            <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr>
+            <w:r><w:rPr><w:i/></w:rPr><w:t>Bold italic heading.</w:t></w:r></w:p>
+            """)
+        let url = try writeTempFile(makeDocx(documentXML: xml))
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let attributed = try WordDocumentImporter.importChapterBody(from: url, maximumImageWidth: 468)
+        let font = try #require(attributed.attribute(.font, at: 0, effectiveRange: nil) as? NSFont)
+        let traits = font.fontDescriptor.symbolicTraits
+        #expect(traits.contains(.bold))
+        #expect(traits.contains(.italic))
+    }
+
+    @Test @MainActor func importerHonorsAnExplicitlyDisabledBoldRunInAHeading() throws {
+        let xml = wrapInDocument("""
+            <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr>
+            <w:r><w:rPr><w:b w:val="false"/></w:rPr><w:t>Plain heading run.</w:t></w:r></w:p>
+            """)
+        let url = try writeTempFile(makeDocx(documentXML: xml))
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let attributed = try WordDocumentImporter.importChapterBody(from: url, maximumImageWidth: 468)
+        let font = try #require(attributed.attribute(.font, at: 0, effectiveRange: nil) as? NSFont)
+        #expect(!font.fontDescriptor.symbolicTraits.contains(.bold))
     }
 
     @Test @MainActor func importerPrefixesListParagraphsWithABullet() throws {
@@ -2750,6 +2875,38 @@ struct InklingTests {
         #expect(documentXML.contains(#"<w:pStyle w:val="Heading1"/>"#))
         #expect(documentXML.contains(#"<w:pStyle w:val="Heading2"/>"#))
         #expect(documentXML.contains(#"<w:t xml:space="preserve">Body text.</w:t>"#))
+    }
+
+    @Test @MainActor func wordExporterCarriesBodyTypefaceAndPointSizeIntoRuns() throws {
+        let font = try #require(NSFont(name: "Georgia", size: 14))
+        let body = NSAttributedString(string: "Body text.", attributes: [.font: font])
+        let data = try #require(RichTextCodec.encode(body))
+
+        let docx = try WordDocumentExporter.docxData(
+            for: PrintableChapter(title: "Chapter", bodyData: data)
+        )
+        let reader = try MinimalZipReader(data: docx)
+        let documentXML = try #require(
+            String(data: reader.contents(of: "word/document.xml"), encoding: .utf8)
+        )
+
+        #expect(documentXML.contains(#"<w:rFonts w:ascii="Georgia" w:hAnsi="Georgia"/>"#))
+        #expect(documentXML.contains(#"<w:sz w:val="28"/>"#))
+    }
+
+    @Test @MainActor func wordBatchExportDoesNotFilterOutAnUnreadableChapter() throws {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let chapter = PrintableChapter(
+            title: "Damaged",
+            bodyData: Data("not rich text".utf8)
+        )
+
+        #expect(throws: WordDocumentExporter.ExportError.unreadableBody) {
+            try WordDocumentExporter.exportChapters([chapter], to: folder)
+        }
     }
 
     @Test @MainActor func wordExporterEmbedsImagesInTheDocumentPackage() throws {
@@ -2985,6 +3142,46 @@ struct InklingTests {
         #expect(statistics.wordCount(for: chapter) == 3)
     }
 
+    @Test @MainActor func statisticsDefersPaginationSoTheMainActorCanYield() async throws {
+        let model = NSManagedObjectModel()
+        let entity = NSEntityDescription()
+        entity.name = "Chapter"
+        entity.managedObjectClassName = NSStringFromClass(Chapter.self)
+        let idAttribute = NSAttributeDescription()
+        idAttribute.name = "id"
+        idAttribute.attributeType = .UUIDAttributeType
+        idAttribute.isOptional = true
+        let bodyAttribute = NSAttributeDescription()
+        bodyAttribute.name = "bodyData"
+        bodyAttribute.attributeType = .binaryDataAttributeType
+        bodyAttribute.isOptional = true
+        entity.properties = [idAttribute, bodyAttribute]
+        model.entities = [entity]
+
+        let coordinator = NSPersistentStoreCoordinator(managedObjectModel: model)
+        try coordinator.addPersistentStore(ofType: NSInMemoryStoreType, configurationName: nil, at: nil)
+        let context = NSManagedObjectContext(concurrencyType: .mainQueueConcurrencyType)
+        context.persistentStoreCoordinator = coordinator
+        let chapter = Chapter(context: context)
+        chapter.id = UUID()
+        chapter.bodyData = RichTextCodec.encode(NSAttributedString(string: "one two"))
+        var paginationCalls = 0
+        let statistics = StatisticsViewModel(context: context) { _ in
+            paginationCalls += 1
+            return 7
+        }
+
+        statistics.primeMissing(for: [chapter])
+
+        #expect(statistics.wordCount(for: chapter) == 2)
+        #expect(paginationCalls == 0)
+        for _ in 0..<10 where paginationCalls == 0 {
+            await Task.yield()
+        }
+        #expect(paginationCalls == 1)
+        #expect(statistics.pageCount(for: chapter) == 7)
+    }
+
     // @MainActor because this resolves fonts and round-trips RTF, which is
     // AppKit work. Without it the test runs on a background thread and can race
     // main-thread AppKit work in concurrently-running suites, intermittently
@@ -3031,7 +3228,9 @@ struct InklingTests {
     @Test func withFamilyNilRestoresSystemDefault() {
         let georgiaHeading = TextStyle.heading.font(familyName: "Georgia")
         let restored = georgiaHeading.withFamily(nil)
-        #expect(restored == georgiaHeading)
+        #expect(restored.familyName == TextStyle.heading.font.familyName)
+        #expect(restored.pointSize == TextStyle.heading.pointSize)
+        #expect(restored.fontDescriptor.symbolicTraits.contains(.bold))
     }
 
     @Test func projectFontStylerRestyledRewritesEveryFontRunToTheNewFamily() throws {
@@ -3151,16 +3350,27 @@ struct InklingTests {
 }
 
 /// Builds a minimal, uncompressed (STORED-method) ZIP archive in memory for
-/// tests. CRC-32 fields are written as zero: `MinimalZipReader` never
-/// validates them, so a real checksum implementation isn't needed here.
+/// tests. CRC-32 fields are populated so checksum validation exercises the
+/// same package shape produced by Word and Inkling's exporter.
 private enum TestZipBuilder {
-    static func makeZip(entries: [(name: String, data: Data)]) -> Data {
+    static func makeZip(
+        entries: [(name: String, data: Data)],
+        corruptFirstPayload: Bool = false,
+        advertisedUncompressedSize: UInt32? = nil
+    ) -> Data {
         var result = Data()
-        var localOffsets: [(name: String, data: Data, offset: Int)] = []
+        var localOffsets: [(name: String, data: Data, checksum: UInt32, offset: Int)] = []
 
-        for (name, data) in entries {
+        for (index, entry) in entries.enumerated() {
+            let (name, data) = entry
             let offset = result.count
             let nameData = Data(name.utf8)
+            let checksum = crc32(data)
+            var storedData = data
+            if corruptFirstPayload, index == 0, !storedData.isEmpty {
+                storedData[storedData.startIndex] ^= 0xff
+            }
+            let declaredSize = advertisedUncompressedSize ?? UInt32(data.count)
             var header = Data()
             header.append(contentsOf: uint32LE(0x0403_4b50))
             header.append(contentsOf: uint16LE(20))
@@ -3168,21 +3378,22 @@ private enum TestZipBuilder {
             header.append(contentsOf: uint16LE(0))
             header.append(contentsOf: uint16LE(0))
             header.append(contentsOf: uint16LE(0))
-            header.append(contentsOf: uint32LE(0))
+            header.append(contentsOf: uint32LE(checksum))
             header.append(contentsOf: uint32LE(UInt32(data.count)))
-            header.append(contentsOf: uint32LE(UInt32(data.count)))
+            header.append(contentsOf: uint32LE(declaredSize))
             header.append(contentsOf: uint16LE(UInt16(nameData.count)))
             header.append(contentsOf: uint16LE(0))
             header.append(nameData)
 
             result.append(header)
-            result.append(data)
-            localOffsets.append((name, data, offset))
+            result.append(storedData)
+            localOffsets.append((name, data, checksum, offset))
         }
 
         var centralDirectory = Data()
-        for (name, data, offset) in localOffsets {
+        for (name, data, checksum, offset) in localOffsets {
             let nameData = Data(name.utf8)
+            let declaredSize = advertisedUncompressedSize ?? UInt32(data.count)
             var entry = Data()
             entry.append(contentsOf: uint32LE(0x0201_4b50))
             entry.append(contentsOf: uint16LE(20))
@@ -3191,9 +3402,9 @@ private enum TestZipBuilder {
             entry.append(contentsOf: uint16LE(0))
             entry.append(contentsOf: uint16LE(0))
             entry.append(contentsOf: uint16LE(0))
-            entry.append(contentsOf: uint32LE(0))
+            entry.append(contentsOf: uint32LE(checksum))
             entry.append(contentsOf: uint32LE(UInt32(data.count)))
-            entry.append(contentsOf: uint32LE(UInt32(data.count)))
+            entry.append(contentsOf: uint32LE(declaredSize))
             entry.append(contentsOf: uint16LE(UInt16(nameData.count)))
             entry.append(contentsOf: uint16LE(0))
             entry.append(contentsOf: uint16LE(0))
@@ -3220,6 +3431,17 @@ private enum TestZipBuilder {
         result.append(eocd)
 
         return result
+    }
+
+    private static func crc32(_ data: Data) -> UInt32 {
+        var crc: UInt32 = 0xffff_ffff
+        for byte in data {
+            crc ^= UInt32(byte)
+            for _ in 0..<8 {
+                crc = (crc >> 1) ^ ((crc & 1) == 1 ? 0xedb8_8320 : 0)
+            }
+        }
+        return crc ^ 0xffff_ffff
     }
 
     private static func uint16LE(_ value: UInt16) -> [UInt8] {

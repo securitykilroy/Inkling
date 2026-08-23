@@ -194,6 +194,17 @@ struct RichTextEditor: NSViewRepresentable {
         private var loadedData: Data?
         private var loadedFontFamilyName: String?
         private var isLoading = false
+        private var isProtectingUnreadableData = false
+
+        private static var unreadableContentMessage: NSAttributedString {
+            NSAttributedString(
+                string: "Inkling couldn’t read this stored text. The original data is preserved, and editing is disabled.",
+                attributes: [
+                    .font: NSFont.systemFont(ofSize: TextStyle.body.pointSize),
+                    .foregroundColor: NSColor.systemRed,
+                ]
+            )
+        }
 
         init(_ parent: RichTextEditor) { self.parent = parent }
 
@@ -202,12 +213,16 @@ struct RichTextEditor: NSViewRepresentable {
             defer { isLoading = false }
 
             (textView as? PagedTextView)?.clearImageSelection()
-            let attributed = RichTextCodec.decode(data) ?? NSAttributedString()
+            let decoded = data.flatMap(RichTextCodec.decode)
+            isProtectingUnreadableData = data != nil && decoded == nil
+            let attributed = decoded
+                ?? (isProtectingUnreadableData ? Self.unreadableContentMessage : NSAttributedString())
             if let continuous = textView as? ContinuousTextView {
                 continuous.replaceDocument(with: attributed)
             } else {
                 textView.textStorage?.setAttributedString(attributed)
             }
+            textView.isEditable = !isProtectingUnreadableData
             (textView as? PagedTextView)?.prepareFloatingImages()
             (textView as? PagedTextView)?.prepareSidebars()
             textView.typingAttributes = [
@@ -242,7 +257,12 @@ struct RichTextEditor: NSViewRepresentable {
             defer { isLoading = false }
 
             stack.clearImageSelection()
-            stack.setAttributedString(RichTextCodec.decode(data) ?? NSAttributedString())
+            let decoded = data.flatMap(RichTextCodec.decode)
+            isProtectingUnreadableData = data != nil && decoded == nil
+            stack.setAttributedString(
+                decoded ?? (isProtectingUnreadableData ? Self.unreadableContentMessage : NSAttributedString())
+            )
+            stack.isContentEditable = !isProtectingUnreadableData
             stack.prepareFloatingImages()
             stack.prepareSidebars()
             loadedID = documentID
@@ -271,7 +291,9 @@ struct RichTextEditor: NSViewRepresentable {
         }
 
         func textDidChange(_ notification: Notification) {
-            guard !isLoading, let textView = notification.object as? NSTextView else { return }
+            guard !isLoading, !isProtectingUnreadableData,
+                  let textView = notification.object as? NSTextView
+            else { return }
             (textView as? PagedTextView)?.prepareFloatingImages()
             (textView as? PageTextView)?.pageStack?.prepareFloatingImages()
             let attributed = textView.attributedString()

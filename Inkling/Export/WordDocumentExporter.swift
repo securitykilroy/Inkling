@@ -43,7 +43,10 @@ enum WordDocumentExporter {
     }
 
     static func docxData(for chapter: PrintableChapter) throws -> Data {
-        guard let decoded = RichTextCodec.decode(chapter.bodyData) else {
+        let decoded: NSAttributedString
+        do {
+            decoded = try chapter.decodedBody()
+        } catch {
             throw ExportError.unreadableBody
         }
         let body = expandSidebars(relocatingPositionedImageAnchors(decoded))
@@ -298,6 +301,14 @@ enum WordDocumentExporter {
     private static func textRunXML(_ text: String, font: NSFont?) -> String {
         let traits = font?.fontDescriptor.symbolicTraits ?? []
         var properties = ""
+        if let family = font?.familyName, !family.hasPrefix(".") {
+            let escapedFamily = escapeXML(family)
+            properties += #"<w:rFonts w:ascii="\#(escapedFamily)" w:hAnsi="\#(escapedFamily)"/>"#
+        }
+        if let font {
+            let halfPoints = max(1, Int((font.pointSize * 2).rounded()))
+            properties += #"<w:sz w:val="\#(halfPoints)"/><w:szCs w:val="\#(halfPoints)"/>"#
+        }
         if traits.contains(.bold) { properties += "<w:b/>" }
         if traits.contains(.italic) { properties += "<w:i/>" }
         let runProperties = properties.isEmpty ? "" : "<w:rPr>\(properties)</w:rPr>"
@@ -628,24 +639,5 @@ private enum ZipArchiveWriter {
             UInt8((value >> 16) & 0xff),
             UInt8((value >> 24) & 0xff),
         ]
-    }
-}
-
-private enum CRC32 {
-    private static let table: [UInt32] = (0..<256).map { value in
-        var crc = UInt32(value)
-        for _ in 0..<8 {
-            crc = (crc & 1) == 1 ? (0xedb8_8320 ^ (crc >> 1)) : (crc >> 1)
-        }
-        return crc
-    }
-
-    static func checksum(_ data: Data) -> UInt32 {
-        var crc: UInt32 = 0xffff_ffff
-        for byte in data {
-            let index = Int((crc ^ UInt32(byte)) & 0xff)
-            crc = table[index] ^ (crc >> 8)
-        }
-        return crc ^ 0xffff_ffff
     }
 }

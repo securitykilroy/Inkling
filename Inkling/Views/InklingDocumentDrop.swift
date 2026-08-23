@@ -11,11 +11,11 @@ import UniformTypeIdentifiers
 enum InklingDocumentDrop {
     static let acceptedTypes: [UTType] = [.fileURL]
 
-    static func isInklingDocumentURL(_ url: URL) -> Bool {
+    nonisolated static func isInklingDocumentURL(_ url: URL) -> Bool {
         url.isFileURL && url.pathExtension.caseInsensitiveCompare("inkling") == .orderedSame
     }
 
-    static func fileURL(from item: Any?) -> URL? {
+    nonisolated static func fileURL(from item: Any?) -> URL? {
         if let url = item as? URL, url.isFileURL {
             return url
         }
@@ -28,17 +28,27 @@ enum InklingDocumentDrop {
         return nil
     }
 
-    static func openFirstInklingDocument(from providers: [NSItemProvider]) -> Bool {
-        guard let provider = providers.first(where: {
-            $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier)
-        }) else {
-            return false
-        }
+    nonisolated static func firstInklingDocumentURL(in urls: [URL]) -> URL? {
+        urls.first(where: isInklingDocumentURL)
+    }
 
+    static func openFirstInklingDocument(from providers: [NSItemProvider]) -> Bool {
+        let fileProviders = providers.filter {
+            $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier)
+        }
+        guard !fileProviders.isEmpty else { return false }
+
+        loadFirstInklingDocument(from: ArraySlice(fileProviders))
+        return true
+    }
+
+    private static func loadFirstInklingDocument(from providers: ArraySlice<NSItemProvider>) {
+        guard let provider = providers.first else { return }
         provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
-            guard let url = fileURL(from: item),
-                  isInklingDocumentURL(url)
-            else { return }
+            guard let url = fileURL(from: item), isInklingDocumentURL(url) else {
+                loadFirstInklingDocument(from: providers.dropFirst())
+                return
+            }
 
             DispatchQueue.main.async {
                 NSDocumentController.shared.openDocument(withContentsOf: url, display: true) { _, _, error in
@@ -48,6 +58,5 @@ enum InklingDocumentDrop {
                 }
             }
         }
-        return true
     }
 }

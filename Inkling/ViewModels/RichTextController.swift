@@ -55,10 +55,17 @@ extension NSFont {
     /// bold/italic traits. `nil` means "system default". Falls back to `self`
     /// if the family can't resolve a matching font.
     func withFamily(_ familyName: String?) -> NSFont {
-        guard let familyName else { return self }
         var traits: NSFontTraitMask = []
         if fontDescriptor.symbolicTraits.contains(.bold) { traits.insert(.boldFontMask) }
         if fontDescriptor.symbolicTraits.contains(.italic) { traits.insert(.italicFontMask) }
+        guard let familyName else {
+            let system = NSFont.systemFont(ofSize: pointSize)
+            var symbolicTraits: NSFontDescriptor.SymbolicTraits = []
+            if traits.contains(.boldFontMask) { symbolicTraits.insert(.bold) }
+            if traits.contains(.italicFontMask) { symbolicTraits.insert(.italic) }
+            let descriptor = system.fontDescriptor.withSymbolicTraits(symbolicTraits)
+            return NSFont(descriptor: descriptor, size: pointSize) ?? system
+        }
         return NSFontManager.shared.font(withFamily: familyName, traits: traits, weight: 5, size: pointSize) ?? self
     }
 }

@@ -376,6 +376,13 @@ final class PageStackView: NSView, NSTextStorageDelegate {
         didSet { pageViews.forEach { $0.typingAttributes = pageTypingAttributes } }
     }
 
+    /// Unreadable persisted rich text is shown as a diagnostic, but remains
+    /// read-only so an edit can never replace the original bytes with the
+    /// diagnostic or an empty document.
+    var isContentEditable = true {
+        didSet { pageViews.forEach { $0.isEditable = isContentEditable } }
+    }
+
     /// Typeface used when a new or empty floating sidebar begins accepting
     /// text. Existing content arrives already restyled in the attachment data.
     var sidebarFontFamilyName: String? {
@@ -607,6 +614,7 @@ final class PageStackView: NSView, NSTextStorageDelegate {
         let view = PageTextView(pageIndex: index, container: container, layout: pageLayout)
         view.frame = paperFrame(forPage: index)
         view.delegate = pageDelegate
+        view.isEditable = isContentEditable
         if !pageTypingAttributes.isEmpty { view.typingAttributes = pageTypingAttributes }
         // Paper is white in every appearance, so the ink must be explicitly dark.
         view.textColor = .black

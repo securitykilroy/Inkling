@@ -179,12 +179,25 @@ enum WordDocumentImporter {
 
     private static func runFont(for run: XMLElement, baseFont: NSFont) -> NSFont {
         guard let runProperties = child(of: run, localName: "rPr") else { return baseFont }
-        var traits: NSFontDescriptor.SymbolicTraits = []
-        if isRunPropertyOn(runProperties, localName: "b") { traits.insert(.bold) }
-        if isRunPropertyOn(runProperties, localName: "i") { traits.insert(.italic) }
-        guard !traits.isEmpty else { return baseFont }
+        var traits = baseFont.fontDescriptor.symbolicTraits
+        applyRunProperty(runProperties, localName: "b", trait: .bold, to: &traits)
+        applyRunProperty(runProperties, localName: "i", trait: .italic, to: &traits)
         let descriptor = baseFont.fontDescriptor.withSymbolicTraits(traits)
         return NSFont(descriptor: descriptor, size: baseFont.pointSize) ?? baseFont
+    }
+
+    private static func applyRunProperty(
+        _ runProperties: XMLElement,
+        localName: String,
+        trait: NSFontDescriptor.SymbolicTraits,
+        to traits: inout NSFontDescriptor.SymbolicTraits
+    ) {
+        guard child(of: runProperties, localName: localName) != nil else { return }
+        if isRunPropertyOn(runProperties, localName: localName) {
+            traits.insert(trait)
+        } else {
+            traits.remove(trait)
+        }
     }
 
     /// OOXML boolean run properties (`<w:b/>`) default to "on" when present

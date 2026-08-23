@@ -15,10 +15,41 @@ struct PrintableChapter {
     let title: String?
     let bodyData: Data?
 
+    enum ContentError: LocalizedError, Equatable {
+        case unreadableBody(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .unreadableBody(let title):
+                return "The stored text for “\(title)” could not be read. Inkling left the original data unchanged."
+            }
+        }
+    }
+
+    nonisolated var hasUnreadableBody: Bool {
+        bodyData != nil && RichTextCodec.decode(bodyData) == nil
+    }
+
+    nonisolated func decodedBody() throws -> NSAttributedString {
+        guard let bodyData else { return NSAttributedString() }
+        guard let decoded = RichTextCodec.decode(bodyData) else {
+            let name = title?.trimmingCharacters(in: .whitespacesAndNewlines)
+            throw ContentError.unreadableBody(name?.isEmpty == false ? name! : "Untitled Chapter")
+        }
+        return decoded
+    }
+
+    nonisolated static func validateReadable(_ chapters: [PrintableChapter]) throws {
+        for chapter in chapters where chapter.hasUnreadableBody {
+            _ = try chapter.decodedBody()
+        }
+    }
+
     /// Whether the chapter has anything worth printing: visible body text or an
     /// embedded image (whose object-replacement glyph survives whitespace
     /// trimming). Empty chapters are skipped so they don't print blank pages.
-    var hasContent: Bool {
+    nonisolated var hasContent: Bool {
+        if hasUnreadableBody { return true }
         guard let decoded = RichTextCodec.decode(bodyData) else { return false }
         return !decoded.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
@@ -70,7 +101,7 @@ enum ManuscriptPrinter {
     static func attributedString(for chapter: PrintableChapter) -> NSAttributedString {
         let result = NSMutableAttributedString()
 
-        if let body = RichTextCodec.decode(chapter.bodyData) {
+        if let body = try? chapter.decodedBody() {
             result.append(body)
         }
 

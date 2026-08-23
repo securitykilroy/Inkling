@@ -276,10 +276,11 @@ final class InklingDocument: NSPersistentDocument {
     /// Chapters to print for the whole project, in order, with empty chapters
     /// skipped so they don't produce blank pages. Falls back to a single
     /// placeholder page if there is nothing to print at all.
-    private func printableProjectChapters() -> [PrintableChapter] {
+    private func printableProjectChapters() throws -> [PrintableChapter] {
         let chapters = orderedChapters()
             .map { PrintableChapter(title: $0.title, bodyData: $0.bodyData) }
             .filter(\.hasContent)
+        try PrintableChapter.validateReadable(chapters)
         return chapters.isEmpty
             ? [PrintableChapter(title: displayName, bodyData: nil)]
             : chapters
@@ -295,7 +296,7 @@ final class InklingDocument: NSPersistentDocument {
         info.dictionary().addEntries(from: printSettings)
 
         return ManuscriptPrinter.printOperation(
-            chapters: printableProjectChapters(),
+            chapters: try printableProjectChapters(),
             jobTitle: displayName,
             bookTitle: bookTitle(),
             subtitle: subtitle(),
@@ -306,7 +307,15 @@ final class InklingDocument: NSPersistentDocument {
     }
 
     @objc func printProject(_ sender: Any?) {
-        runPrint(chapters: printableProjectChapters(), jobTitle: displayName, includeTitlePage: true)
+        do {
+            try runPrint(
+                chapters: printableProjectChapters(),
+                jobTitle: displayName,
+                includeTitlePage: true
+            )
+        } catch {
+            presentError(error)
+        }
     }
 
     @objc func printChapter(_ sender: Any?) {
@@ -316,8 +325,14 @@ final class InklingDocument: NSPersistentDocument {
             NSSound.beep()
             return
         }
-        runPrint(chapters: [PrintableChapter(title: chapter.title, bodyData: chapter.bodyData)],
-                 jobTitle: chapter.title ?? displayName)
+        do {
+            try runPrint(
+                chapters: [PrintableChapter(title: chapter.title, bodyData: chapter.bodyData)],
+                jobTitle: chapter.title ?? displayName
+            )
+        } catch {
+            presentError(error)
+        }
     }
 
     // MARK: - Plain text export
@@ -326,7 +341,13 @@ final class InklingDocument: NSPersistentDocument {
         let chapters = orderedChapters().map {
             PrintableChapter(title: $0.title, bodyData: $0.bodyData)
         }
-        let text = PlainTextExporter.plainText(for: chapters)
+        let text: String
+        do {
+            text = try PlainTextExporter.plainText(for: chapters)
+        } catch {
+            presentError(error)
+            return
+        }
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             NSSound.beep()
             return
@@ -361,6 +382,12 @@ final class InklingDocument: NSPersistentDocument {
     @objc func exportWordChapters(_ sender: Any?) {
         let chapters = orderedChapters().map {
             PrintableChapter(title: $0.title, bodyData: $0.bodyData)
+        }
+        do {
+            try PrintableChapter.validateReadable(chapters)
+        } catch {
+            presentError(error)
+            return
         }
         guard chapters.contains(where: \.hasContent) else {
             NSSound.beep()
@@ -493,7 +520,12 @@ final class InklingDocument: NSPersistentDocument {
         }
     }
 
-    private func runPrint(chapters: [PrintableChapter], jobTitle: String, includeTitlePage: Bool = false) {
+    private func runPrint(
+        chapters: [PrintableChapter],
+        jobTitle: String,
+        includeTitlePage: Bool = false
+    ) throws {
+        try PrintableChapter.validateReadable(chapters)
         let operation = ManuscriptPrinter.printOperation(
             chapters: chapters,
             jobTitle: jobTitle,

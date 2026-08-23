@@ -15,6 +15,12 @@ import Foundation
 
 struct MinimalZipReader {
 
+    /// A Word package can legitimately contain large images, but no individual
+    /// part should be able to make the importer reserve gigabytes based only on
+    /// an untrusted central-directory field.
+    private static let maximumEntrySize = 256 * 1_024 * 1_024
+    private static let maximumArchiveSize = 512 * 1_024 * 1_024
+
     enum ZipReaderError: Error, Equatable {
         case notAZipArchive
         case entryNotFound(String)
@@ -23,6 +29,7 @@ struct MinimalZipReader {
     }
 
     private struct Entry {
+        let checksum: UInt32
         let compressionMethod: UInt16
         let compressedSize: Int
         let uncompressedSize: Int
@@ -66,14 +73,22 @@ struct MinimalZipReader {
         }
         let compressed = Array(bytes[dataStart..<(dataStart + entry.compressedSize)])
 
+        let result: Data
         switch entry.compressionMethod {
         case 0:
-            return Data(compressed)
+            guard entry.compressedSize == entry.uncompressedSize else {
+                throw ZipReaderError.corruptEntry(name)
+            }
+            result = Data(compressed)
         case 8:
-            return try Self.inflate(compressed, uncompressedSize: entry.uncompressedSize, name: name)
+            result = try Self.inflate(compressed, uncompressedSize: entry.uncompressedSize, name: name)
         default:
             throw ZipReaderError.unsupportedCompressionMethod(entry.compressionMethod)
         }
+        guard CRC32.checksum(result) == entry.checksum else {
+            throw ZipReaderError.corruptEntry(name)
+        }
+        return result
     }
 
     // MARK: - Central directory
@@ -89,10 +104,12 @@ struct MinimalZipReader {
         }
 
         var entries: [String: Entry] = [:]
+        var totalUncompressedSize = 0
         var offset = Int(centralDirectoryOffset)
         for _ in 0..<recordCount {
             guard let signature = readUInt32LE(bytes, at: offset), signature == 0x0201_4b50,
                   let method = readUInt16LE(bytes, at: offset + 10),
+                  let checksum = readUInt32LE(bytes, at: offset + 16),
                   let compressedSize = readUInt32LE(bytes, at: offset + 20),
                   let uncompressedSize = readUInt32LE(bytes, at: offset + 24),
                   let nameLength = readUInt16LE(bytes, at: offset + 28),
@@ -109,7 +126,16 @@ struct MinimalZipReader {
             }
             let name = String(decoding: bytes[nameStart..<(nameStart + Int(nameLength))], as: UTF8.self)
 
+            let expandedSize = Int(uncompressedSize)
+            guard expandedSize <= maximumEntrySize,
+                  totalUncompressedSize <= maximumArchiveSize - expandedSize
+            else {
+                throw ZipReaderError.corruptEntry(name)
+            }
+            totalUncompressedSize += expandedSize
+
             entries[name] = Entry(
+                checksum: checksum,
                 compressionMethod: method,
                 compressedSize: Int(compressedSize),
                 uncompressedSize: Int(uncompressedSize),
