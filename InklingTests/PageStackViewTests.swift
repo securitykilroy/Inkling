@@ -850,6 +850,133 @@ struct PageStackViewTests {
         #expect(selected.view.shouldChangeText(in: spanningRange, replacementString: nil))
     }
 
+    // MARK: - Dropping in an image bigger than the page
+
+    /// Inserts `size` the way a drop or paste does: a plain attachment typed into
+    /// a page view, then the editor's text-change pass converting it to floating.
+    private static func dropImage(
+        _ size: NSSize,
+        into stack: PageStackView,
+        at location: Int
+    ) -> FloatingImageAttachment? {
+        let attachment = NSTextAttachment()
+        attachment.image = image(size)
+        let page = stack.pageViews[0]
+        page.setSelectedRange(NSRange(location: location, length: 0))
+        page.insertText(
+            NSAttributedString(attachment: attachment),
+            replacementRange: NSRange(location: location, length: 0)
+        )
+        stack.prepareFloatingImages()
+        return stack.floatingAttachment(at: location)
+    }
+
+    @Test func aDroppedImageLargerThanThePageIsScaledToFitItsTextArea() throws {
+        // Regression: a 1448×1086 screenshot kept its full size, so it was drawn
+        // 1086pt tall on a page with 648pt of text area, with its resize handles
+        // off the paper and no way to move or shrink it.
+        let stack = Self.makeStack(paragraphs: 200)
+        let layout = stack.pageLayout
+        let floating = try #require(
+            Self.dropImage(NSSize(width: 1448, height: 1086), into: stack, at: 100)
+        )
+
+        let size = floating.displaySize
+        #expect(size.width <= layout.contentWidth + 0.5)
+        #expect(size.height <= layout.contentHeight + 0.5)
+        #expect(abs(size.width / size.height - 1448.0 / 1086.0) < 0.01, "aspect ratio kept")
+        #expect(abs(size.width - layout.contentWidth) < 0.5, "wide image fills the column")
+
+        let placed = stack.pageViews.flatMap(\.floatingImages)
+        let rect = try #require(placed.first { $0.location == 100 }?.rect)
+        #expect(rect.maxY <= layout.contentHeight + 0.5)
+        #expect(abs(rect.width - size.width) < 0.5 && abs(rect.height - size.height) < 0.5)
+    }
+
+    @Test func aDroppedTallImageIsScaledToFitThePageHeight() throws {
+        let stack = Self.makeStack(paragraphs: 200)
+        let layout = stack.pageLayout
+        let floating = try #require(
+            Self.dropImage(NSSize(width: 400, height: 2000), into: stack, at: 100)
+        )
+        #expect(abs(floating.displaySize.height - layout.contentHeight) < 0.5)
+        #expect(abs(floating.displaySize.width - 400 * layout.contentHeight / 2000) < 0.5)
+    }
+
+    @Test func aDroppedImageThatAlreadyFitsKeepsItsSize() throws {
+        let stack = Self.makeStack(paragraphs: 200)
+        let floating = try #require(
+            Self.dropImage(NSSize(width: 200, height: 150), into: stack, at: 100)
+        )
+        #expect(floating.displaySize == NSSize(width: 200, height: 150))
+    }
+
+    private final class DelegateSpy: NSObject, NSTextViewDelegate {
+        var changes = 0
+        func textDidChange(_ notification: Notification) { changes += 1 }
+    }
+
+    @Test func pagesKeepTheirDelegateAndSettingsAfterTrailingPagesAreRemoved() throws {
+        // Regression: removing a text container from the shared layout manager
+        // resets the text views' shared state, delegate included. A paste or
+        // drop right after a chapter shrank by a page then never reached the
+        // editor's textDidChange, so the image was neither floated nor saved.
+        let stack = PageStackView()
+        let spy = DelegateSpy()
+        stack.configurePage = PageStackView.standardPageConfiguration()
+        stack.pageDelegate = spy
+        stack.setAttributedString(Self.filler(paragraphs: 200))
+        #expect(stack.pageCount > 2)
+
+        stack.setAttributedString(Self.filler(paragraphs: 5))
+        #expect(stack.pageCount == 1)
+
+        let page = try #require(stack.pageViews.first)
+        #expect(page.delegate === spy)
+        #expect(page.isEditable)
+        #expect(page.importsGraphics)
+        #expect(page.allowsUndo)
+
+        page.setSelectedRange(NSRange(location: 0, length: 0))
+        page.insertText("x", replacementRange: NSRange(location: 0, length: 0))
+        #expect(spy.changes == 1)
+    }
+
+    @Test func eachEditNotifiesTheDelegateExactlyOnceAsPagesComeAndGo() throws {
+        let stack = PageStackView()
+        let spy = DelegateSpy()
+        stack.pageDelegate = spy
+        var expected = 0
+        for paragraphs in [200, 5, 200, 5, 60] {
+            stack.setAttributedString(Self.filler(paragraphs: paragraphs))
+            for page in [stack.pageViews.first, stack.pageViews.last] {
+                let view = try #require(page)
+                let end = stack.characterRange(ofPage: view.pageIndex).location
+                view.insertText("x", replacementRange: NSRange(location: end, length: 0))
+                expected += 1
+                #expect(spy.changes == expected, "\(paragraphs) paragraphs, page \(view.pageIndex)")
+                expected = spy.changes
+            }
+        }
+    }
+
+    @Test func undoRemovesAJustDroppedImage() throws {
+        // Regression: the guard that stops typing from eating an image anchor
+        // also refused Undo's own edit, so Undo after a drop did nothing.
+        let stack = Self.makeStack(paragraphs: 200)
+        let originalLength = stack.storage.length
+        _ = try #require(Self.dropImage(NSSize(width: 200, height: 150), into: stack, at: 100))
+        #expect(stack.storage.length == originalLength + 1)
+
+        let undo = stack.sharedUndoManager
+        if undo.groupingLevel > 0 { undo.endUndoGrouping() }
+        #expect(undo.canUndo)
+        undo.undo()
+
+        #expect(stack.storage.length == originalLength)
+        #expect(stack.floatingAttachment(at: 100) == nil)
+    }
+
     @Test func handlesSitOnTheImageCorners() throws {
         let stack = Self.stackWithImage(paragraphs: 200, at: 40)
         let selected = try #require(Self.selectImage(in: stack, onPage: 0))

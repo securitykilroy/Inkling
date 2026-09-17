@@ -17,6 +17,16 @@ enum RichTextImageInserter {
         return NSSize(width: maximumWidth, height: size.height * scale)
     }
 
+    /// `size` scaled down, keeping its proportions, until it fits inside
+    /// `maximumSize` on both axes. Never scales up.
+    static func fittedSize(_ size: NSSize, within maximumSize: NSSize) -> NSSize {
+        guard size.width > 0, size.height > 0,
+              maximumSize.width > 0, maximumSize.height > 0
+        else { return .zero }
+        let scale = min(1, maximumSize.width / size.width, maximumSize.height / size.height)
+        return NSSize(width: size.width * scale, height: size.height * scale)
+    }
+
     @MainActor
     @discardableResult
     static func fitOversizedAttachments(

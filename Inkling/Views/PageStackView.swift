@@ -186,7 +186,10 @@ final class PageTextView: NSTextView {
         // A nil replacement is an attributes-only change (e.g. bold), which
         // leaves the anchor intact, so formatting a range that spans an image
         // stays allowed.
-        if replacementString != nil,
+        // Undo and redo replay the user's own earlier edits, so they are never
+        // an accidental deletion: undoing a dropped image has to remove it.
+        let isReplaying = undoManager?.isUndoing == true || undoManager?.isRedoing == true
+        if replacementString != nil, !isReplaying,
            stack?.containsProtectedFloatingImage(in: affectedCharRange) == true {
             return false
         }
@@ -631,12 +634,22 @@ final class PageStackView: NSView, NSTextStorageDelegate {
     }
 
     private func removeLastPage() {
-        guard let view = pageViews.popLast() else { return }
+        guard let view = pageViews.last else { return }
+        // Text views sharing a layout manager share one delegate. Removing a
+        // container drops it for the views that remain — while leaving its
+        // notification registration behind — so edits made before a page was
+        // next appended (notably a paste or drop straight after a chapter got
+        // shorter) never reached the editor, and an image was neither floated
+        // nor saved. Detach cleanly first, then reattach to the survivors.
+        let delegate = pageDelegate
+        for page in pageViews { page.delegate = nil }
+        pageViews.removeLast()
         view.removeFromSuperview()
         let containerIndex = sharedLayoutManager.textContainers.count - 1
         if containerIndex >= 0 {
             sharedLayoutManager.removeTextContainer(at: containerIndex)
         }
+        for page in pageViews { page.delegate = delegate }
     }
 
     private func resizeToFitPages() {
@@ -900,7 +913,15 @@ extension PageStackView {
                   !(attachment is SidebarAttachment)
             else { return }
 
-            let size = Self.displaySize(of: attachment)
+            // A floating image draws inside one page's text area, so anything
+            // bigger — a dropped or pasted screenshot arrives at its full pixel
+            // size — is scaled down to fit it. Left full size, it overran the
+            // page with its resize handles off the paper, so it could be neither
+            // shrunk nor moved.
+            let size = RichTextImageInserter.fittedSize(
+                Self.displaySize(of: attachment),
+                within: NSSize(width: pageLayout.contentWidth, height: pageLayout.contentHeight)
+            )
             guard size.width > 0, size.height > 0 else { return }
             let floating = FloatingImageAttachment(copying: attachment, displaySize: size)
             floating.position = storage.attribute(
