@@ -610,14 +610,29 @@ final class ManuscriptPrintView: NSView {
         var laidOutPages: [PageLayout] = []
         var laidOutGlyphs = 0
         var pageIndex = 0
-        while true {
+        while pageIndex < Self.maximumPages {
             let container = NSTextContainer(size: pageSize)
             container.lineFragmentPadding = 0
             container.exclusionPaths = exclusions[pageIndex] ?? []
             layoutManager.addTextContainer(container)
             layoutManager.ensureLayout(for: container)
 
-            let range = layoutManager.glyphRange(for: container)
+            var range = layoutManager.glyphRange(for: container)
+
+            // A page that swallows no glyphs at all stops the loop below, and
+            // everything after it would simply never be printed. The usual cause
+            // is this page's own exclusions leaving no room to set a line — an
+            // image as tall as the text column, say. Dropping them and trying
+            // again prints the text over the image, which is wrong-looking but
+            // recoverable; losing the rest of the chapter silently is not.
+            if NSMaxRange(range) <= laidOutGlyphs,
+               laidOutGlyphs < layoutManager.numberOfGlyphs,
+               !container.exclusionPaths.isEmpty {
+                container.exclusionPaths = []
+                layoutManager.ensureLayout(for: container)
+                range = layoutManager.glyphRange(for: container)
+            }
+
             laidOutPages.append(PageLayout(
                 chapterIndex: chapterIndex,
                 textContainer: container,
@@ -626,6 +641,8 @@ final class ManuscriptPrintView: NSView {
                 sidebars: sidebars[pageIndex] ?? []
             ))
 
+            // Still nothing after dropping the exclusions means a single line
+            // taller than the page, which no amount of further pages can fix.
             let progressed = NSMaxRange(range) > laidOutGlyphs
             laidOutGlyphs = max(laidOutGlyphs, NSMaxRange(range))
             pageIndex += 1
@@ -636,6 +653,12 @@ final class ManuscriptPrintView: NSView {
         }
         return LayoutPass(storage: storage, layoutManager: layoutManager, pages: laidOutPages)
     }
+
+    /// Upper bound on pages per chapter. `maxImagePage` comes from a page number
+    /// stored in the document, so a corrupt or hand-edited file could otherwise
+    /// ask this loop to allocate a container per page for billions of pages.
+    /// Matches `PageStackView.maxPages`.
+    private static let maximumPages = 5_000
 
     override func knowsPageRange(_ range: NSRangePointer) -> Bool {
         range.pointee = NSRange(location: 1, length: pageCount)

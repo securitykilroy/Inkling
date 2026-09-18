@@ -51,7 +51,7 @@ enum SidebarStyle {
 
 /// The anchor for a floating sidebar. Like `FloatingImageAttachment`, its inline
 /// bounds collapse to a point so it never disturbs the line it sits on; the
-/// visible box is drawn/hosted separately by `PagedTextView` and the printer.
+/// visible box is drawn/hosted separately by `PageStackView` and the printer.
 final class SidebarAttachment: NSTextAttachment {
     /// The sidebar's rich text, as RTF.
     var contentData: Data?
@@ -61,7 +61,7 @@ final class SidebarAttachment: NSTextAttachment {
     /// Box width in points (author-adjustable via resize handles).
     var width: CGFloat
     /// Last measured text height, so layout has a size before the child view
-    /// re-measures. Kept current by `PagedTextView` as the box's text changes.
+    /// re-measures. Kept current by `PageStackView` as the box's text changes.
     var contentHeight: CGFloat
 
     nonisolated init(contentData: Data?, width: CGFloat, position: FloatingImagePosition?, contentHeight: CGFloat) {

@@ -83,25 +83,17 @@ struct RichTextEditor: NSViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeNSView(context: Context) -> NSScrollView {
-        // The paged presentation lays each page out in its own text container
-        // (see makePerPageEditor); the continuous presentation below is a single
-        // plain NSTextView.
+        // `.paged` lays each page out in its own text container; `.continuous`
+        // (notes, shelf entries, project notes) is a single plain NSTextView.
         if presentation == .paged {
             return makePerPageEditor(context: context)
         }
 
-        let scrollView: NSScrollView
-        switch presentation {
-        case .continuous:
-            scrollView = ContinuousTextView.makeScrollView()
-        case .paged:
-            scrollView = PagedTextView.makePagedScrollView()
-        }
+        let scrollView = ContinuousTextView.makeScrollView()
         guard let textView = scrollView.documentView as? NSTextView else { return scrollView }
 
         textView.delegate = context.coordinator
         textView.isRichText = true
-        textView.importsGraphics = presentation == .paged
         textView.allowsUndo = true
         textView.isEditable = true
         textView.isSelectable = true
@@ -109,24 +101,14 @@ struct RichTextEditor: NSViewRepresentable {
         // correction stays off so typos are flagged, never silently rewritten.
         textView.isContinuousSpellCheckingEnabled = true
         textView.isAutomaticSpellingCorrectionEnabled = false
-        textView.usesAdaptiveColorMappingForDarkAppearance = presentation == .continuous
+        textView.usesAdaptiveColorMappingForDarkAppearance = true
         let bodyFont = TextStyle.body.font(familyName: fontFamilyName)
         textView.font = bodyFont
         textView.typingAttributes = [
             .font: bodyFont,
             .paragraphStyle: RichTextCodec.defaultParagraphStyle,
         ]
-
-        if let pagedTextView = textView as? PagedTextView {
-            pagedTextView.textColor = .black
-            pagedTextView.insertionPointColor = .black
-            pagedTextView.isTypewriterScrollingEnabled = isTypewriterScrollingEnabled
-            pagedTextView.pageCountDidChange = { [weak coordinator = context.coordinator] count in
-                coordinator?.parent.onPageCountChange?(count)
-            }
-        } else {
-            textView.textContainerInset = NSSize(width: 12, height: 16)
-        }
+        textView.textContainerInset = NSSize(width: 12, height: 16)
 
         context.coordinator.load(data, documentID: documentID, into: textView)
         controller?.textView = textView
@@ -178,7 +160,6 @@ struct RichTextEditor: NSViewRepresentable {
         // chapter's binding (the struct is recreated on every SwiftUI update).
         context.coordinator.parent = self
         controller?.textView = textView
-        (textView as? PagedTextView)?.isTypewriterScrollingEnabled = isTypewriterScrollingEnabled
         context.coordinator.loadIfChanged(data, documentID: documentID, into: textView)
         context.coordinator.applyFontIfChanged(to: textView)
     }
@@ -212,7 +193,6 @@ struct RichTextEditor: NSViewRepresentable {
             isLoading = true
             defer { isLoading = false }
 
-            (textView as? PagedTextView)?.clearImageSelection()
             let decoded = data.flatMap(RichTextCodec.decode)
             isProtectingUnreadableData = data != nil && decoded == nil
             let attributed = decoded
@@ -223,13 +203,10 @@ struct RichTextEditor: NSViewRepresentable {
                 textView.textStorage?.setAttributedString(attributed)
             }
             textView.isEditable = !isProtectingUnreadableData
-            (textView as? PagedTextView)?.prepareFloatingImages()
-            (textView as? PagedTextView)?.prepareSidebars()
             textView.typingAttributes = [
                 .font: TextStyle.body.font(familyName: parent.fontFamilyName),
                 .paragraphStyle: RichTextCodec.defaultParagraphStyle,
             ]
-            (textView as? PagedTextView)?.updatePageLayout()
             loadedID = documentID
             loadedData = data
             loadedFontFamilyName = parent.fontFamilyName
@@ -294,13 +271,11 @@ struct RichTextEditor: NSViewRepresentable {
             guard !isLoading, !isProtectingUnreadableData,
                   let textView = notification.object as? NSTextView
             else { return }
-            (textView as? PagedTextView)?.prepareFloatingImages()
             (textView as? PageTextView)?.pageStack?.prepareFloatingImages()
             let attributed = textView.attributedString()
             let encoded = RichTextCodec.encode(attributed)
             parent.data = encoded
             loadedData = encoded
-            (textView as? PagedTextView)?.updatePageLayout()
             parent.onTextChange?(textView.string)
         }
 

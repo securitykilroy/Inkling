@@ -73,6 +73,13 @@ struct ChapterSidebar: View {
         .onDeleteCommand {
             if let selected = selection { delete([selected]) }
         }
+        // No `.keyboardShortcut` on these two: File ▸ New Chapter and
+        // Edit ▸ Find ▸ Find & Replace in Project… already own ⇧⌘N and ⇧⌘F, and
+        // both routes end at the same `ProjectCommands`. Declaring the same key
+        // equivalent in the menu *and* on a toolbar button registers it twice,
+        // which is how macOS ends up drawing a second, greyed-out copy of the
+        // shortcut in the menu. The menu is the one owner; `.help` still shows
+        // the key to the user.
         .toolbar {
             ToolbarItem {
                 Button {
@@ -80,7 +87,6 @@ struct ChapterSidebar: View {
                 } label: {
                     Label("Add Chapter", systemImage: "plus")
                 }
-                .keyboardShortcut("n", modifiers: [.command, .shift])
                 .help("Add Chapter (⇧⌘N)")
             }
             ToolbarItem {
@@ -89,7 +95,6 @@ struct ChapterSidebar: View {
                 } label: {
                     Label("Find & Replace", systemImage: "magnifyingglass")
                 }
-                .keyboardShortcut("f", modifiers: [.command, .shift])
                 .help("Find & Replace in Project (⇧⌘F)")
             }
             ToolbarItem {
@@ -150,8 +155,13 @@ struct ChapterSidebar: View {
         }
     }
 
+    /// Expansion is keyed by the chapter's stable UUID, which survives the
+    /// objectID changing on save. A chapter with no id (only reachable from a
+    /// document written before `id` was populated) gets an inert binding rather
+    /// than a freshly minted UUID: this is called on every render, so a new key
+    /// each time both broke the toggle and grew `expanded` without bound.
     private func expansionBinding(for chapter: Chapter) -> Binding<Bool> {
-        let id = chapter.id ?? UUID()
+        guard let id = chapter.id else { return .constant(false) }
         return Binding(
             get: { expanded.contains(id) },
             set: { isOpen in

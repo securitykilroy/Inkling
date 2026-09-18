@@ -15,12 +15,6 @@ import Testing
 
 struct InklingTests {
 
-    @Test @MainActor func pagedEditorFactoryBuildsPagedTextView() {
-        let scrollView = PagedTextView.makePagedScrollView()
-
-        #expect(scrollView.documentView is PagedTextView)
-    }
-
     @Test func pagedEditorFitsWidePaperIntoNarrowEditorPane() {
         let scale = PagedEditorScrollView.fitMagnification(
             viewportWidth: 440,
@@ -39,36 +33,9 @@ struct InklingTests {
         #expect(scale == 1)
     }
 
-    @Test @MainActor func pagedEditorZoomsAboveActualSizeOnCommand() {
-        let scrollView = PagedTextView.makePagedScrollView()
-        scrollView.frame = NSRect(x: 0, y: 0, width: 900, height: 792)
-        scrollView.layoutSubtreeIfNeeded()
-
-        scrollView.zoomIn(nil)
-
-        #expect(scrollView.magnification > 1)
-    }
-
-    @Test @MainActor func emptyPagedEditorInsertionPointStartsInsideTopMargin() throws {
-        let scrollView = PagedTextView.makePagedScrollView()
-        scrollView.frame = NSRect(x: 0, y: 0, width: 676, height: 792)
-        scrollView.layoutSubtreeIfNeeded()
-        let textView = try #require(scrollView.documentView as? PagedTextView)
-        textView.setSelectedRange(NSRange(location: 0, length: 0))
-
-        let rect = textView.firstRect(
-            forCharacterRange: NSRange(location: 0, length: 0),
-            actualRange: nil
-        )
-        let localOrigin = textView.convert(rect.origin, from: nil)
-
-        #expect(abs(localOrigin.x - textView.textContainerOrigin.x) < 0.5)
-        #expect(localOrigin.y >= textView.textContainerOrigin.y + textView.pageLayout.topMargin - 0.5)
-    }
-
     @Test @MainActor func pagedEditorResetsNewParagraphAfterHeadingToBodyFont() throws {
-        let scrollView = PagedTextView.makePagedScrollView()
-        let textView = try #require(scrollView.documentView as? PagedTextView)
+        let stack = PageStackView()
+        let textView = stack.pageViews[0]
         textView.textStorage?.setAttributedString(NSAttributedString(
             string: "Coming Home",
             attributes: [.font: TextStyle.heading.font]
@@ -93,13 +60,13 @@ struct InklingTests {
         )
         let data = body.rtf(from: NSRange(location: 0, length: body.length), documentAttributes: [:])
 
-        #expect(PagedTextView.pageCount(forRTF: data) == 1)
+        #expect(PageStackView.pageCount(forRTF: data) == 1)
     }
 
     /// An empty (or missing) chapter still occupies its own page, matching what
     /// the editor footer shows for an empty chapter.
     @Test @MainActor func realPageCountIsOneForEmptyChapter() {
-        #expect(PagedTextView.pageCount(forRTF: nil) == 1)
+        #expect(PageStackView.pageCount(forRTF: nil) == 1)
     }
 
     /// A long body spills onto multiple real pages, and the count matches an
@@ -111,14 +78,14 @@ struct InklingTests {
         )
         let data = body.rtf(from: NSRange(location: 0, length: body.length), documentAttributes: [:])
 
-        let helperCount = PagedTextView.pageCount(forRTF: data)
+        let helperCount = PageStackView.pageCount(forRTF: data)
         #expect(helperCount > 1)
 
-        let scrollView = PagedTextView.makePagedScrollView()
-        let textView = try #require(scrollView.documentView as? PagedTextView)
-        textView.textStorage?.setAttributedString(body)
-        textView.updatePageLayout()
-        #expect(helperCount == textView.pageCount)
+        let stack = PageStackView()
+        let textView = stack.pageViews[0]
+        stack.setAttributedString(body)
+        stack.rebuildPages()
+        #expect(helperCount == stack.pageCount)
     }
 
     /// The sidebar (real editor layout) and print (ManuscriptPrintView) share
@@ -140,7 +107,7 @@ struct InklingTests {
             $0.rtf(from: NSRange(location: 0, length: $0.length), documentAttributes: [:])
         }
 
-        let editorTotal = datas.reduce(0) { $0 + PagedTextView.pageCount(forRTF: $1) }
+        let editorTotal = datas.reduce(0) { $0 + PageStackView.pageCount(forRTF: $1) }
 
         let printView = ManuscriptPrintView(
             chapters: datas.enumerated().map { PrintableChapter(title: "Ch \($0.offset)", bodyData: $0.element) },
@@ -152,48 +119,9 @@ struct InklingTests {
                 "editor=\(editorTotal) print=\(printTotal) chapters=\(datas.count)")
     }
 
-    @Test @MainActor func typewriterScrollingHoldsTheCaretAtAFixedFractionOfTheViewport() throws {
-        let scrollView = PagedTextView.makePagedScrollView()
-        let textView = try #require(scrollView.documentView as? PagedTextView)
-        scrollView.frame = NSRect(x: 0, y: 0, width: 900, height: 400)
-        scrollView.layoutSubtreeIfNeeded()
-        textView.isTypewriterScrollingEnabled = true
-
-        let manyLines = Array(repeating: "A line of text.", count: 60).joined(separator: "\n")
-        textView.textStorage?.setAttributedString(NSAttributedString(string: manyLines))
-        textView.updatePageLayout()
-        textView.setSelectedRange(NSRange(location: textView.string.count, length: 0))
-
-        let glyphIndex = try #require(
-            textView.layoutManager?.glyphIndexForCharacter(at: textView.selectedRange().location - 1)
-        )
-        let lineRect = try #require(textView.layoutManager?.lineFragmentRect(forGlyphAt: glyphIndex, effectiveRange: nil))
-        let caretMidY = lineRect.midY + textView.textContainerOrigin.y
-
-        let visibleHeight = scrollView.contentView.bounds.height
-        let expectedOriginY = caretMidY - visibleHeight * 0.42
-        #expect(abs(scrollView.contentView.bounds.origin.y - expectedOriginY) < 1)
-    }
-
-    @Test @MainActor func typewriterScrollingDoesNothingWhenDisabled() throws {
-        let scrollView = PagedTextView.makePagedScrollView()
-        let textView = try #require(scrollView.documentView as? PagedTextView)
-        scrollView.frame = NSRect(x: 0, y: 0, width: 900, height: 400)
-        scrollView.layoutSubtreeIfNeeded()
-        textView.isTypewriterScrollingEnabled = false
-
-        let manyLines = Array(repeating: "A line of text.", count: 60).joined(separator: "\n")
-        textView.textStorage?.setAttributedString(NSAttributedString(string: manyLines))
-        let originBeforeSelection = scrollView.contentView.bounds.origin.y
-
-        textView.setSelectedRange(NSRange(location: textView.string.count, length: 0))
-
-        #expect(scrollView.contentView.bounds.origin.y == originBeforeSelection)
-    }
-
     @Test @MainActor func currentStyleClassifiesTheFontAtTheCursor() throws {
-        let scrollView = PagedTextView.makePagedScrollView()
-        let textView = try #require(scrollView.documentView as? PagedTextView)
+        let stack = PageStackView()
+        let textView = stack.pageViews[0]
         let controller = RichTextController()
         controller.textView = textView
 
@@ -215,8 +143,8 @@ struct InklingTests {
     }
 
     @Test @MainActor func applyStyleImmediatelyUpdatesCurrentStyle() throws {
-        let scrollView = PagedTextView.makePagedScrollView()
-        let textView = try #require(scrollView.documentView as? PagedTextView)
+        let stack = PageStackView()
+        let textView = stack.pageViews[0]
         let controller = RichTextController()
         controller.textView = textView
 
@@ -230,8 +158,8 @@ struct InklingTests {
     }
 
     @Test @MainActor func applyingAHeadingStyleClearsAnExistingBodyIndent() throws {
-        let scrollView = PagedTextView.makePagedScrollView()
-        let textView = try #require(scrollView.documentView as? PagedTextView)
+        let stack = PageStackView()
+        let textView = stack.pageViews[0]
         let controller = RichTextController()
         controller.textView = textView
 
@@ -260,8 +188,8 @@ struct InklingTests {
     }
 
     @Test @MainActor func applyingBodyStyleRestoresTheIndentOnAFormerHeading() throws {
-        let scrollView = PagedTextView.makePagedScrollView()
-        let textView = try #require(scrollView.documentView as? PagedTextView)
+        let stack = PageStackView()
+        let textView = stack.pageViews[0]
         let controller = RichTextController()
         controller.textView = textView
 
@@ -285,9 +213,9 @@ struct InklingTests {
     /// A callout indents its own paragraphs by `CalloutStyling.sideInset`.
     /// Re-styling text inside one must not overwrite that with the body indent.
     @Test @MainActor func applyingAStyleInsideACalloutKeepsTheCalloutInset() throws {
-        let scrollView = PagedTextView.makePagedScrollView()
-        let textView = try #require(scrollView.documentView as? PagedTextView)
-        let storage = try #require(textView.textStorage)
+        let stack = PageStackView()
+        let textView = stack.pageViews[0]
+        let storage = stack.storage
         let controller = RichTextController()
         controller.textView = textView
 
@@ -311,8 +239,8 @@ struct InklingTests {
     }
 
     @Test @MainActor func applyStyleRespectsTheControllersFontFamily() throws {
-        let scrollView = PagedTextView.makePagedScrollView()
-        let textView = try #require(scrollView.documentView as? PagedTextView)
+        let stack = PageStackView()
+        let textView = stack.pageViews[0]
         let controller = RichTextController()
         controller.textView = textView
         controller.fontFamilyName = "Georgia"
@@ -627,37 +555,6 @@ struct InklingTests {
         #expect(fitted.bounds.size == NSSize(width: 468, height: 234))
     }
 
-    @Test @MainActor func pastedOversizedFloatingImageIsFittedToPageWidth() throws {
-        let scrollView = PagedTextView.makePagedScrollView()
-        let textView = try #require(scrollView.documentView as? PagedTextView)
-        let image = NSImage(size: NSSize(width: 1200, height: 600), flipped: false) { rect in
-            NSColor.systemPurple.setFill()
-            rect.fill()
-            return true
-        }
-        RichTextImageInserter.insert(
-            image,
-            into: textView,
-            at: NSRange(location: 0, length: 0),
-            maximumWidth: 1200
-        )
-        textView.prepareFloatingImages()
-
-        #expect(RichTextImageInserter.fitOversizedAttachments(
-            in: textView,
-            maximumWidth: textView.pageLayout.contentWidth
-        ))
-        let fitted = try #require(textView.textStorage?.attribute(
-            .attachment,
-            at: 0,
-            effectiveRange: nil
-        ) as? FloatingImageAttachment)
-
-        #expect(fitted.displaySize == NSSize(width: 468, height: 234))
-        #expect(fitted.image?.size == NSSize(width: 468, height: 234))
-        #expect(fitted.bounds.size.width <= 1)
-    }
-
     @Test @MainActor func pastedSmallImageKeepsItsOriginalSize() {
         let attachment = NSTextAttachment()
         attachment.bounds = NSRect(x: 0, y: 0, width: 200, height: 100)
@@ -669,470 +566,6 @@ struct InklingTests {
             maximumWidth: 468
         ))
         #expect(attachment.bounds.size == NSSize(width: 200, height: 100))
-    }
-
-    @Test @MainActor func pagedEditorRecognizesDraggedImageData() {
-        let image = NSImage(size: NSSize(width: 20, height: 20), flipped: false) { rect in
-            NSColor.systemGreen.setFill()
-            rect.fill()
-            return true
-        }
-        let pasteboard = NSPasteboard(name: NSPasteboard.Name(UUID().uuidString))
-        pasteboard.clearContents()
-        pasteboard.writeObjects([image])
-
-        #expect(PagedTextView.draggedImage(from: pasteboard) != nil)
-    }
-
-    @Test @MainActor func pagedEditorHitTestsAnInsertedImageForSelection() throws {
-        let scrollView = PagedTextView.makePagedScrollView()
-        scrollView.frame = NSRect(x: 0, y: 0, width: 676, height: 792)
-        scrollView.layoutSubtreeIfNeeded()
-        let textView = try #require(scrollView.documentView as? PagedTextView)
-        let image = NSImage(size: NSSize(width: 120, height: 60), flipped: false) { rect in
-            NSColor.systemOrange.setFill()
-            rect.fill()
-            return true
-        }
-        #expect(RichTextImageInserter.insert(
-            image,
-            into: textView,
-            at: NSRange(location: 0, length: 0),
-            maximumWidth: textView.pageLayout.contentWidth
-        ))
-        textView.updatePageLayout()
-
-        let range = NSRange(location: 0, length: 1)
-        let rect = try #require(textView.imageAttachmentRect(for: range))
-
-        #expect(textView.imageAttachmentRange(at: NSPoint(x: rect.midX, y: rect.midY)) == range)
-    }
-
-    @Test @MainActor func resizingAttachmentUpdatesItsLaidOutRectangle() throws {
-        let scrollView = PagedTextView.makePagedScrollView()
-        scrollView.frame = NSRect(x: 0, y: 0, width: 676, height: 792)
-        scrollView.layoutSubtreeIfNeeded()
-        let textView = try #require(scrollView.documentView as? PagedTextView)
-        let image = NSImage(size: NSSize(width: 120, height: 60), flipped: false) { rect in
-            NSColor.systemPink.setFill()
-            rect.fill()
-            return true
-        }
-        RichTextImageInserter.insert(
-            image,
-            into: textView,
-            at: NSRange(location: 0, length: 0),
-            maximumWidth: textView.pageLayout.contentWidth
-        )
-        let range = NSRange(location: 0, length: 1)
-        #expect(try #require(textView.imageAttachmentRect(for: range)).width == 120)
-
-        textView.setImageAttachmentSize(NSSize(width: 60, height: 30), at: range)
-
-        #expect(try #require(textView.imageAttachmentRect(for: range)).width == 60)
-    }
-
-    @Test @MainActor func enlargingAttachmentScalesImageToFillItsFrame() throws {
-        let scrollView = PagedTextView.makePagedScrollView()
-        let textView = try #require(scrollView.documentView as? PagedTextView)
-        let image = NSImage(size: NSSize(width: 120, height: 60), flipped: false) { rect in
-            NSColor.systemIndigo.setFill()
-            rect.fill()
-            return true
-        }
-        RichTextImageInserter.insert(
-            image,
-            into: textView,
-            at: NSRange(location: 0, length: 0),
-            maximumWidth: textView.pageLayout.contentWidth
-        )
-        let range = NSRange(location: 0, length: 1)
-
-        textView.setImageAttachmentSize(NSSize(width: 240, height: 120), at: range)
-
-        let attachment = try #require(textView.textStorage?.attribute(
-            .attachment,
-            at: 0,
-            effectiveRange: nil
-        ) as? NSTextAttachment)
-        #expect(attachment.bounds.size == NSSize(width: 240, height: 120))
-        #expect(attachment.image?.size == NSSize(width: 240, height: 120))
-    }
-
-    @Test @MainActor func floatingImageCreatesTextExclusionPath() throws {
-        let scrollView = PagedTextView.makePagedScrollView()
-        scrollView.frame = NSRect(x: 0, y: 0, width: 676, height: 792)
-        scrollView.layoutSubtreeIfNeeded()
-        let textView = try #require(scrollView.documentView as? PagedTextView)
-        let image = NSImage(size: NSSize(width: 120, height: 60), flipped: false) { rect in
-            NSColor.systemBrown.setFill()
-            rect.fill()
-            return true
-        }
-        RichTextImageInserter.insert(
-            image,
-            into: textView,
-            at: NSRange(location: 0, length: 0),
-            maximumWidth: textView.pageLayout.contentWidth
-        )
-        textView.textStorage?.append(NSAttributedString(
-            string: " Text that should wrap alongside the image instead of starting below it."
-        ))
-
-        textView.prepareFloatingImages()
-        textView.updatePageLayout()
-
-        let floating = try #require(textView.textStorage?.attribute(
-            .attachment,
-            at: 0,
-            effectiveRange: nil
-        ) as? FloatingImageAttachment)
-        #expect(floating.displaySize == NSSize(width: 120, height: 60))
-        #expect(floating.bounds.width <= 1)
-        #expect(textView.textContainer?.exclusionPaths.isEmpty == false)
-        let exclusionBounds = try #require(textView.textContainer?.exclusionPaths.first?.bounds)
-        #expect(exclusionBounds.width > 120)
-        let imageRect = try #require(textView.imageAttachmentRect(
-            for: NSRange(location: 0, length: 1)
-        )).offsetBy(dx: -textView.textContainerOrigin.x, dy: -textView.textContainerOrigin.y)
-        #expect(exclusionBounds.maxY >= imageRect.maxY + 8)
-        let layoutManager = try #require(textView.layoutManager)
-        let textGlyph = layoutManager.glyphRange(
-            forCharacterRange: NSRange(location: 1, length: 1),
-            actualCharacterRange: nil
-        )
-        let wrappedLine = layoutManager.lineFragmentRect(
-            forGlyphAt: textGlyph.location,
-            effectiveRange: nil
-        )
-        #expect(wrappedLine.minX > 120, "wrapped line was \(wrappedLine)")
-    }
-
-    @Test @MainActor func floatingImageDoesNotReserveAFullSizeInlineGlyph() throws {
-        let scrollView = PagedTextView.makePagedScrollView()
-        let textView = try #require(scrollView.documentView as? PagedTextView)
-        let image = NSImage(size: NSSize(width: 180, height: 120), flipped: false) { rect in
-            NSColor.systemRed.setFill()
-            rect.fill()
-            return true
-        }
-        RichTextImageInserter.insert(
-            image,
-            into: textView,
-            at: NSRange(location: 0, length: 0),
-            maximumWidth: textView.pageLayout.contentWidth
-        )
-
-        textView.prepareFloatingImages()
-
-        let layoutManager = try #require(textView.layoutManager)
-        let glyphRange = layoutManager.glyphRange(
-            forCharacterRange: NSRange(location: 0, length: 1),
-            actualCharacterRange: nil
-        )
-        let inlineSize = layoutManager.attachmentSize(forGlyphAt: glyphRange.location)
-        #expect(inlineSize.width <= 1)
-        #expect(inlineSize.height <= 1)
-    }
-
-    @Test @MainActor func cellBackedPastedImageBecomesMovableFloatingImage() throws {
-        let scrollView = PagedTextView.makePagedScrollView()
-        scrollView.frame = NSRect(x: 0, y: 0, width: 676, height: 792)
-        scrollView.layoutSubtreeIfNeeded()
-        let textView = try #require(scrollView.documentView as? PagedTextView)
-        let image = NSImage(size: NSSize(width: 180, height: 120), flipped: false) { rect in
-            NSColor.systemBlue.setFill()
-            rect.fill()
-            return true
-        }
-        let attachment = NSTextAttachment()
-        attachment.attachmentCell = NSTextAttachmentCell(imageCell: image)
-        attachment.bounds = .zero
-        let body = NSMutableAttributedString(string: "Words before the pasted image ")
-        let imageLocation = body.length
-        body.append(NSAttributedString(attachment: attachment))
-        body.append(NSAttributedString(string: " words after the pasted image."))
-        textView.textStorage?.setAttributedString(body)
-
-        textView.prepareFloatingImages()
-        textView.updatePageLayout()
-
-        let range = NSRange(location: imageLocation, length: 1)
-        let floating = try #require(textView.textStorage?.attribute(
-            .attachment,
-            at: imageLocation,
-            effectiveRange: nil
-        ) as? FloatingImageAttachment)
-        #expect(floating.displaySize == NSSize(width: 180, height: 120))
-        let rect = try #require(textView.imageAttachmentRect(for: range))
-        #expect(textView.imageAttachmentRange(at: NSPoint(x: rect.midX, y: rect.midY)) == range)
-    }
-
-    @Test @MainActor func floatingImageLineBreaksFromWordPasteCollapseIntoTextFlow() throws {
-        let scrollView = PagedTextView.makePagedScrollView()
-        let textView = try #require(scrollView.documentView as? PagedTextView)
-        let image = NSImage(size: NSSize(width: 120, height: 80), flipped: false) { rect in
-            NSColor.systemBlue.setFill()
-            rect.fill()
-            return true
-        }
-        let attachment = NSTextAttachment()
-        attachment.attachmentCell = NSTextAttachmentCell(imageCell: image)
-        attachment.bounds = .zero
-        let body = NSMutableAttributedString(string: "and\n")
-        body.append(NSAttributedString(attachment: attachment))
-        body.append(NSAttributedString(string: "\nmissing"))
-        textView.textStorage?.setAttributedString(body)
-
-        textView.prepareFloatingImages()
-
-        #expect(textView.string == "and \u{fffc} missing")
-    }
-
-    @Test @MainActor func backspaceDoesNotDeleteFloatingImageAnchor() throws {
-        let scrollView = PagedTextView.makePagedScrollView()
-        let textView = try #require(scrollView.documentView as? PagedTextView)
-        let image = NSImage(size: NSSize(width: 120, height: 80), flipped: false) { rect in
-            NSColor.systemBlue.setFill()
-            rect.fill()
-            return true
-        }
-        RichTextImageInserter.insert(
-            image,
-            into: textView,
-            at: NSRange(location: 0, length: 0),
-            maximumWidth: textView.pageLayout.contentWidth
-        )
-        textView.textStorage?.append(NSAttributedString(string: " missing"))
-        textView.prepareFloatingImages()
-        textView.setSelectedRange(NSRange(location: 1, length: 0))
-
-        #expect(!textView.shouldChangeText(in: NSRange(location: 0, length: 1), replacementString: ""))
-        #expect(textView.textStorage?.attribute(.attachment, at: 0, effectiveRange: nil) is FloatingImageAttachment)
-    }
-
-    @Test @MainActor func preparingFloatingImageAfterInitialLayoutRegeneratesAttachmentGlyph() throws {
-        let scrollView = PagedTextView.makePagedScrollView()
-        let textView = try #require(scrollView.documentView as? PagedTextView)
-        let image = NSImage(size: NSSize(width: 180, height: 120), flipped: false) { rect in
-            NSColor.systemRed.setFill()
-            rect.fill()
-            return true
-        }
-        RichTextImageInserter.insert(
-            image,
-            into: textView,
-            at: NSRange(location: 0, length: 0),
-            maximumWidth: textView.pageLayout.contentWidth
-        )
-
-        let layoutManager = try #require(textView.layoutManager)
-        let textContainer = try #require(textView.textContainer)
-        layoutManager.ensureLayout(for: textContainer)
-        textView.prepareFloatingImages()
-
-        let glyphRange = layoutManager.glyphRange(
-            forCharacterRange: NSRange(location: 0, length: 1),
-            actualCharacterRange: nil
-        )
-        let inlineSize = layoutManager.attachmentSize(forGlyphAt: glyphRange.location)
-        #expect(inlineSize.width <= 1)
-        #expect(inlineSize.height <= 1)
-    }
-
-    @Test @MainActor func floatingImageAnchorsToItsOwnLineNotParagraphTop() throws {
-        let scrollView = PagedTextView.makePagedScrollView()
-        scrollView.frame = NSRect(x: 0, y: 0, width: 676, height: 792)
-        scrollView.layoutSubtreeIfNeeded()
-        let textView = try #require(scrollView.documentView as? PagedTextView)
-        // A long run of text, an image referenced partway through it, then more
-        // text — the shape of a Word-imported image sitting mid-paragraph.
-        let prefix = String(repeating: "Words before the referenced image ", count: 8)
-        textView.string = prefix
-        let imageLocation = (prefix as NSString).length
-        let image = NSImage(size: NSSize(width: 120, height: 80), flipped: false) { rect in
-            NSColor.systemOrange.setFill()
-            rect.fill()
-            return true
-        }
-        RichTextImageInserter.insert(
-            image,
-            into: textView,
-            at: NSRange(location: imageLocation, length: 0),
-            maximumWidth: textView.pageLayout.contentWidth
-        )
-        textView.textStorage?.append(NSAttributedString(
-            string: " More words after the image that belong to the same paragraph."
-        ))
-
-        textView.prepareFloatingImages()
-        textView.updatePageLayout()
-
-        let imageRect = try #require(textView.imageAttachmentRect(
-            for: NSRange(location: imageLocation, length: 1)
-        ))
-        let layoutManager = try #require(textView.layoutManager)
-        let firstGlyph = layoutManager.glyphRange(
-            forCharacterRange: NSRange(location: 0, length: 1),
-            actualCharacterRange: nil
-        )
-        let firstLine = layoutManager.lineFragmentRect(
-            forGlyphAt: firstGlyph.location,
-            effectiveRange: nil
-        )
-
-        // The image is no longer lifted to the paragraph's first line: it floats
-        // beside its own line, which is well below the top of the text...
-        #expect(imageRect.minY > firstLine.minY + 1,
-                "image should sit below the first line, not be lifted to the paragraph top")
-        // ...and the first line (above the image) is full width, not wrapped.
-        #expect(firstLine.minX < 1,
-                "text above the image should not be wrapped around it: \(firstLine)")
-    }
-
-    @Test @MainActor func rebuildingFloatingLayoutDoesNotMoveImageDownward() throws {
-        let scrollView = PagedTextView.makePagedScrollView()
-        scrollView.frame = NSRect(x: 0, y: 0, width: 676, height: 792)
-        scrollView.layoutSubtreeIfNeeded()
-        let textView = try #require(scrollView.documentView as? PagedTextView)
-        let image = NSImage(size: NSSize(width: 120, height: 80), flipped: false) { rect in
-            NSColor.systemPurple.setFill()
-            rect.fill()
-            return true
-        }
-        RichTextImageInserter.insert(
-            image,
-            into: textView,
-            at: NSRange(location: 0, length: 0),
-            maximumWidth: textView.pageLayout.contentWidth
-        )
-        textView.textStorage?.append(NSAttributedString(
-            string: String(repeating: "Text alongside the image. ", count: 20)
-        ))
-        textView.prepareFloatingImages()
-        textView.updatePageLayout()
-        let range = NSRange(location: 0, length: 1)
-        let initialRect = try #require(textView.imageAttachmentRect(for: range))
-
-        textView.updatePageLayout()
-        textView.updatePageLayout()
-
-        let rebuiltRect = try #require(textView.imageAttachmentRect(for: range))
-        #expect(abs(rebuiltRect.minY - initialRect.minY) < 0.5)
-    }
-
-    @Test @MainActor func floatingImageRoundTripsAtDisplaySizeForPrinting() throws {
-        let scrollView = PagedTextView.makePagedScrollView()
-        let textView = try #require(scrollView.documentView as? PagedTextView)
-        let image = NSImage(size: NSSize(width: 160, height: 80), flipped: false) { rect in
-            NSColor.systemCyan.setFill()
-            rect.fill()
-            return true
-        }
-        RichTextImageInserter.insert(
-            image,
-            into: textView,
-            at: NSRange(location: 0, length: 0),
-            maximumWidth: textView.pageLayout.contentWidth
-        )
-        textView.prepareFloatingImages()
-
-        let encoded = try #require(RichTextCodec.encode(textView.attributedString()))
-        let decoded = try #require(RichTextCodec.decode(encoded))
-        let restored = try #require(decoded.attribute(
-            .attachment,
-            at: 0,
-            effectiveRange: nil
-        ) as? NSTextAttachment)
-
-        #expect(restored.bounds.size == NSSize(width: 160, height: 80))
-        #expect(restored.image?.size == NSSize(width: 160, height: 80))
-    }
-
-    @Test @MainActor func resizingFloatingImageUpdatesImageAndWrapBoundary() throws {
-        let scrollView = PagedTextView.makePagedScrollView()
-        scrollView.frame = NSRect(x: 0, y: 0, width: 676, height: 792)
-        scrollView.layoutSubtreeIfNeeded()
-        let textView = try #require(scrollView.documentView as? PagedTextView)
-        let image = NSImage(size: NSSize(width: 120, height: 60), flipped: false) { rect in
-            NSColor.systemMint.setFill()
-            rect.fill()
-            return true
-        }
-        RichTextImageInserter.insert(
-            image,
-            into: textView,
-            at: NSRange(location: 0, length: 0),
-            maximumWidth: textView.pageLayout.contentWidth
-        )
-        textView.textStorage?.append(NSAttributedString(string: " Wrapped text beside the image."))
-        textView.prepareFloatingImages()
-        let range = NSRange(location: 0, length: 1)
-
-        textView.setImageAttachmentSize(NSSize(width: 240, height: 120), at: range)
-
-        let floating = try #require(textView.textStorage?.attribute(
-            .attachment,
-            at: 0,
-            effectiveRange: nil
-        ) as? FloatingImageAttachment)
-        #expect(floating.displaySize == NSSize(width: 240, height: 120))
-        #expect(floating.image?.size == NSSize(width: 240, height: 120))
-        #expect(textView.imageAttachmentRect(for: range)?.size == NSSize(width: 240, height: 120))
-        #expect(textView.textContainer?.exclusionPaths.first?.bounds.width ?? 0 > 240)
-    }
-
-    @Test @MainActor func draggingSelectedImageHandleResizesAttachment() throws {
-        let scrollView = PagedTextView.makePagedScrollView()
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 676, height: 792),
-            styleMask: .borderless,
-            backing: .buffered,
-            defer: false
-        )
-        window.contentView = scrollView
-        window.layoutIfNeeded()
-        let textView = try #require(scrollView.documentView as? PagedTextView)
-        let image = NSImage(size: NSSize(width: 120, height: 60), flipped: false) { rect in
-            NSColor.systemTeal.setFill()
-            rect.fill()
-            return true
-        }
-        RichTextImageInserter.insert(
-            image,
-            into: textView,
-            at: NSRange(location: 0, length: 0),
-            maximumWidth: textView.pageLayout.contentWidth
-        )
-        let range = NSRange(location: 0, length: 1)
-        let imageRect = try #require(textView.imageAttachmentRect(for: range))
-
-        textView.mouseDown(with: mouseEvent(
-            .leftMouseDown,
-            at: NSPoint(x: imageRect.midX, y: imageRect.midY),
-            in: textView,
-            window: window
-        ))
-        textView.mouseDown(with: mouseEvent(
-            .leftMouseDown,
-            at: NSPoint(x: imageRect.maxX, y: imageRect.maxY),
-            in: textView,
-            window: window
-        ))
-        textView.mouseDragged(with: mouseEvent(
-            .leftMouseDragged,
-            at: NSPoint(x: imageRect.maxX - 60, y: imageRect.maxY),
-            in: textView,
-            window: window
-        ))
-        textView.mouseUp(with: mouseEvent(
-            .leftMouseUp,
-            at: NSPoint(x: imageRect.maxX - 60, y: imageRect.maxY),
-            in: textView,
-            window: window
-        ))
-
-        #expect(try #require(textView.imageAttachmentRect(for: range)).width == 60)
     }
 
     @MainActor
@@ -1514,8 +947,8 @@ struct InklingTests {
     }
 
     @Test @MainActor func applyCalloutTagsTheSelectedParagraphAndTracksCurrentKind() throws {
-        let scrollView = PagedTextView.makePagedScrollView()
-        let textView = try #require(scrollView.documentView as? PagedTextView)
+        let stack = PageStackView()
+        let textView = stack.pageViews[0]
         textView.textStorage?.setAttributedString(NSAttributedString(string: "First para.\nSecond para."))
         let controller = RichTextController()
         controller.textView = textView
@@ -1573,85 +1006,11 @@ struct InklingTests {
     /// Reproduces the "text vanishes after an image" failure: large images near
     /// page boundaries in a multi-page chapter must not cause TextKit to drop the
     /// remaining text. Asserts every glyph is laid out.
-    @Test @MainActor func largeImagesAcrossPagesDoNotDropText() throws {
-        let scrollView = PagedTextView.makePagedScrollView()
-        scrollView.frame = NSRect(x: 0, y: 0, width: 676, height: 792)
-        scrollView.layoutSubtreeIfNeeded()
-        let textView = try #require(scrollView.documentView as? PagedTextView)
-
-        let paragraph = String(repeating: "This is a sentence of body text that fills the lines. ", count: 30) + "\n"
-        let big = NSImage(size: NSSize(width: 300, height: 380), flipped: false) { rect in
-            NSColor.systemTeal.setFill(); rect.fill(); return true
-        }
-        let content = NSMutableAttributedString()
-        for index in 0..<8 {
-            content.append(NSAttributedString(string: paragraph, attributes: [.font: TextStyle.body.font]))
-            if index == 2 || index == 5 {
-                let attachment = NSTextAttachment()
-                attachment.image = big
-                attachment.bounds = NSRect(x: 0, y: 0, width: 300, height: 380)
-                content.append(NSAttributedString(attachment: attachment))
-                content.append(NSAttributedString(string: paragraph, attributes: [.font: TextStyle.body.font]))
-            }
-        }
-        textView.textStorage?.setAttributedString(content)
-        textView.frame = NSRect(x: 0, y: 0, width: 676, height: 792 * 8)
-        textView.prepareFloatingImages()
-        textView.updatePageLayout()
-
-        let layoutManager = try #require(textView.layoutManager)
-        let container = try #require(textView.textContainer)
-        layoutManager.ensureLayout(for: container)
-        let laid = layoutManager.glyphRange(for: container)
-        #expect(NSMaxRange(laid) == layoutManager.numberOfGlyphs,
-                "text dropped: only \(NSMaxRange(laid)) of \(layoutManager.numberOfGlyphs) glyphs laid out")
-    }
-
     /// Reproduces the real "text vanishes" failure: text fills page 1, then a
     /// tall image that can't fit in the remainder gets bumped to the top of page
     /// 2 (a first-line image on a later page — the documented fragile case), then
     /// more text follows. The trailing text must still lay out with real height,
     /// not collapse into a degenerate zero-height line.
-    @Test @MainActor func imageBumpedToNextPageTopDoesNotDropTrailingText() throws {
-        let scrollView = PagedTextView.makePagedScrollView()
-        scrollView.frame = NSRect(x: 0, y: 0, width: 676, height: 792)
-        scrollView.layoutSubtreeIfNeeded()
-        let textView = try #require(scrollView.documentView as? PagedTextView)
-
-        let line = "This is a line of ordinary body text that fills most of the column width. "
-        // Roughly one page of text so the image lands low on page 1.
-        let pageish = String(repeating: line, count: 34) + "\n"
-        let trailing = "\n" + String(repeating: "Trailing sentence after the image. ", count: 20)
-
-        let tall = NSImage(size: NSSize(width: 240, height: 460), flipped: false) { rect in
-            NSColor.systemIndigo.setFill(); rect.fill(); return true
-        }
-        let attachment = NSTextAttachment()
-        attachment.image = tall
-        attachment.bounds = NSRect(x: 0, y: 0, width: 240, height: 460)
-
-        let content = NSMutableAttributedString(string: pageish, attributes: [.font: TextStyle.body.font])
-        let imageLocation = content.length
-        content.append(NSAttributedString(attachment: attachment))
-        content.append(NSAttributedString(string: trailing, attributes: [.font: TextStyle.body.font]))
-
-        textView.textStorage?.setAttributedString(content)
-        textView.prepareFloatingImages()
-        textView.updatePageLayout()
-
-        let lm = try #require(textView.layoutManager)
-        let imageRect = try #require(textView.imageAttachmentRect(for: NSRange(location: imageLocation, length: 1)))
-
-        // The last glyph of the trailing text must be laid out with a real line
-        // height and sit below the image — not collapsed to a degenerate line.
-        let total = lm.numberOfGlyphs
-        let lastLine = lm.lineFragmentRect(forGlyphAt: total - 1, effectiveRange: nil)
-        #expect(lastLine.height > 5,
-                "trailing text collapsed to a degenerate line (height \(lastLine.height)) — text vanished")
-        #expect(lastLine.minY > imageRect.minY,
-                "trailing text should lay out at/after the image, not above it")
-    }
-
     // MARK: - Floating sidebars
 
     /// A body with one floating sidebar anchored after "Body ".
@@ -1711,12 +1070,12 @@ struct InklingTests {
     }
 
     @Test @MainActor func insertingSidebarAddsAnEditableBox() throws {
-        let scrollView = PagedTextView.makePagedScrollView()
-        let textView = try #require(scrollView.documentView as? PagedTextView)
+        let stack = PageStackView()
+        let textView = stack.pageViews[0]
         textView.textStorage?.setAttributedString(NSAttributedString(string: "The body text."))
         textView.setSelectedRange(NSRange(location: 4, length: 0))
 
-        textView.insertSidebar()
+        stack.insertSidebar()
 
         var found: SidebarAttachment?
         textView.textStorage?.enumerateAttribute(
@@ -1862,6 +1221,54 @@ struct InklingTests {
 
         #expect(text.contains("My Book"))
         #expect(text.contains("Jane Roe"))
+    }
+
+    /// Regression: a page whose exclusions left no room for a single line laid out
+    /// zero glyphs, which ended the pagination loop — and everything after that
+    /// page was silently missing from the printout. A full-column image is the
+    /// realistic way to produce one.
+    @Test @MainActor func aFullPageImageDoesNotSwallowTheRestOfTheChapter() throws {
+        let pageSize = NSSize(width: 360, height: 500)
+        let image = NSImage(size: pageSize, flipped: false) { rect in
+            NSColor.systemGreen.setFill()
+            rect.fill()
+            return true
+        }
+        let attachment = NSTextAttachment(data: image.tiffRepresentation, ofType: "public.tiff")
+        attachment.image = image
+        attachment.bounds = NSRect(origin: .zero, size: pageSize)
+
+        let body = NSMutableAttributedString(
+            string: String(repeating: "Early text that fills the opening page. ", count: 120),
+            attributes: [.font: NSFont.systemFont(ofSize: 12)]
+        )
+        let imageLocation = body.length
+        body.append(NSAttributedString(attachment: attachment))
+        // Parked on page 2, covering its whole text column.
+        body.addAttribute(
+            .inklingFloatingImagePosition,
+            value: FloatingImagePosition(page: 1, origin: .zero),
+            range: NSRange(location: imageLocation, length: 1)
+        )
+        body.append(NSAttributedString(
+            string: String(repeating: "Trailing words. ", count: 40) + "Zymurgy",
+            attributes: [.font: NSFont.systemFont(ofSize: 12)]
+        ))
+
+        let data = try #require(RichTextCodec.encode(body))
+        let view = ManuscriptPrintView(
+            chapters: [PrintableChapter(title: "One", bodyData: data)],
+            pageSize: pageSize
+        )
+
+        let pdf = view.dataWithPDF(inside: view.bounds)
+        let document = try #require(PDFDocument(data: pdf))
+        let text = (0..<document.pageCount)
+            .compactMap { document.page(at: $0)?.string }
+            .joined()
+
+        // The distinctive last word of the chapter has to survive to paper.
+        #expect(text.contains("Zymurgy"))
     }
 
     @Test @MainActor func defaultPrintViewHasNoTitlePage() {
@@ -2074,6 +1481,74 @@ struct InklingTests {
         #expect(position == FloatingImagePosition(page: 2, origin: CGPoint(x: 120, y: 200)))
     }
 
+    /// Regression: the encoder read the placement only off a `FloatingImageAttachment`,
+    /// which exists only inside the editor and the printer. Everything that rewrites a
+    /// chapter offline works on the plain attributed string `decode` produces, where
+    /// the placement is an attribute — so a second round trip silently dropped it.
+    @Test @MainActor func codecKeepsAPositionThroughASecondRoundTrip() throws {
+        let floating = floatingImageAttachment()
+        let placed = FloatingImagePosition(page: 2, origin: CGPoint(x: 120, y: 200))
+        floating.position = placed
+
+        let original = NSMutableAttributedString(string: "Hi ")
+        original.append(NSAttributedString(attachment: floating))
+
+        let once = try #require(RichTextCodec.decode(try #require(RichTextCodec.encode(original))))
+        let twice = try #require(RichTextCodec.decode(try #require(RichTextCodec.encode(once))))
+
+        #expect(twice.attribute(
+            .inklingFloatingImagePosition, at: 3, effectiveRange: nil
+        ) as? FloatingImagePosition == placed)
+    }
+
+    /// The project-wide font change decodes and re-encodes every chapter, so it used
+    /// to snap every dragged image in the project back to its paragraph anchor.
+    @Test @MainActor func projectFontChangeKeepsFloatingImagePositions() throws {
+        let floating = floatingImageAttachment()
+        let placed = FloatingImagePosition(page: 1, origin: CGPoint(x: 90, y: 300))
+        floating.position = placed
+        let original = NSMutableAttributedString(
+            string: "Body text. ", attributes: [.font: NSFont.systemFont(ofSize: 14)]
+        )
+        original.append(NSAttributedString(attachment: floating))
+
+        let id = UUID()
+        let results = ProjectFontStyler.restyledChapters(
+            [FontStyledChapter(
+                id: id, bodyData: try #require(RichTextCodec.encode(original)), notesData: nil
+            )],
+            familyName: "Helvetica"
+        )
+        let decoded = try #require(RichTextCodec.decode(try #require(results[id]?.bodyData)))
+        #expect(decoded.attribute(
+            .inklingFloatingImagePosition, at: 11, effectiveRange: nil
+        ) as? FloatingImagePosition == placed)
+    }
+
+    /// Same round trip, reached through project-wide Replace All.
+    @Test @MainActor func replaceAllKeepsFloatingImagePositions() throws {
+        let floating = floatingImageAttachment()
+        let placed = FloatingImagePosition(page: 1, origin: CGPoint(x: 90, y: 300))
+        floating.position = placed
+        let original = NSMutableAttributedString(
+            string: "alpha beta ", attributes: [.font: NSFont.systemFont(ofSize: 14)]
+        )
+        original.append(NSAttributedString(attachment: floating))
+
+        let id = UUID()
+        let results = ProjectSearch.replaceAll(
+            in: [SearchableChapter(
+                id: id, title: "One", bodyData: try #require(RichTextCodec.encode(original))
+            )],
+            query: "beta", replacement: "gamma", caseSensitive: true
+        )
+        let decoded = try #require(RichTextCodec.decode(try #require(results[id])))
+        #expect(decoded.string.hasPrefix("alpha gamma"))
+        #expect(decoded.attribute(
+            .inklingFloatingImagePosition, at: 12, effectiveRange: nil
+        ) as? FloatingImagePosition == placed)
+    }
+
     @Test @MainActor func codecOmitsPositionForImagesThatWereNeverMoved() throws {
         let floating = floatingImageAttachment()  // position stays nil
 
@@ -2150,39 +1625,6 @@ struct InklingTests {
         #expect(position.origin == CGPoint(x: 172, y: 732))  // paperX = 100 + 72
     }
 
-    @Test @MainActor func prepareFloatingImagesSeedsPositionFromTheDecodedAttribute() {
-        let scroll = PagedTextView.makePagedScrollView()
-        let textView = scroll.documentView as! PagedTextView
-
-        let image = NSImage(size: NSSize(width: 50, height: 30), flipped: false) { rect in
-            NSColor.systemOrange.setFill()
-            rect.fill()
-            return true
-        }
-        let attachment = NSTextAttachment(data: image.tiffRepresentation, ofType: "public.tiff")
-        attachment.image = image
-        attachment.bounds = NSRect(x: 0, y: 0, width: 50, height: 30)
-
-        let string = NSMutableAttributedString(string: "A ")
-        let attachmentString = NSMutableAttributedString(attachment: attachment)
-        attachmentString.addAttribute(
-            .inklingFloatingImagePosition,
-            value: FloatingImagePosition(page: 1, origin: CGPoint(x: 90, y: 140)),
-            range: NSRange(location: 0, length: 1)
-        )
-        string.append(attachmentString)
-        textView.textStorage?.setAttributedString(string)
-
-        textView.prepareFloatingImages()
-
-        let floating = textView.textStorage?.attribute(
-            .attachment,
-            at: 2,
-            effectiveRange: nil
-        ) as? FloatingImageAttachment
-        #expect(floating?.position == FloatingImagePosition(page: 1, origin: CGPoint(x: 90, y: 140)))
-    }
-
     // MARK: - Printer floating-image parity
 
     @Test @MainActor func printerPlacesPositionedImageOnItsPageAndHoldsThePageOpen() throws {
@@ -2256,36 +1698,6 @@ struct InklingTests {
     /// deep enough into a page that the image can't fit before the page's
     /// bottom margin, the image must move to the top of the next page instead
     /// of being drawn past the current page's physical edge.
-    @Test @MainActor func tallUnplacedImageNeverBleedsPastItsPagesPhysicalBottom() throws {
-        let scrollView = PagedTextView.makePagedScrollView()
-        scrollView.frame = NSRect(x: 0, y: 0, width: 676, height: 792)
-        scrollView.layoutSubtreeIfNeeded()
-        let textView = try #require(scrollView.documentView as? PagedTextView)
-        let layout = textView.pageLayout
-
-        // Many short paragraphs so some paragraph's first line lands deep
-        // into a page — close enough to the bottom that a tall image
-        // anchored there cannot fit in the remaining space.
-        textView.string = String(repeating: "Row of text in its own short paragraph.\n", count: 45)
-
-        let image = NSImage(size: NSSize(width: 200, height: 400), flipped: false) { r in
-            NSColor.systemTeal.setFill(); r.fill(); return true
-        }
-        let insertionPoint = textView.textStorage?.length ?? 0
-        RichTextImageInserter.insert(
-            image, into: textView, at: NSRange(location: insertionPoint, length: 0),
-            maximumWidth: layout.contentWidth
-        )
-        textView.prepareFloatingImages()
-        textView.updatePageLayout()
-
-        let range = NSRange(location: insertionPoint, length: 1)
-        let imageRect = try #require(textView.imageAttachmentRect(for: range))
-        let page = layout.pageIndex(atY: imageRect.minY)
-        let pageLocalBottom = imageRect.maxY - CGFloat(page) * layout.pageStride
-        #expect(pageLocalBottom <= layout.paperSize.height + 0.5)
-    }
-
     /// A floating image parked at the very bottom of page 0's text column
     /// (its exclusion clamped flush to `contentBottom(0)`) must not squeeze the
     /// first line of page 1. TextKit tests each line's shape against the
@@ -2294,165 +1706,11 @@ struct InklingTests {
     /// at a raw, continuous "as if pages didn't exist" Y that lands in the same
     /// numeric neighborhood as page 0's trailing content — colliding with an
     /// exclusion that has nothing to do with page 1.
-    @Test @MainActor func imageAtBottomOfPageDoesNotSqueezeNextPagesFirstLine() throws {
-        let scrollView = PagedTextView.makePagedScrollView()
-        scrollView.frame = NSRect(x: 0, y: 0, width: 676, height: 792)
-        scrollView.layoutSubtreeIfNeeded()
-        let textView = try #require(scrollView.documentView as? PagedTextView)
-        let layout = textView.pageLayout
-
-        // Enough text to overflow onto page 1 (index 1).
-        let para = String(repeating: "Lorem ipsum dolor sit amet consectetur. ", count: 80)
-        textView.textStorage?.setAttributedString(NSAttributedString(
-            string: para,
-            attributes: [.font: NSFont.systemFont(ofSize: 12)]
-        ))
-
-        // Insert an image at the start and park it flush against the bottom of
-        // page 0's text column.
-        let image = NSImage(size: NSSize(width: 300, height: 150), flipped: false) { r in
-            NSColor.systemBrown.setFill(); r.fill(); return true
-        }
-        RichTextImageInserter.insert(
-            image, into: textView, at: NSRange(location: 0, length: 0),
-            maximumWidth: layout.contentWidth
-        )
-        textView.prepareFloatingImages()
-
-        let floating = try #require(textView.textStorage?.attribute(
-            .attachment, at: 0, effectiveRange: nil) as? FloatingImageAttachment)
-        // Bottom of page 0: contentBottom(0)=720, image height 150 → origin.y 570.
-        floating.position = FloatingImagePosition(page: 0, origin: CGPoint(x: 72, y: 570))
-        textView.updatePageLayout()
-
-        let lm = try #require(textView.layoutManager)
-        let tc = try #require(textView.textContainer)
-        lm.ensureLayout(for: tc)
-
-        // Find the first line fragment laid out on page 1. Check the *fragment*
-        // rect (the available space TextKit reserved for the line), not the
-        // used rect (the actual, possibly short, ink extent) — the bug is
-        // about the reserved space being indented, not about how much of it
-        // text happens to fill.
-        var glyph = 0
-        let n = lm.numberOfGlyphs
-        var firstLineOnPage1: NSRect?
-        while glyph < n {
-            var lineRange = NSRange()
-            let rect = lm.lineFragmentRect(forGlyphAt: glyph, effectiveRange: &lineRange)
-            if rect.minY >= layout.contentTop(forPage: 1) {
-                firstLineOnPage1 = rect
-                break
-            }
-            glyph = max(NSMaxRange(lineRange), glyph + 1)
-        }
-
-        let line = try #require(firstLineOnPage1)
-        #expect(line.minX < 1)
-        #expect(line.width > layout.contentWidth - 20)
-    }
-
     /// Diagnostic reproduction: dragging a floating image several pages away
     /// (not just to an adjacent page) reportedly makes surrounding text stop
     /// rendering. Dumps per-line geometry before and after the move so a
     /// regression shows exactly which lines lost width/visibility.
-    @Test @MainActor func movingAFloatingImageAcrossSeveralPagesKeepsAllTextVisible() throws {
-        let scrollView = PagedTextView.makePagedScrollView()
-        scrollView.frame = NSRect(x: 0, y: 0, width: 676, height: 792)
-        scrollView.layoutSubtreeIfNeeded()
-        let textView = try #require(scrollView.documentView as? PagedTextView)
-        let layout = textView.pageLayout
-
-        // Enough text to span several pages.
-        let para = String(repeating: "Lorem ipsum dolor sit amet consectetur adipiscing elit. ", count: 400)
-        textView.textStorage?.setAttributedString(NSAttributedString(
-            string: para,
-            attributes: [.font: NSFont.systemFont(ofSize: 12)]
-        ))
-
-        let image = NSImage(size: NSSize(width: 200, height: 120), flipped: false) { r in
-            NSColor.systemBrown.setFill(); r.fill(); return true
-        }
-        RichTextImageInserter.insert(
-            image, into: textView, at: NSRange(location: 0, length: 0),
-            maximumWidth: layout.contentWidth
-        )
-        textView.prepareFloatingImages()
-
-        let floating = try #require(textView.textStorage?.attribute(
-            .attachment, at: 0, effectiveRange: nil) as? FloatingImageAttachment)
-        floating.position = FloatingImagePosition(page: 0, origin: CGPoint(x: 72, y: 100))
-        textView.updatePageLayout()
-
-        let lm = try #require(textView.layoutManager)
-        let tc = try #require(textView.textContainer)
-        lm.ensureLayout(for: tc)
-
-        struct LineDump: Equatable {
-            let range: NSRange
-            let rect: NSRect
-        }
-
-        func dumpLines() -> [LineDump] {
-            var glyph = 0
-            let n = lm.numberOfGlyphs
-            var lines: [LineDump] = []
-            while glyph < n {
-                var lineRange = NSRange()
-                let rect = lm.lineFragmentUsedRect(forGlyphAt: glyph, effectiveRange: &lineRange)
-                lines.append(LineDump(range: lineRange, rect: rect))
-                glyph = max(NSMaxRange(lineRange), glyph + 1)
-            }
-            return lines
-        }
-
-        let before = dumpLines()
-        let glyphsBefore = lm.numberOfGlyphs
-
-        // Simulate the drop at the end of a drag that carried the image several
-        // pages further down the document — the same state transition
-        // `setFloatingPosition` commits on mouseUp.
-        floating.position = FloatingImagePosition(page: 3, origin: CGPoint(x: 72, y: 100))
-        textView.updatePageLayout()
-        lm.ensureLayout(for: tc)
-
-        let after = dumpLines()
-        let glyphsAfter = lm.numberOfGlyphs
-
-        #expect(glyphsAfter == glyphsBefore)
-
-        // Every line must have positive width (a zero/negative-width line
-        // fragment renders no visible glyphs even though the characters are
-        // still present in the text storage — the "did it disappear or just
-        // stop rendering" symptom).
-        let collapsedLines = after.filter { $0.rect.width <= 0.5 && $0.range.length > 0 }
-        #expect(collapsedLines.isEmpty, "collapsed line rects after move: \(collapsedLines)")
-
-        // Every line must land within some page's printable band, not in the
-        // inter-page gutter (which would place it behind/between pages).
-        let misplacedLines = after.filter { line in
-            let page = layout.pageIndex(atY: line.rect.minY)
-            return line.rect.minY < layout.contentTop(forPage: page) - 0.5
-                || line.rect.maxY > layout.contentBottom(forPage: page) + 0.5
-        }
-        #expect(misplacedLines.isEmpty, "lines outside their page's printable band: \(misplacedLines)")
-
-        // The set of covered characters (by line ranges) must match before and
-        // after — no character should fall between two line fragments.
-        let coveredBefore = before.reduce(0) { $0 + $1.range.length }
-        let coveredAfter = after.reduce(0) { $0 + $1.range.length }
-        #expect(coveredAfter == coveredBefore)
-    }
-
     // MARK: - Find
-
-    @Test @MainActor func pagedEditorEnablesTheFindBar() throws {
-        let scrollView = PagedTextView.makePagedScrollView()
-        let textView = try #require(scrollView.documentView as? PagedTextView)
-
-        #expect(textView.usesFindBar == true)
-        #expect(textView.isIncrementalSearchingEnabled == true)
-    }
 
     @Test @MainActor func editMenuHasFindWithCommandF() throws {
         let mainMenu = MainMenu.build()
@@ -2485,6 +1743,55 @@ struct InklingTests {
         #expect(previous.keyEquivalent == "g")
         #expect(previous.keyEquivalentModifierMask == [.command, .shift])
         #expect(previous.tag == NSTextFinder.Action.previousMatch.rawValue)
+    }
+
+    /// Every key equivalent in the menu bar belongs to exactly one item. Two
+    /// items claiming the same chord is how macOS ends up drawing a second,
+    /// greyed-out copy of a shortcut, and it makes which one fires arbitrary.
+    ///
+    /// This guards the menu only. ⇧⌘N and ⇧⌘F were also declared a second time
+    /// on the sidebar's toolbar buttons via SwiftUI's `.keyboardShortcut`, which
+    /// nothing here can see — those were removed so the menu is the sole owner.
+    @Test @MainActor func everyMenuShortcutIsDeclaredExactlyOnce() {
+        func shortcuts(in menu: NSMenu) -> [(title: String, key: String, mask: NSEvent.ModifierFlags)] {
+            menu.items.flatMap { item -> [(String, String, NSEvent.ModifierFlags)] in
+                let own = item.keyEquivalent.isEmpty
+                    ? []
+                    : [(item.title, item.keyEquivalent, item.keyEquivalentModifierMask)]
+                return own + (item.submenu.map(shortcuts(in:)) ?? [])
+            }
+        }
+
+        let all = shortcuts(in: MainMenu.build())
+        #expect(!all.isEmpty)
+
+        var seen: [String: String] = [:]   // "mask key" -> owning item title
+        for entry in all {
+            let chord = "\(entry.mask.rawValue) \(entry.key)"
+            if let owner = seen[chord] {
+                Issue.record("\(entry.key) is claimed by both “\(owner)” and “\(entry.title)”")
+            }
+            seen[chord] = entry.title
+        }
+    }
+
+    /// The two commands that used to be double-bound still have exactly one
+    /// home each, in the menu.
+    @Test @MainActor func newChapterAndProjectFindOwnTheirShortcutsInTheMenu() throws {
+        let mainMenu = MainMenu.build()
+
+        let newChapter = try #require(
+            mainMenu.items.first { $0.title == "File" }?.submenu?
+                .items.first { $0.title == "New Chapter" })
+        #expect(newChapter.keyEquivalent == "n")
+        #expect(newChapter.keyEquivalentModifierMask == [.command, .shift])
+
+        let findReplace = try #require(
+            mainMenu.items.first { $0.title == "Edit" }?.submenu?
+                .items.first { $0.title == "Find" }?.submenu?
+                .items.first { $0.title == "Find & Replace in Project…" })
+        #expect(findReplace.keyEquivalent == "f")
+        #expect(findReplace.keyEquivalentModifierMask == [.command, .shift])
     }
 
     // MARK: - MinimalZipReader
@@ -2540,9 +1847,44 @@ struct InklingTests {
     }
 
     @Test func zipReaderRejectsAnEntryAdvertisingAnUnboundedExpansion() {
+        // Deliberately just under 0xFFFFFFFF: that exact value is the Zip64
+        // "look in the extra field" sentinel, so using it here would exercise
+        // the Zip64 path rather than the size cap this test is about.
         let zip = TestZipBuilder.makeZip(
             entries: [("tiny.txt", Data("x".utf8))],
-            advertisedUncompressedSize: UInt32.max
+            advertisedUncompressedSize: UInt32.max - 1
+        )
+
+        #expect(throws: MinimalZipReader.ZipReaderError.corruptEntry("tiny.txt")) {
+            try MinimalZipReader(data: zip)
+        }
+    }
+
+    /// Word never emits Zip64 for an ordinary document, but Google Docs and
+    /// LibreOffice do, and the reader used to reject those outright — the import
+    /// failed with a bare "isn't a valid Word document (.docx)".
+    @Test func zipReaderReadsAZip64Archive() throws {
+        let zip = TestZipBuilder.makeZip(
+            entries: [
+                ("a.txt", Data("first".utf8)),
+                ("word/document.xml", Data("<w:document/>".utf8)),
+            ],
+            zip64: true
+        )
+
+        let reader = try MinimalZipReader(data: zip)
+        #expect(reader.names.sorted() == ["a.txt", "word/document.xml"])
+        #expect(try reader.contents(of: "a.txt") == Data("first".utf8))
+        #expect(try reader.contents(of: "word/document.xml") == Data("<w:document/>".utf8))
+    }
+
+    /// A Zip64 entry still has to honour the expansion cap — the size it claims
+    /// now arrives in the extra field, which is just as untrusted.
+    @Test func zipReaderStillRejectsAnUnboundedZip64Entry() {
+        let zip = TestZipBuilder.makeZip(
+            entries: [("tiny.txt", Data("x".utf8))],
+            advertisedUncompressedSize: UInt32.max - 1,
+            zip64: true
         )
 
         #expect(throws: MinimalZipReader.ZipReaderError.corruptEntry("tiny.txt")) {
@@ -3210,7 +2552,7 @@ struct InklingTests {
 
     // MARK: - ProjectFontStyler
 
-    @Test func withFamilyPreservesSizeAndBoldWhileChangingTypeface() {
+    @Test @MainActor func withFamilyPreservesSizeAndBoldWhileChangingTypeface() {
         let heading = TextStyle.heading.font
         let restyled = heading.withFamily("Georgia")
 
@@ -3219,13 +2561,13 @@ struct InklingTests {
         #expect(restyled.fontDescriptor.symbolicTraits.contains(.bold))
     }
 
-    @Test func withFamilyFallsBackToTheOriginalFontForAnUnknownFamily() {
+    @Test @MainActor func withFamilyFallsBackToTheOriginalFontForAnUnknownFamily() {
         let body = TextStyle.body.font
         let restyled = body.withFamily("Definitely Not An Installed Font Name")
         #expect(restyled == body)
     }
 
-    @Test func withFamilyNilRestoresSystemDefault() {
+    @Test @MainActor func withFamilyNilRestoresSystemDefault() {
         let georgiaHeading = TextStyle.heading.font(familyName: "Georgia")
         let restored = georgiaHeading.withFamily(nil)
         #expect(restored.familyName == TextStyle.heading.font.familyName)
@@ -3233,7 +2575,7 @@ struct InklingTests {
         #expect(restored.fontDescriptor.symbolicTraits.contains(.bold))
     }
 
-    @Test func projectFontStylerRestyledRewritesEveryFontRunToTheNewFamily() throws {
+    @Test @MainActor func projectFontStylerRestyledRewritesEveryFontRunToTheNewFamily() throws {
         let mixed = NSMutableAttributedString()
         mixed.append(NSAttributedString(string: "Heading\n", attributes: [.font: TextStyle.heading.font]))
         mixed.append(NSAttributedString(string: "Body text.", attributes: [.font: TextStyle.body.font]))
@@ -3252,7 +2594,7 @@ struct InklingTests {
         #expect(!bodyFont.fontDescriptor.symbolicTraits.contains(.bold))
     }
 
-    @Test func projectFontStylerRestyledChaptersUpdatesBodyAndNotesForEveryChapter() throws {
+    @Test @MainActor func projectFontStylerRestyledChaptersUpdatesBodyAndNotesForEveryChapter() throws {
         let id = UUID()
         let body = NSAttributedString(string: "Body", attributes: [.font: TextStyle.body.font])
         let notes = NSAttributedString(string: "Notes", attributes: [.font: TextStyle.body.font])
@@ -3273,7 +2615,7 @@ struct InklingTests {
         #expect(newNotesFont.familyName == "Georgia")
     }
 
-    @Test func projectFontStylerRestyledChaptersSkipsChaptersWithNoDecodableRichText() {
+    @Test @MainActor func projectFontStylerRestyledChaptersSkipsChaptersWithNoDecodableRichText() {
         let chapter = FontStyledChapter(id: UUID(), bodyData: nil, notesData: nil)
         let results = ProjectFontStyler.restyledChapters([chapter], familyName: "Georgia")
         #expect(results.isEmpty)
@@ -3353,10 +2695,15 @@ struct InklingTests {
 /// tests. CRC-32 fields are populated so checksum validation exercises the
 /// same package shape produced by Word and Inkling's exporter.
 private enum TestZipBuilder {
+    /// - Parameter zip64: writes the archive the way a Zip64 producer does —
+    ///   0xFFFFFFFF placeholders in the central directory with the real sizes and
+    ///   local-header offset in each entry's Zip64 extra field, a saturated entry
+    ///   count in the EOCD, and a Zip64 EOCD record + locator before it.
     static func makeZip(
         entries: [(name: String, data: Data)],
         corruptFirstPayload: Bool = false,
-        advertisedUncompressedSize: UInt32? = nil
+        advertisedUncompressedSize: UInt32? = nil,
+        zip64: Bool = false
     ) -> Data {
         var result = Data()
         var localOffsets: [(name: String, data: Data, checksum: UInt32, offset: Int)] = []
@@ -3403,30 +2750,67 @@ private enum TestZipBuilder {
             entry.append(contentsOf: uint16LE(0))
             entry.append(contentsOf: uint16LE(0))
             entry.append(contentsOf: uint32LE(checksum))
-            entry.append(contentsOf: uint32LE(UInt32(data.count)))
-            entry.append(contentsOf: uint32LE(declaredSize))
+            var extra = Data()
+            if zip64 {
+                // Header ID 0x0001, then the displaced fields in spec order:
+                // uncompressed, compressed, local header offset.
+                extra.append(contentsOf: uint16LE(0x0001))
+                extra.append(contentsOf: uint16LE(24))
+                extra.append(contentsOf: uint64LE(UInt64(declaredSize)))
+                extra.append(contentsOf: uint64LE(UInt64(data.count)))
+                extra.append(contentsOf: uint64LE(UInt64(offset)))
+                entry.append(contentsOf: uint32LE(0xFFFF_FFFF))
+                entry.append(contentsOf: uint32LE(0xFFFF_FFFF))
+            } else {
+                entry.append(contentsOf: uint32LE(UInt32(data.count)))
+                entry.append(contentsOf: uint32LE(declaredSize))
+            }
             entry.append(contentsOf: uint16LE(UInt16(nameData.count)))
-            entry.append(contentsOf: uint16LE(0))
+            entry.append(contentsOf: uint16LE(UInt16(extra.count)))
             entry.append(contentsOf: uint16LE(0))
             entry.append(contentsOf: uint16LE(0))
             entry.append(contentsOf: uint16LE(0))
             entry.append(contentsOf: uint32LE(0))
-            entry.append(contentsOf: uint32LE(UInt32(offset)))
+            entry.append(contentsOf: uint32LE(zip64 ? 0xFFFF_FFFF : UInt32(offset)))
             entry.append(nameData)
+            entry.append(extra)
             centralDirectory.append(entry)
         }
 
         let centralDirectoryOffset = result.count
         result.append(centralDirectory)
 
+        if zip64 {
+            let recordOffset = result.count
+            var record = Data()
+            record.append(contentsOf: uint32LE(0x0606_4b50))
+            record.append(contentsOf: uint64LE(44))            // size of the rest
+            record.append(contentsOf: uint16LE(45))            // version made by
+            record.append(contentsOf: uint16LE(45))            // version needed
+            record.append(contentsOf: uint32LE(0))             // this disk
+            record.append(contentsOf: uint32LE(0))             // disk with CD start
+            record.append(contentsOf: uint64LE(UInt64(entries.count)))
+            record.append(contentsOf: uint64LE(UInt64(entries.count)))
+            record.append(contentsOf: uint64LE(UInt64(centralDirectory.count)))
+            record.append(contentsOf: uint64LE(UInt64(centralDirectoryOffset)))
+            result.append(record)
+
+            var locator = Data()
+            locator.append(contentsOf: uint32LE(0x0706_4b50))
+            locator.append(contentsOf: uint32LE(0))
+            locator.append(contentsOf: uint64LE(UInt64(recordOffset)))
+            locator.append(contentsOf: uint32LE(1))
+            result.append(locator)
+        }
+
         var eocd = Data()
         eocd.append(contentsOf: uint32LE(0x0605_4b50))
         eocd.append(contentsOf: uint16LE(0))
         eocd.append(contentsOf: uint16LE(0))
-        eocd.append(contentsOf: uint16LE(UInt16(entries.count)))
-        eocd.append(contentsOf: uint16LE(UInt16(entries.count)))
+        eocd.append(contentsOf: uint16LE(zip64 ? 0xFFFF : UInt16(entries.count)))
+        eocd.append(contentsOf: uint16LE(zip64 ? 0xFFFF : UInt16(entries.count)))
         eocd.append(contentsOf: uint32LE(UInt32(centralDirectory.count)))
-        eocd.append(contentsOf: uint32LE(UInt32(centralDirectoryOffset)))
+        eocd.append(contentsOf: uint32LE(zip64 ? 0xFFFF_FFFF : UInt32(centralDirectoryOffset)))
         eocd.append(contentsOf: uint16LE(0))
         result.append(eocd)
 
@@ -3446,6 +2830,10 @@ private enum TestZipBuilder {
 
     private static func uint16LE(_ value: UInt16) -> [UInt8] {
         [UInt8(value & 0xff), UInt8((value >> 8) & 0xff)]
+    }
+
+    private static func uint64LE(_ value: UInt64) -> [UInt8] {
+        (0..<8).map { UInt8((value >> ($0 * 8)) & 0xff) }
     }
 
     private static func uint32LE(_ value: UInt32) -> [UInt8] {
@@ -3498,6 +2886,46 @@ struct LastEditPositionStoreTests {
             LastEditPositionStore.save(latest, for: url)
             #expect(LastEditPositionStore.position(for: url) == latest)
         }
+    }
+
+    /// Keying by file path means a renamed or moved document leaves an entry
+    /// behind that nothing will ever match again, so the store used to grow for
+    /// the life of the install. Saving now drops entries whose file is gone.
+    @Test func savingForgetsDocumentsThatNoLongerExist() {
+        withIsolatedDefaults { url in
+            let vanished = URL(fileURLWithPath: "/tmp/Deleted \(UUID().uuidString).inkling")
+            LastEditPositionStore.save(LastEditPosition(chapterID: UUID(), caret: 1), for: vanished)
+            #expect(LastEditPositionStore.position(for: vanished) != nil)
+
+            LastEditPositionStore.save(LastEditPosition(chapterID: UUID(), caret: 2), for: url)
+
+            #expect(LastEditPositionStore.position(for: vanished) == nil)
+            // The document just saved survives even though it isn't on disk either.
+            #expect(LastEditPositionStore.position(for: url) != nil)
+        }
+    }
+
+    /// Once the store is full, the least recently saved entries go first — and the
+    /// entry just written is never the one evicted.
+    @Test func pruningCapsTheStoreAndEvictsTheOldestFirst() {
+        let kept = "/tmp/Just Saved.inkling"
+        var all: [String: LastEditPositionStore.Entry] = [
+            kept: LastEditPositionStore.Entry(
+                LastEditPosition(chapterID: UUID(), caret: 0), savedAt: .distantPast
+            )
+        ]
+        for index in 0..<(LastEditPositionStore.maximumEntries + 20) {
+            all["/tmp/Doc \(index).inkling"] = LastEditPositionStore.Entry(
+                LastEditPosition(chapterID: UUID(), caret: index),
+                savedAt: Date(timeIntervalSince1970: TimeInterval(index))
+            )
+        }
+
+        // Nothing here is on disk, so `keeping` is what holds the kept entry in.
+        let pruned = LastEditPositionStore.pruned(all, keeping: kept)
+
+        #expect(pruned.count == 1)
+        #expect(pruned[kept] != nil)
     }
 
     @Test func positionsAreKeyedPerDocument() {

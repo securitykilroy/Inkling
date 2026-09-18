@@ -3,7 +3,7 @@
 //  Inkling
 //
 //  An editor-only attachment. Its tiny inline bounds act as a stable text
-//  anchor while PagedTextView draws the full image and wraps text around it.
+//  anchor while PageStackView draws the full image and wraps text around it.
 //
 
 import AppKit

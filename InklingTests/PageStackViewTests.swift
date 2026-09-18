@@ -911,6 +911,203 @@ struct PageStackViewTests {
         #expect(floating.displaySize == NSSize(width: 200, height: 150))
     }
 
+    /// A paste from Word (and from older Inkling files) arrives as a *cell*-backed
+    /// attachment with zero `bounds`, so the display size has to come off the cell.
+    /// Ported from the retired single-container editor's suite, which was the only
+    /// place this path was covered.
+    @Test func aCellBackedPastedImageBecomesAMovableFloatingImage() throws {
+        let stack = PageStackView()
+        let image = NSImage(size: NSSize(width: 180, height: 120), flipped: false) { rect in
+            NSColor.systemBlue.setFill()
+            rect.fill()
+            return true
+        }
+        let attachment = NSTextAttachment()
+        attachment.attachmentCell = NSTextAttachmentCell(imageCell: image)
+        attachment.bounds = .zero
+
+        let body = NSMutableAttributedString(string: "Words before the pasted image ")
+        let imageLocation = body.length
+        body.append(NSAttributedString(attachment: attachment))
+        body.append(NSAttributedString(string: " words after the pasted image."))
+        stack.setAttributedString(body)
+
+        stack.prepareFloatingImages()
+
+        let floating = try #require(stack.floatingAttachment(at: imageLocation))
+        #expect(floating.displaySize == NSSize(width: 180, height: 120))
+
+        // It draws as a floating overlay on its page, and hit-tests there — which
+        // is what makes it selectable and draggable rather than an inline glyph.
+        let page = try #require(stack.pageView(forCharacterIndex: imageLocation))
+        let item = try #require(page.floatingImages.first { $0.location == imageLocation })
+        let rect = page.viewRect(forFloating: item.rect)
+        #expect(page.floatingImage(at: NSPoint(x: rect.midX, y: rect.midY))?.location == imageLocation)
+    }
+
+    /// Regression: only `.editedCharacters` scheduled a repagination, so bold, the
+    /// Style menu, and the Callout menu — all attribute-only — grew the text without
+    /// growing the page stack. The overflow glyphs then had no container and simply
+    /// stopped being drawn until the next keystroke. Measured before the fix: 1112 of
+    /// 2586 glyphs laid out.
+    @Test func restylingTextToALargerFontRepaginates() async {
+        let stack = PageStackView()
+        let body = (1...44)
+            .map { "Paragraph \($0). The quick brown fox jumps over the lazy dog." }
+            .joined(separator: "\n")
+        stack.setAttributedString(
+            NSAttributedString(string: body, attributes: [.font: NSFont.systemFont(ofSize: 12)])
+        )
+        await Self.settle()
+        let pagesBefore = stack.pageCount
+
+        stack.storage.beginEditing()
+        stack.storage.addAttribute(
+            .font,
+            value: NSFont.boldSystemFont(ofSize: 28),
+            range: NSRange(location: 0, length: stack.storage.length)
+        )
+        stack.storage.endEditing()
+        await Self.settle()
+
+        #expect(stack.pageCount > pagesBefore)
+        let last = try! #require(stack.pageViews.last?.textContainer)
+        stack.sharedLayoutManager.ensureLayout(for: last)
+        let laidOut = NSMaxRange(stack.sharedLayoutManager.glyphRange(for: last))
+        #expect(laidOut == stack.sharedLayoutManager.numberOfGlyphs,
+                "only \(laidOut) of \(stack.sharedLayoutManager.numberOfGlyphs) glyphs have a page")
+    }
+
+    /// Regression: `insertSidebar` wrote straight into the storage, skipping the
+    /// `shouldChangeText` call that registers the undo — so ⌘Z afterwards undid
+    /// whatever had been typed *before* the sidebar and left the box in place.
+    @Test func insertingASidebarIsUndoable() async {
+        let stack = PageStackView()
+        stack.setAttributedString(
+            NSAttributedString(string: "One two three.", attributes: [.font: NSFont.systemFont(ofSize: 12)])
+        )
+        stack.pageViews[0].setSelectedRange(NSRange(location: 4, length: 0))
+        let lengthBefore = stack.storage.length
+
+        stack.insertSidebar()
+        #expect(stack.storage.length == lengthBefore + 1)
+        #expect(stack.sidebarViews.count == 1)
+
+        #expect(stack.sharedUndoManager.canUndo)
+        stack.sharedUndoManager.undo()
+        #expect(stack.storage.length == lengthBefore)
+
+        // The box's child editor has to go with its anchor, which only the floating
+        // pass tears down — so the undo must reach that pass, not just repaginate.
+        await Self.settle()
+        #expect(stack.sidebarViews.isEmpty)
+    }
+
+    /// Word puts a drawing on a line of its own, so a paste from Word arrives as
+    /// "text\n<image>\ntext". Every image here draws as an overlay and leaves only
+    /// a 0.1pt anchor behind, so that line is an *empty* one — the image floats
+    /// beside nothing. Ported from the retired single-container editor, which
+    /// collapsed those two newlines into spaces; the per-page editor never did.
+    @Test func animageOnItsOwnLineFromAWordPasteRejoinsTheTextFlow() {
+        let stack = PageStackView()
+        let body = NSMutableAttributedString(string: "and\n")
+        body.append(NSAttributedString(attachment: Self.cellBackedAttachment()))
+        body.append(NSAttributedString(string: "\nmissing"))
+        stack.setAttributedString(body)
+
+        stack.prepareFloatingImages()
+
+        #expect(stack.storage.string == "and \u{fffc} missing")
+    }
+
+    /// The collapse is deliberately narrow: an image that is merely at the start
+    /// of a line, with text running on after it, keeps the paragraph break before
+    /// it. Only a line holding nothing but the image is rejoined.
+    @Test func animageThatStartsALineOfTextKeepsItsParagraphBreak() {
+        let stack = PageStackView()
+        let body = NSMutableAttributedString(string: "and\n")
+        body.append(NSAttributedString(attachment: Self.cellBackedAttachment()))
+        body.append(NSAttributedString(string: " still here"))
+        stack.setAttributedString(body)
+
+        stack.prepareFloatingImages()
+
+        #expect(stack.storage.string == "and\n\u{fffc} still here")
+    }
+
+    /// A deliberately placed sidebar is not an image and must never be pulled
+    /// out of the line the author put it on.
+    @Test func aSidebarAloneOnItsLineIsNotCollapsed() {
+        let stack = PageStackView()
+        let sidebar = SidebarAttachment(
+            contentData: nil,
+            width: SidebarStyle.defaultWidth,
+            position: FloatingImagePosition(page: 0, origin: CGPoint(x: 100, y: 100)),
+            contentHeight: SidebarStyle.minContentHeight
+        )
+        let body = NSMutableAttributedString(string: "and\n")
+        body.append(NSAttributedString(attachment: sidebar))
+        body.append(NSAttributedString(string: "\nmissing"))
+        stack.setAttributedString(body)
+
+        stack.prepareFloatingImages()
+
+        #expect(stack.storage.string == "and\n\u{fffc}\nmissing")
+    }
+
+    /// The collapse has to happen before the chapter is encoded, or the rejoined
+    /// line would be a display-only illusion that reverts on the next open.
+    @Test func theRejoinedLineIsWhatGetsSaved() throws {
+        let stack = PageStackView()
+        let body = NSMutableAttributedString(string: "and\n")
+        body.append(NSAttributedString(attachment: Self.cellBackedAttachment()))
+        body.append(NSAttributedString(string: "\nmissing"))
+        stack.setAttributedString(body)
+
+        stack.prepareFloatingImages()
+
+        let encoded = try #require(RichTextCodec.encode(stack.storage))
+        let reopened = try #require(RichTextCodec.decode(encoded))
+        #expect(reopened.string == "and \u{fffc} missing")
+    }
+
+    /// Opening a chapter runs this over every stored image, so the collapse can
+    /// rewrite text the author never touched in this session. That must not post
+    /// a text-change notification: the editor's coordinator writes the binding
+    /// back on one, and `autosavesInPlace` is false, so a document would be
+    /// marked edited — and prompt to save on close — purely for having been
+    /// opened.
+    @Test func collapsingOnOpenDoesNotReportAnEdit() {
+        let stack = PageStackView()
+        let spy = DelegateSpy()
+        stack.pageDelegate = spy
+        let body = NSMutableAttributedString(string: "and\n")
+        body.append(NSAttributedString(attachment: Self.cellBackedAttachment()))
+        body.append(NSAttributedString(string: "\nmissing"))
+        stack.setAttributedString(body)
+
+        stack.prepareFloatingImages()
+
+        #expect(stack.storage.string == "and \u{fffc} missing")
+        #expect(spy.changes == 0)
+    }
+
+    /// A cell-backed attachment with zero bounds — what a Word paste and older
+    /// Inkling files both produce.
+    private static func cellBackedAttachment(
+        size: NSSize = NSSize(width: 120, height: 80)
+    ) -> NSTextAttachment {
+        let image = NSImage(size: size, flipped: false) { rect in
+            NSColor.systemBlue.setFill()
+            rect.fill()
+            return true
+        }
+        let attachment = NSTextAttachment()
+        attachment.attachmentCell = NSTextAttachmentCell(imageCell: image)
+        attachment.bounds = .zero
+        return attachment
+    }
+
     private final class DelegateSpy: NSObject, NSTextViewDelegate {
         var changes = 0
         func textDidChange(_ notification: Notification) { changes += 1 }

@@ -5,7 +5,7 @@
 //  Pure helpers for computing writing statistics. Word counting uses the
 //  platform's linguistic word boundaries (so punctuation and the bullet
 //  marker don't get miscounted). Page counts are the real laid-out page
-//  count from the editor (see `PagedTextView.pageCount(forRTF:)`), not a
+//  count from the editor (see `PageStackView.pageCount(forRTF:)`), not a
 //  word-based estimate, so the sidebar total matches what you see on screen.
 //
 

@@ -5,10 +5,11 @@
 //  MILESTONE 0 PROTOTYPE — the go/no-go gate for the per-page-container editor
 //  rearchitecture (docs/per-page-container-editor-plan.md).
 //
-//  The shipping editor (`PagedTextView`) lays a whole chapter into ONE infinitely
-//  tall text container and fakes page breaks with a layout delegate that nudges
-//  each line's Y. That forces floating-image exclusion paths to be expressed in a
-//  pre-pagination coordinate space, which is the root of the top-of-page image
+//  The editor this replaced (`PagedTextView`, now deleted — see
+//  `PagedEditorLayout.swift`) laid a whole chapter into ONE infinitely tall text
+//  container and faked page breaks with a layout delegate that nudged each
+//  line's Y. That forced floating-image exclusion paths to be expressed in a
+//  pre-pagination coordinate space, which was the root of the top-of-page image
 //  bugs. The printer has none of those bugs because it uses one container per
 //  page (`ManuscriptPrintView.layOutPages`).
 //
@@ -50,8 +51,8 @@ extension PagedEditorLayout {
 }
 
 /// Which corner of an image is being dragged to resize it. A near-copy of the
-/// handle enum nested privately inside `PagedTextView`; the two converge when
-/// the shipping editor is retired (plan §8 milestone 5).
+/// handle enum that used to be nested privately inside `PagedTextView`, which
+/// has since been deleted.
 enum PageResizeHandle: CaseIterable {
     case topLeft, topRight, bottomLeft, bottomRight
 
@@ -325,9 +326,10 @@ final class PageTextView: NSTextView {
     /// continuing the heading, matching how word processors treat headings as
     /// one-line styles. The typeface is kept; only weight and size change.
     ///
-    /// `PagedTextView` has carried this since headings were added, but the
-    /// per-page editor that replaced it as the chapter body did not, so a
-    /// Title at the top of a chapter ran on into everything typed after it.
+    /// The single-container editor carried this from the moment headings were
+    /// added, but the per-page editor that replaced it as the chapter body did
+    /// not, so a Title at the top of a chapter ran on into everything typed
+    /// after it.
     override func insertNewline(_ sender: Any?) {
         super.insertNewline(sender)
         guard let font = typingAttributes[.font] as? NSFont,
@@ -354,7 +356,7 @@ final class PageTextView: NSTextView {
 final class PageStackView: NSView, NSTextStorageDelegate {
 
     /// Breathing room between the paper edge and the canvas edge, so a page
-    /// doesn't sit flush against the scroll view. Matches `PagedTextView`.
+    /// doesn't sit flush against the scroll view.
     static let canvasPadding: CGFloat = 16
 
     let pageLayout: PagedEditorLayout
@@ -363,8 +365,7 @@ final class PageStackView: NSView, NSTextStorageDelegate {
 
     private(set) var pageViews: [PageTextView] = []
 
-    /// Reports a changed page count (for the editor footer), mirroring
-    /// `PagedTextView.pageCountDidChange`.
+    /// Reports a changed page count, for the editor footer.
     var pageCountDidChange: ((Int) -> Void)?
 
     /// Delegate handed to every page view, including pages added later by
@@ -441,12 +442,50 @@ final class PageStackView: NSView, NSTextStorageDelegate {
         range editedRange: NSRange,
         changeInLength delta: Int
     ) {
-        guard editedMask.contains(.editedCharacters) else { return }
-        if hasAnchorRelativeImage(atOrAfter: editedRange.location) {
+        // Attribute-only edits repaginate too. Bold, the Style menu, and the
+        // Callout menu all change line heights without touching a single
+        // character, and nothing else in this class grows the page stack — so
+        // restyling a paragraph used to push text off the end of the last
+        // container, where it simply stopped being drawn. Measured: a two-page
+        // chapter restyled to 28pt bold laid out 1112 of its 2586 glyphs and
+        // silently lost the rest until the next keystroke repaginated.
+        //
+        // The cost is bounded: both schedulers coalesce to one rebuild per
+        // run-loop pass, and neither writes back to the storage, so the extra
+        // `.editedAttributes` callbacks (attribute fixing runs after every
+        // character edit) can't feed back into another rebuild.
+        guard editedMask.contains(.editedCharacters)
+                || editedMask.contains(.editedAttributes)
+        else { return }
+        if needsFloatingRebuild(afterEditAt: editedRange.location) {
             scheduleFloatingRebuild()
         } else {
             schedulePagination()
         }
+    }
+
+    /// Whether this edit needs the full floating pass rather than plain
+    /// repagination: an image measured from its anchor has to be re-placed when
+    /// the text around it moves, and a sidebar that appeared or disappeared
+    /// needs its child editor created or torn down.
+    private func needsFloatingRebuild(afterEditAt location: Int) -> Bool {
+        hasAnchorRelativeImage(atOrAfter: location) || sidebarAnchorsDiffer()
+    }
+
+    /// True when the sidebar anchors in the storage no longer match the child
+    /// views hosting them. Only `rebuildFloatingImageLayout` creates and removes
+    /// those views, so an inserted sidebar — or an undo that takes one back out
+    /// — has to route through it or the box is left orphaned on the page.
+    private func sidebarAnchorsDiffer() -> Bool {
+        var present = Set<ObjectIdentifier>()
+        storage.enumerateAttribute(
+            .attachment, in: NSRange(location: 0, length: storage.length)
+        ) { value, _, _ in
+            if let sidebar = value as? SidebarAttachment {
+                present.insert(ObjectIdentifier(sidebar))
+            }
+        }
+        return present != Set(sidebarViews.keys)
     }
 
     private func hasAnchorRelativeImage(atOrAfter location: Int) -> Bool {
@@ -552,7 +591,7 @@ final class PageStackView: NSView, NSTextStorageDelegate {
     var sidebarResizeSession: SidebarDragSession?
 
     /// Caret pinned at this fraction of the viewport height when typewriter
-    /// scrolling is on. Matches `PagedTextView`.
+    /// scrolling is on.
     static let typewriterAnchorFraction: CGFloat = 0.42
 
     var isTypewriterScrollingEnabled = false {
@@ -696,14 +735,15 @@ final class PageStackView: NSView, NSTextStorageDelegate {
     // MARK: - Canvas
 
     /// Builds the scrolling, magnifying canvas that hosts the page stack —
-    /// the per-page-container counterpart to `PagedTextView.makePagedScrollView`.
+    /// the scrolling, magnifying canvas the page stack lives in.
     /// The number of pages `data` (RTF/RTFD) occupies, laid out off-screen by
     /// the *same* code the on-screen editor uses.
     ///
-    /// This deliberately goes through `PageStackView` rather than the retired
-    /// single-container `PagedTextView`. The two have separate floating-image
-    /// placement logic, so counting with the other one let the sidebar disagree
-    /// with the editor — a real chapter measured 22 pages here and 23 on screen.
+    /// This deliberately goes through `PageStackView` — the same class the
+    /// on-screen editor uses. Counting with the retired single-container editor,
+    /// which had its own floating-image placement logic, let the sidebar
+    /// disagree with the editor: a real chapter measured 22 pages one way and 23
+    /// on screen.
     /// An empty or undecodable chapter is one page, matching the editor footer.
     static func pageCount(forRTF data: Data?, pageLayout: PagedEditorLayout = .letter) -> Int {
         let stack = PageStackView(pageLayout: pageLayout)
@@ -900,7 +940,7 @@ extension PageStackView {
 
     /// Converts plain image attachments into `FloatingImageAttachment`s — a tiny
     /// inline anchor in the text plus an overlay drawn by the page view — then
-    /// lays them out. Mirrors `PagedTextView.prepareFloatingImages`.
+    /// lays them out.
     func prepareFloatingImages() {
         guard storage.length > 0 else { return }
 
@@ -933,12 +973,48 @@ extension PageStackView {
             replacements.append((range, floating))
         }
 
+        // Descending, so an earlier location can't be invalidated by work done
+        // at a later one. (`collapseImageOnlyLineBreaks` is length-preserving,
+        // but the ordering documents the intent and survives that changing.)
         for (range, attachment) in replacements.sorted(by: { $0.0.location > $1.0.location }) {
             storage.addAttribute(.attachment, value: attachment, range: range)
+            collapseImageOnlyLineBreaks(around: range.location)
         }
         if !replacements.isEmpty {
             rebuildFloatingImageLayout()
         }
+    }
+
+    /// Pulls an image that landed alone on its own line back into the
+    /// surrounding text flow, by turning the newline on each side of it into a
+    /// space.
+    ///
+    /// Word puts a drawing on a line of its own, so that is what a paste from
+    /// Word produces. Here every image is drawn as an overlay and leaves only a
+    /// 0.1pt anchor in the character stream, so an image-only line is an
+    /// *empty* line: the image floats beside nothing and the text that
+    /// introduced it sits in a separate paragraph above, with a blank gap where
+    /// the image used to be inline. Rejoining the line puts the anchor back in
+    /// the sentence that mentions it, which is the position every other part of
+    /// the floating layout measures from.
+    ///
+    /// Both replacements are one character for one, so no location shifts and
+    /// nothing else in this pass needs re-indexing. Only attachments being
+    /// converted from plain to floating reach here — pasted, dropped, imported,
+    /// or just-decoded — so an image the author has since positioned is never
+    /// second-guessed.
+    private func collapseImageOnlyLineBreaks(around location: Int) {
+        guard location > 0, location + 1 < storage.length else { return }
+        let string = storage.string as NSString
+        guard string.substring(with: NSRange(location: location - 1, length: 1)) == "\n",
+              string.substring(with: NSRange(location: location + 1, length: 1)) == "\n"
+        else { return }
+
+        // One edit, so the layout manager never sees the half-collapsed string.
+        storage.beginEditing()
+        storage.replaceCharacters(in: NSRange(location: location + 1, length: 1), with: " ")
+        storage.replaceCharacters(in: NSRange(location: location - 1, length: 1), with: " ")
+        storage.endEditing()
     }
 
     /// Coalesces a floating-layout rebuild to the next run-loop pass, so a burst
@@ -1729,7 +1805,13 @@ extension PageStackView {
     /// enters it for typing.
     func insertSidebar() {
         let width = SidebarStyle.defaultWidth
-        let caret = focusedPageView?.selectedRange() ?? NSRange(location: 0, length: 0)
+        // The insert has to go through the page view that owns the caret, not
+        // straight into the storage: `shouldChangeText` is what registers the
+        // undo action, so bypassing it left Insert Sidebar unundoable — ⌘Z
+        // afterwards undid whatever the author had typed *before* it and left
+        // the box sitting there.
+        guard let target = focusedPageView ?? pageViews.first else { return }
+        let caret = target.selectedRange()
         let sidebar = SidebarAttachment(
             contentData: nil,
             width: width,
@@ -1741,9 +1823,12 @@ extension PageStackView {
             [.font: TextStyle.body.font, .foregroundColor: NSColor.black],
             range: NSRange(location: 0, length: attributed.length)
         )
+        guard target.shouldChangeText(in: caret, replacementString: attributed.string)
+        else { return }
         storage.replaceCharacters(in: caret, with: attributed)
+        target.didChangeText()
+        target.undoManager?.setActionName("Insert Sidebar")
         rebuildFloatingImageLayout()
-        pageViews.first?.didChangeText()
         enterSidebar(ObjectIdentifier(sidebar))
     }
 

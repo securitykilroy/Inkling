@@ -210,11 +210,16 @@ enum WordDocumentExporter {
             anchors.append((id, position.page))
         }
 
+        // Moving one anchor repaginates everything after it, so the next anchor
+        // has to be measured against the updated text — but only *moving* an
+        // anchor invalidates the layout. Most images are already on the page
+        // they belong to, so laying the chapter out lazily and only after a
+        // real move turns the common case from one full pagination per image
+        // into one for the whole chapter.
+        var cachedStack: PageStackView?
         for anchor in anchors {
-            let stack = PageStackView()
-            stack.setAttributedString(mutable)
-            stack.prepareFloatingImages()
-            stack.prepareSidebars()
+            let stack = cachedStack ?? Self.laidOutStack(for: mutable)
+            cachedStack = stack
             guard anchor.page >= 0, anchor.page < stack.pageCount else { continue }
 
             var source = NSRange(location: NSNotFound, length: 0)
@@ -244,6 +249,8 @@ enum WordDocumentExporter {
             if source.location < destination { destination -= source.length }
             destination = min(max(0, destination), mutable.length)
             mutable.insert(token, at: destination)
+            // `mutable` has moved on; the next anchor needs a fresh layout.
+            cachedStack = nil
         }
 
         mutable.removeAttribute(
@@ -251,6 +258,17 @@ enum WordDocumentExporter {
             range: NSRange(location: 0, length: mutable.length)
         )
         return mutable
+    }
+
+    /// A page stack holding `text`, paginated and with its floating images and
+    /// sidebars placed — the same layout the editor shows, which is what makes
+    /// the exported anchor land on the page the author sees.
+    private static func laidOutStack(for text: NSAttributedString) -> PageStackView {
+        let stack = PageStackView()
+        stack.setAttributedString(text)
+        stack.prepareFloatingImages()
+        stack.prepareSidebars()
+        return stack
     }
 
     private static func attributeIsPresent(_ key: NSAttributedString.Key, in attributed: NSAttributedString, at location: Int) -> Bool {

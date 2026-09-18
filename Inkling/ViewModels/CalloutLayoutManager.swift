@@ -3,7 +3,7 @@
 //  Inkling
 //
 //  Draws inline callout boxes behind the text. Used by both the on-screen editor
-//  (PagedTextView) and the printer (ManuscriptPrintView) so a callout looks
+//  (PageStackView) and the printer (ManuscriptPrintView) so a callout looks
 //  identical on screen and on paper. The box, tint, and label are chrome — the
 //  callout's text is ordinary body text tagged with `.inklingCallout`.
 //

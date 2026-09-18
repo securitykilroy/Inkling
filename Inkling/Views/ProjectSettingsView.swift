@@ -65,6 +65,11 @@ struct ProjectSettingsView: View {
         }
         .padding(20)
         .frame(width: 440)
+        // The Font panel is a free-floating window, so it outlives this sheet.
+        // Left open it kept pointing at a controller that SwiftUI had already
+        // released along with the sheet's state — the panel stayed on screen
+        // and silently did nothing when the author picked a font.
+        .onDisappear { fontPanelController.end() }
     }
 
     private func chooseFont() {
@@ -155,5 +160,18 @@ final class FontPanelController: NSObject {
         let newFont = sender.convert(currentFont)
         currentFont = newFont
         onChange?(newFont)
+    }
+
+    /// Ends the panel session: close the panel and give up the shared target
+    /// slot, but only if it is still ours — another window's session may have
+    /// claimed it in the meantime, and stealing it back would break that one.
+    func end() {
+        onChange = nil
+        if NSFontManager.shared.target === self {
+            NSFontManager.shared.target = nil
+        }
+        if NSFontPanel.shared.isVisible {
+            NSFontPanel.shared.orderOut(nil)
+        }
     }
 }

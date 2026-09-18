@@ -127,7 +127,7 @@ final class RichTextController: ObservableObject {
 
     func insertImage(_ image: NSImage) {
         guard let textView else { return }
-        let maximumWidth = (textView as? PagedTextView)?.pageLayout.contentWidth
+        let maximumWidth = (textView as? PageTextView)?.pageStack?.pageLayout.contentWidth
             ?? textView.textContainer?.containerSize.width
             ?? image.size.width
         RichTextImageInserter.insert(
@@ -312,7 +312,10 @@ final class RichTextController: ObservableObject {
         CalloutStyling.apply(kind, to: storage, range: range)
         storage.endEditing()
         textView.didChangeText()
-        (textView as? PagedTextView)?.updatePageLayout()
+        // No explicit relayout: a callout changes attributes only, and
+        // `PageStackView` now repaginates on `.editedAttributes` as well as on
+        // `.editedCharacters`, so the reserved box padding grows the page stack
+        // on its own.
         textView.needsDisplay = true
         selectionDidChange()
     }
@@ -328,7 +331,6 @@ final class RichTextController: ObservableObject {
         CalloutStyling.remove(from: storage, range: range)
         storage.endEditing()
         textView.didChangeText()
-        (textView as? PagedTextView)?.updatePageLayout()
         textView.needsDisplay = true
         selectionDidChange()
     }
@@ -337,11 +339,7 @@ final class RichTextController: ObservableObject {
 
     /// Inserts a floating margin sidebar at the caret and enters it for typing.
     func insertSidebar() {
-        if let page = textView as? PageTextView {
-            page.pageStack?.insertSidebar()
-            return
-        }
-        (textView as? PagedTextView)?.insertSidebar()
+        (textView as? PageTextView)?.pageStack?.insertSidebar()
     }
 
     // MARK: - Bullet list

@@ -283,7 +283,19 @@ enum RichTextCodec {
                 ?? attachment.bounds.size
             guard size.width > 0, size.height > 0
             else { return }
+            // Only the editor and the printer build `FloatingImageAttachment`s.
+            // Everything that rewrites a chapter offline — project-wide Replace
+            // All, a project font change — works on the plain attributed string
+            // `decode` produced, where the placement lives in the in-memory
+            // attribute instead. Without this fallback that second round trip
+            // dropped `page`/`originX`/`originY`, so every image the author had
+            // dragged snapped back to its paragraph anchor.
             let position = (attachment as? FloatingImageAttachment)?.position
+                ?? attributedString.attribute(
+                    .inklingFloatingImagePosition,
+                    at: range.location,
+                    effectiveRange: nil
+                ) as? FloatingImagePosition
             let importedPlacementHint = (attachment as? FloatingImageAttachment)?.importedPlacementHint
                 ?? attributedString.attribute(
                     .inklingImportedImagePlacementHint,

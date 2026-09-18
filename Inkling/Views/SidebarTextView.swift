@@ -9,7 +9,7 @@
 //  reserves the header band by offsetting its text container origin.
 //
 //  Select-then-edit: while "not entered" it declines hit-testing so clicks fall
-//  through to PagedTextView, which manages selection/drag/resize. Double-clicking
+//  through to PageStackView, which manages selection/drag/resize. Double-clicking
 //  the box enters it (first responder + editable); clicking away exits.
 //
 
@@ -17,7 +17,7 @@ import AppKit
 
 final class SidebarTextView: NSTextView {
 
-    /// Called after the text changes, so PagedTextView can push the new content
+    /// Called after the text changes, so PageStackView can push the new content
     /// back into the anchor attachment, re-measure the box, and dirty the doc.
     var onEdited: (() -> Void)?
     /// Called when the box stops being edited (lost first responder), so the

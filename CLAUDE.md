@@ -8,23 +8,42 @@ Inkling is a native macOS app for writing and organizing multi-chapter projects 
 
 ## Build / Test / Run
 
-The project is saved in Xcode 27's project format (`objectVersion = 110`), so it **must** be built with **Xcode-beta** (`/Applications/Xcode-beta.app`), not the stable Xcode that the default `xcodebuild` resolves to. Always prefix `xcodebuild` with `DEVELOPER_DIR`.
+The project is saved in Xcode 27's project format (`objectVersion = 110`), which the released **Xcode 27** (`/Applications/Xcode.app`) reads, so a plain `xcodebuild` works. This used to require Xcode-beta and a `DEVELOPER_DIR` prefix; that is no longer true and the prefix now fails outright with `xcrun: error: missing DEVELOPER_DIR path`.
 
 Headless build:
 ```sh
-DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer \
-  xcodebuild -project Inkling.xcodeproj -scheme Inkling \
+xcodebuild -project Inkling.xcodeproj -scheme Inkling \
   -destination 'platform=macOS' -configuration Debug build CODE_SIGNING_ALLOWED=NO
 ```
 
 Run tests (the project uses the **Swift Testing** framework — `@Test`/`#expect`, not XCTest):
 ```sh
-DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer \
-  xcodebuild -project Inkling.xcodeproj -scheme Inkling \
+xcodebuild -project Inkling.xcodeproj -scheme Inkling \
   -destination 'platform=macOS' -configuration Debug clean test -only-testing:InklingTests
 ```
 
-**Always use `clean test`, not bare `test`, when adding or changing tests.** Incremental `xcodebuild ... test` frequently reuses a *stale* compiled test bundle: new `@Test` methods silently don't run and edits to existing tests have no effect, while the run still reports success. Sanity check: a deliberately-broken assertion should fail, and the count of `Test case ... passed` lines should match the number of `@Test` functions.
+### Two ways a test run lies about having run
+
+Both end in `** TEST SUCCEEDED **` while testing nothing, so neither is visible unless you look for it.
+
+**Always use `clean test`, not bare `test`, when adding or changing tests.** Incremental `xcodebuild ... test` frequently reuses a *stale* compiled test bundle: new `@Test` methods silently don't run and edits to existing tests have no effect, while the run still reports success.
+
+**Don't narrow `-only-testing:` to a single Swift Testing function.** `-only-testing:InklingTests/SomeSuite/someTest` matches nothing and runs nothing — silently. Narrow to the *suite* (`-only-testing:InklingTests/PageStackViewTests`) or run the whole bundle.
+
+The same sanity check catches both: count the `Test case ... passed` lines and compare against the number of `@Test` functions you expected to run.
+
+```sh
+xcodebuild ... clean test -only-testing:InklingTests 2>&1 | tee /tmp/test.log | grep -E "Failing tests|TEST (SUCCEEDED|FAILED)"
+grep -c "Test case .* passed" /tmp/test.log   # expect ~= total @Test count
+```
+
+A full run *sometimes* drops one test (a long-standing headless flake, a different test each time — observed as both 263 and 264 of 264 across consecutive runs), so a count one short of the total is normal. A count of zero, or one far short, means one of the two traps above.
+
+Swift Testing's `#expect` and `Issue.record` messages do **not** reach `xcodebuild`'s stdout. Read them from the result bundle:
+```sh
+R=$(ls -td ~/Library/Developer/Xcode/DerivedData/Inkling-*/Logs/Test/*.xcresult | head -1)
+xcrun xcresulttool get test-results tests --path "$R" | grep '"name" : "Expectation failed'
+```
 
 The Xcode project uses **synchronized folder groups**, so new files added anywhere under `Inkling/` are picked up automatically — you do not need to edit `project.pbxproj`.
 
@@ -60,7 +79,7 @@ Rich text (chapter body + per-chapter notes) is stored as binary in `bodyData` /
 - `CoreData/InklingDocument.swift` — the `NSPersistentDocument` subclass; also owns Print and "Export as Plain Text" actions.
 - `Models/` — Core Data subclasses (`Project+CoreData`, `Chapter+CoreData`), `RichTextCodec`, `TextStatistics`, `ProjectMetadata`, image-attachment models.
 - `ViewModels/` — `ProjectViewModel` (chapter list/document state), `StatisticsViewModel`, `RichTextController` (the editor's text engine), `OutlineNavigator`.
-- `Views/` — SwiftUI: `ProjectRootView` (NavigationSplitView root), `ChapterSidebar`, `ChapterDetailView`, `RichTextEditor`/`PagedTextView` (NSTextView-backed editor), `NotesPanel`, `FormatToolbar`, settings.
+- `Views/` — SwiftUI: `ProjectRootView` (NavigationSplitView root), `ChapterSidebar`, `ChapterDetailView`, `RichTextEditor` (the NSTextView bridge, which hosts `PageStackView` for a chapter body and a plain text view for notes/shelf), `PageStackView` (the per-page editor: one NSTextView per page over one shared text storage), `PagedEditorLayout` (page geometry + the magnifying canvas), `NotesPanel`, `FormatToolbar`, settings.
 - `Printing/ManuscriptPrinter.swift`, `Export/PlainTextExporter.swift` — output paths.
 
 ## Experimental: the Outline feature
