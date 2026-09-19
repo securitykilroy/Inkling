@@ -46,10 +46,22 @@ final class SidebarTextView: NSTextView, NSTextFieldDelegate {
     /// passive, click-through object the host selects/moves; while true it edits.
     var isEntered = false {
         didSet {
-            isEditable = isEntered
+            isEditable = isEntered && !isProtectingUnreadableData
             isSelectable = isEntered
             needsDisplay = true
         }
+    }
+
+    private var isProtectingUnreadableData = false
+
+    private static var unreadableContentMessage: NSAttributedString {
+        NSAttributedString(
+            string: "Inkling couldn’t read this stored sidebar text. The original data is preserved, and editing is disabled.",
+            attributes: [
+                .font: NSFont.systemFont(ofSize: SidebarStyle.contentFontSize),
+                .foregroundColor: NSColor.systemRed,
+            ]
+        )
     }
 
     /// See `PageTextView.paste` — a sidebar is an editor too, so text pasted
@@ -233,11 +245,13 @@ final class SidebarTextView: NSTextView, NSTextFieldDelegate {
     }
 
     func load(_ data: Data?) {
-        if let data, let attributed = RichTextCodec.decode(data) {
-            textStorage?.setAttributedString(attributed)
-        } else {
-            string = ""
-        }
+        let decoded = data.flatMap(RichTextCodec.decode)
+        isProtectingUnreadableData = data != nil && decoded == nil
+        let attributed = decoded
+            ?? (isProtectingUnreadableData ? Self.unreadableContentMessage : NSAttributedString())
+        textStorage?.setAttributedString(attributed)
+        isEditable = isEntered && !isProtectingUnreadableData
+        isSelectable = isEntered
     }
 
     func contentRTF() -> Data? {

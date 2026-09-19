@@ -167,11 +167,8 @@ final class FontPanelController: NSObject {
     /// claimed it in the meantime, and stealing it back would break that one.
     func end() {
         onChange = nil
-        if NSFontManager.shared.target === self {
-            NSFontManager.shared.target = nil
-        }
-        if NSFontPanel.shared.isVisible {
-            NSFontPanel.shared.orderOut(nil)
-        }
+        guard NSFontManager.shared.target === self else { return }
+        NSFontManager.shared.target = nil
+        NSFontPanel.shared.orderOut(nil)
     }
 }

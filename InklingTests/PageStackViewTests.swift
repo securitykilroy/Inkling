@@ -2069,6 +2069,33 @@ struct PageStackViewTests {
         #expect(live.pageCount > 1)
     }
 
+    @Test func offScreenPageCountIncludesAPageHeldOpenOnlyByASidebar() throws {
+        let text = NSMutableAttributedString(attributedString: Self.filler(paragraphs: 1))
+        let sidebar = SidebarAttachment(
+            contentData: nil,
+            width: SidebarStyle.defaultWidth,
+            position: FloatingImagePosition(
+                page: 3,
+                origin: CGPoint(
+                    x: PagedEditorLayout.letter.leftMargin,
+                    y: PagedEditorLayout.letter.topMargin
+                )
+            ),
+            contentHeight: SidebarStyle.minContentHeight
+        )
+        text.append(NSAttributedString(attachment: sidebar))
+        let data = RichTextCodec.encode(text)
+
+        let live = PageStackView()
+        live.setAttributedString(
+            NSMutableAttributedString(attributedString: try #require(RichTextCodec.decode(data)))
+        )
+        live.prepareSidebars()
+
+        #expect(live.pageCount == 4)
+        #expect(PageStackView.pageCount(forRTF: data) == live.pageCount)
+    }
+
     @Test func importedWordAnchorAlignmentControlsInitialPageLocalPlacement() throws {
         let stack = Self.stackWithImportedImages(
             size: NSSize(width: 144, height: 72),

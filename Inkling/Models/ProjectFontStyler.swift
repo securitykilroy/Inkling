@@ -39,14 +39,16 @@ enum ProjectFontStyler {
             let content = sidebar.contentData
                 .flatMap(RichTextCodec.decode)
                 .flatMap { RichTextCodec.encode(restyled($0, familyName: familyName)) }
+            let replacement = SidebarAttachment(
+                contentData: content ?? sidebar.contentData,
+                width: sidebar.width,
+                position: sidebar.position,
+                contentHeight: sidebar.contentHeight
+            )
+            replacement.title = sidebar.title
             sidebarReplacements.append((
                 range,
-                SidebarAttachment(
-                    contentData: content ?? sidebar.contentData,
-                    width: sidebar.width,
-                    position: sidebar.position,
-                    contentHeight: sidebar.contentHeight
-                )
+                replacement
             ))
         }
         for replacement in sidebarReplacements {

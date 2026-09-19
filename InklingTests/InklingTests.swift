@@ -924,6 +924,32 @@ struct InklingTests {
         #expect(style?.paragraphSpacing == CalloutStyling.bottomReserve)
     }
 
+    @Test func removingMiddleParagraphRenormalizesBothRemainingCalloutBoxes() throws {
+        let body = NSMutableAttributedString(string: "One.\nTwo.\nThree.")
+        CalloutStyling.apply(
+            .note,
+            to: body,
+            range: NSRange(location: 0, length: body.length)
+        )
+        let middle = (body.string as NSString).paragraphRange(
+            for: (body.string as NSString).range(of: "Two.")
+        )
+
+        CalloutStyling.remove(from: body, range: middle)
+
+        let first = try #require(
+            body.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle
+        )
+        let thirdLocation = (body.string as NSString).range(of: "Three.").location
+        let third = try #require(
+            body.attribute(.paragraphStyle, at: thirdLocation, effectiveRange: nil) as? NSParagraphStyle
+        )
+        #expect(first.paragraphSpacingBefore == CalloutStyling.topReserve)
+        #expect(first.paragraphSpacing == CalloutStyling.bottomReserve)
+        #expect(third.paragraphSpacingBefore == CalloutStyling.topReserve)
+        #expect(third.paragraphSpacing == CalloutStyling.bottomReserve)
+    }
+
     @Test @MainActor func calloutRangeAndKindRoundTripThroughEncodeAndDecode() throws {
         let (body, range) = calloutBody(kind: .warning)
         let encoded = try #require(RichTextCodec.encode(body))
@@ -2575,6 +2601,20 @@ struct InklingTests {
         #expect(restored.fontDescriptor.symbolicTraits.contains(.bold))
     }
 
+    @Test @MainActor func endingAnOldFontPanelSessionDoesNotHideTheCurrentOne() {
+        let first = FontPanelController()
+        let second = FontPanelController()
+        first.show(current: TextStyle.body.font) { _ in }
+        second.show(current: TextStyle.body.font) { _ in }
+
+        #expect(NSFontPanel.shared.isVisible)
+        first.end()
+
+        #expect(NSFontManager.shared.target === second)
+        #expect(NSFontPanel.shared.isVisible)
+        second.end()
+    }
+
     @Test @MainActor func projectFontStylerRestyledRewritesEveryFontRunToTheNewFamily() throws {
         let mixed = NSMutableAttributedString()
         mixed.append(NSAttributedString(string: "Heading\n", attributes: [.font: TextStyle.heading.font]))
@@ -2632,6 +2672,7 @@ struct InklingTests {
             position: FloatingImagePosition(page: 0, origin: CGPoint(x: 350, y: 120)),
             contentHeight: SidebarStyle.minContentHeight
         )
+        sidebar.title = "Context"
         let body = NSAttributedString(attachment: sidebar)
 
         let restyled = ProjectFontStyler.restyled(body, familyName: "Georgia")
@@ -2642,6 +2683,7 @@ struct InklingTests {
         let decodedContent = try #require(RichTextCodec.decode(restyledSidebar.contentData))
         let font = try #require(decodedContent.attribute(.font, at: 0, effectiveRange: nil) as? NSFont)
         #expect(font.familyName == "Georgia")
+        #expect(restyledSidebar.title == "Context")
     }
 
     @Test @MainActor func bulletCommandStartsAListInAnEmptyDocument() throws {

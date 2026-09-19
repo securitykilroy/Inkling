@@ -49,6 +49,19 @@ struct SidebarPortTests {
         return found
     }
 
+    private static func sidebarRange(in stack: PageStackView) -> NSRange? {
+        var found: NSRange?
+        stack.storage.enumerateAttribute(
+            .attachment, in: NSRange(location: 0, length: stack.storage.length)
+        ) { value, range, stop in
+            if value is SidebarAttachment {
+                found = range
+                stop.pointee = true
+            }
+        }
+        return found
+    }
+
     // MARK: - Insert over a selection
 
     /// The bug this replaces was silent data loss: the anchor replaced the
@@ -75,6 +88,44 @@ struct SidebarPortTests {
         #expect(stack.storage.string.contains("bravo charlie"))
         let box = try #require(Self.sidebar(in: stack))
         #expect(box.contentData == nil)
+    }
+
+    @Test func selectingABoxMakesDeleteRemoveItsAnchorInsteadOfBodyText() throws {
+        let original = String(repeating: "Alpha bravo charlie delta. ", count: 30)
+        let stack = Self.stack(original)
+        stack.pageViews[0].setSelectedRange(NSRange(location: 6, length: 0))
+        stack.insertSidebar()
+        stack.exitSidebar()
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 900, height: 1100),
+            styleMask: [.titled], backing: .buffered, defer: false
+        )
+        window.contentView = stack
+        stack.prepareSidebars()
+
+        let id = try #require(stack.sidebarPlacements.keys.first)
+        let located = try #require(stack.sidebarViewRect(id))
+        let anchorRange = try #require(Self.sidebarRange(in: stack))
+
+        // Leave a body selection active before clicking the box. Delete must
+        // target the selected box, not this stale manuscript selection.
+        stack.pageViews[0].setSelectedRange(NSRange(location: 40, length: 7))
+        let point = NSPoint(x: located.rect.midX, y: located.rect.midY)
+        let event = try #require(NSEvent.mouseEvent(
+            with: .leftMouseDown,
+            location: located.view.convert(point, to: nil),
+            modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: located.view.window?.windowNumber ?? 0,
+            context: nil, eventNumber: 0, clickCount: 1, pressure: 1
+        ))
+
+        #expect(stack.handleSidebarMouseDown(at: point, in: located.view, event: event))
+        #expect(stack.pageViews[0].selectedRange() == anchorRange)
+        stack.pageViews[0].deleteBackward(nil)
+
+        #expect(Self.sidebar(in: stack) == nil)
+        #expect(stack.storage.string == original)
     }
 
     /// A selection carrying an image can't move into a box — the box's storage
@@ -213,6 +264,15 @@ struct SidebarPortTests {
 
         #expect(view.isInHeaderBand(NSPoint(x: 20, y: 4)))
         #expect(!view.isInHeaderBand(NSPoint(x: 20, y: SidebarStyle.headerHeight + 4)))
+    }
+
+    @Test func unreadableBoxContentIsShownAsProtectedInsteadOfEditableEmptyText() {
+        let view = SidebarTextView.make(width: 220)
+        view.load(Data("not rich text".utf8))
+        view.isEntered = true
+
+        #expect(view.string.contains("couldn’t read"))
+        #expect(!view.isEditable)
     }
 
     /// A double-click means two different things depending on where it lands:

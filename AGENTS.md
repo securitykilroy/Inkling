@@ -8,19 +8,17 @@ Inkling is a native macOS app for writing and organizing multi-chapter projects 
 
 ## Build / Test / Run
 
-The project is saved in Xcode 27's project format (`objectVersion = 110`), so it **must** be built with **Xcode-beta** (`/Applications/Xcode-beta.app`), not the stable Xcode that the default `xcodebuild` resolves to. Always prefix `xcodebuild` with `DEVELOPER_DIR`.
+The project is saved in Xcode 27's project format (`objectVersion = 110`), which the released **Xcode 27** (`/Applications/Xcode.app`) reads, so use plain `xcodebuild`. Do not set `DEVELOPER_DIR` to the removed Xcode-beta application.
 
 Headless build:
 ```sh
-DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer \
-  xcodebuild -project Inkling.xcodeproj -scheme Inkling \
+xcodebuild -project Inkling.xcodeproj -scheme Inkling \
   -destination 'platform=macOS' -configuration Debug build CODE_SIGNING_ALLOWED=NO
 ```
 
 Run tests (the project uses the **Swift Testing** framework — `@Test`/`#expect`, not XCTest):
 ```sh
-DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer \
-  xcodebuild -project Inkling.xcodeproj -scheme Inkling \
+xcodebuild -project Inkling.xcodeproj -scheme Inkling \
   -destination 'platform=macOS' -configuration Debug clean test -only-testing:InklingTests
 ```
 

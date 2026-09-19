@@ -774,6 +774,7 @@ final class PageStackView: NSView, NSTextStorageDelegate {
         guard let attributed = RichTextCodec.decode(data) else { return 1 }
         stack.setAttributedString(NSMutableAttributedString(attributedString: attributed))
         stack.prepareFloatingImages()
+        stack.prepareSidebars()
         return max(1, stack.pageCount)
     }
 
@@ -2155,7 +2156,26 @@ extension PageStackView {
         clearImageSelection()
         selectedSidebar = id
         window?.makeFirstResponder(pageView)
+        if let range = sidebarAnchorRange(for: id) {
+            pageView.setSelectedRange(range)
+        }
         needsDisplay = true
+    }
+
+    /// Keeps AppKit's text selection aligned with the selected floating box.
+    /// Edit commands such as Delete are routed to the page text view, so a
+    /// stale manuscript selection would otherwise be edited instead.
+    private func sidebarAnchorRange(for id: ObjectIdentifier) -> NSRange? {
+        var found: NSRange?
+        storage.enumerateAttribute(
+            .attachment, in: NSRange(location: 0, length: storage.length)
+        ) { value, range, stop in
+            guard let sidebar = value as? SidebarAttachment,
+                  ObjectIdentifier(sidebar) == id else { return }
+            found = range
+            stop.pointee = true
+        }
+        return found
     }
 
     func enterSidebar(_ id: ObjectIdentifier) {

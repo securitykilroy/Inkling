@@ -126,20 +126,7 @@ enum CalloutStyling {
     nonisolated static func apply(_ kind: CalloutKind, to storage: NSMutableAttributedString, range: NSRange) {
         guard range.length > 0, NSMaxRange(range) <= storage.length else { return }
         storage.addAttribute(.inklingCallout, value: kind.rawValue, range: range)
-
-        let paragraphs = paragraphEnclosingRanges(in: storage.string as NSString, within: range)
-        for (index, paragraph) in paragraphs.enumerated() {
-            let base = storage.attribute(.paragraphStyle, at: paragraph.location, effectiveRange: nil) as? NSParagraphStyle
-            let style = (base?.mutableCopy() as? NSMutableParagraphStyle) ?? NSMutableParagraphStyle()
-            style.firstLineHeadIndent = sideInset
-            style.headIndent = sideInset
-            style.tailIndent = -sideInset
-            style.paragraphSpacingBefore = index == 0 ? topReserve : 0
-            style.paragraphSpacing = index == paragraphs.count - 1
-                ? bottomReserve
-                : RichTextCodec.defaultParagraphSpacing
-            storage.addAttribute(.paragraphStyle, value: style, range: paragraph)
-        }
+        normalizeCalloutRuns(in: storage)
     }
 
     /// Clears the callout tag from `range` and resets its paragraphs to the
@@ -149,6 +136,41 @@ enum CalloutStyling {
         storage.removeAttribute(.inklingCallout, range: range)
         for paragraph in paragraphEnclosingRanges(in: storage.string as NSString, within: range) {
             storage.addAttribute(.paragraphStyle, value: RichTextCodec.defaultParagraphStyle, range: paragraph)
+        }
+        normalizeCalloutRuns(in: storage)
+    }
+
+    /// Re-derives first/last paragraph padding after a callout is split,
+    /// extended, or joined. The callout tag is the source of truth; paragraph
+    /// styles are presentation derived from the current contiguous runs.
+    nonisolated private static func normalizeCalloutRuns(in storage: NSMutableAttributedString) {
+        var ranges: [NSRange] = []
+        storage.enumerateAttribute(
+            .inklingCallout,
+            in: NSRange(location: 0, length: storage.length)
+        ) { value, range, _ in
+            if value != nil { ranges.append(range) }
+        }
+
+        for range in ranges {
+            let paragraphs = paragraphEnclosingRanges(in: storage.string as NSString, within: range)
+            for (index, paragraph) in paragraphs.enumerated() {
+                let base = storage.attribute(
+                    .paragraphStyle,
+                    at: paragraph.location,
+                    effectiveRange: nil
+                ) as? NSParagraphStyle
+                let style = (base?.mutableCopy() as? NSMutableParagraphStyle)
+                    ?? NSMutableParagraphStyle()
+                style.firstLineHeadIndent = sideInset
+                style.headIndent = sideInset
+                style.tailIndent = -sideInset
+                style.paragraphSpacingBefore = index == 0 ? topReserve : 0
+                style.paragraphSpacing = index == paragraphs.count - 1
+                    ? bottomReserve
+                    : RichTextCodec.defaultParagraphSpacing
+                storage.addAttribute(.paragraphStyle, value: style, range: paragraph)
+            }
         }
     }
 
