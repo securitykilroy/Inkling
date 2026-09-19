@@ -128,6 +128,30 @@ final class PageTextView: NSTextView {
 
     private var stack: PageStackView? { pageStack }
 
+    /// Text pasted in adopts the destination's styling rather than carrying
+    /// the source document's. Word (and any other RTF source) hands over its
+    /// own typeface, size, colour and paragraph metrics, which dropped a
+    /// paragraph of Calibri 11pt into a manuscript set in the project's body
+    /// font. Images still come through — they are content, not styling.
+    ///
+    /// `⇧⌥⌘V` (`pasteWithFormatting`) keeps the source's styling.
+    override func paste(_ sender: Any?) {
+        let font = typingAttributes[.font] as? NSFont
+        let paragraphStyle = typingAttributes[.paragraphStyle] as? NSParagraphStyle
+        let before = selectedRange().location
+        super.paste(sender)
+        PasteStyling.adoptDestinationStyle(
+            in: self,
+            range: PasteStyling.pastedRange(from: before, to: selectedRange().location),
+            font: font,
+            paragraphStyle: paragraphStyle
+        )
+    }
+
+    @objc func pasteWithFormatting(_ sender: Any?) {
+        super.paste(sender)
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         for item in floatingImages {
@@ -1612,13 +1636,26 @@ extension PageStackView {
             x: session.effectivePosition.origin.x - pageLayout.leftMargin,
             y: session.effectivePosition.origin.y - pageLayout.topMargin
         )
+        //
+        // Which edge is pinned decides which direction the room is measured in.
+        // A left-edge handle grows the image *leftward* (the right edge stays
+        // put), so its room is the distance from the left margin to the image's
+        // right edge — not from its left edge to the right margin. Measuring
+        // right-ward for every handle meant an image already touching the right
+        // margin reported `contentWidth - contentOrigin.x == its own width`,
+        // i.e. zero room, and could not be grown from any corner. The only way
+        // to resize one was to drag it off the margin first.
         let maximumWidth = max(
             session.originalSize.width,
-            pageLayout.contentWidth - contentOrigin.x
+            session.handle.dragsLeftEdge
+                ? contentOrigin.x + session.originalSize.width
+                : pageLayout.contentWidth - contentOrigin.x
         )
         let maximumHeight = max(
             session.originalSize.height,
-            pageLayout.contentHeight - contentOrigin.y
+            session.handle.dragsTopEdge
+                ? contentOrigin.y + session.originalSize.height
+                : pageLayout.contentHeight - contentOrigin.y
         )
         let size = ImageResizeGeometry.resizedSize(
             original: session.originalSize,
@@ -1788,6 +1825,8 @@ extension PageStackView {
         let startOrigin: NSPoint
         let startWidth: CGFloat
         let startPosition: FloatingImagePosition?
+        /// Which edge a resize drag moves. Unused by a move session.
+        var edge: SidebarResizeEdge = .trailing
     }
 
     /// Resets sidebar hosting for a freshly loaded chapter.
@@ -1812,10 +1851,27 @@ extension PageStackView {
         // the box sitting there.
         guard let target = focusedPageView ?? pageViews.first else { return }
         let caret = target.selectedRange()
+        // Inserting over a selection *moves* that text into the box. The anchor
+        // replaces the range it is given, so seeding the box with nil meant the
+        // selected words were simply overwritten and an empty box appeared in
+        // their place — silent data loss on a one-key command.
+        let source = caret.length > 0 && NSMaxRange(caret) <= storage.length
+            ? storage.attributedSubstring(from: caret)
+            : nil
+        let seeded = source.flatMap {
+            SidebarContent.canMove($0) ? SidebarContent.content(from: $0) : nil
+        }
+        // The selection is consumed only when its words actually reached the
+        // box. Otherwise the anchor goes in at the selection's start and the
+        // text stays exactly where it was.
+        let anchorRange = seeded == nil
+            ? NSRange(location: caret.location, length: 0)
+            : caret
+
         let sidebar = SidebarAttachment(
-            contentData: nil,
+            contentData: seeded,
             width: width,
-            position: defaultSidebarPosition(width: width, caret: caret.location),
+            position: defaultSidebarPosition(width: width, caret: anchorRange.location),
             contentHeight: SidebarStyle.minContentHeight
         )
         let attributed = NSMutableAttributedString(attachment: sidebar)
@@ -1823,13 +1879,24 @@ extension PageStackView {
             [.font: TextStyle.body.font, .foregroundColor: NSColor.black],
             range: NSRange(location: 0, length: attributed.length)
         )
-        guard target.shouldChangeText(in: caret, replacementString: attributed.string)
+        // The insert has to go through the page view that owns the caret, not
+        // straight into the storage: `shouldChangeText` is what registers the
+        // undo action, so bypassing it left Insert Sidebar unundoable — ⌘Z
+        // afterwards undid whatever the author had typed *before* it and left
+        // the box sitting there.
+        guard target.shouldChangeText(in: anchorRange, replacementString: attributed.string)
         else { return }
-        storage.replaceCharacters(in: caret, with: attributed)
+        storage.replaceCharacters(in: anchorRange, with: attributed)
         target.didChangeText()
         target.undoManager?.setActionName("Insert Sidebar")
         rebuildFloatingImageLayout()
-        enterSidebar(ObjectIdentifier(sidebar))
+
+        let id = ObjectIdentifier(sidebar)
+        enterSidebar(id)
+        // Typing continues after the moved text rather than in front of it.
+        if seeded != nil, let view = sidebarViews[id] {
+            view.setSelectedRange(NSRange(location: (view.string as NSString).length, length: 0))
+        }
     }
 
     /// Places a new sidebar against the right content edge, level with the
@@ -1891,6 +1958,15 @@ extension PageStackView {
             fontFamilyName: sidebarFontFamilyName
         )
         view.load(sidebar.contentData)
+        view.title = sidebar.title
+        view.onTitleEdited = { [weak self, weak sidebar] title in
+            guard let self, let sidebar else { return }
+            sidebar.title = title
+            // A rename is a document edit like any other, so it has to dirty
+            // the document — nothing else writes the anchor back.
+            self.pageViews.first?.didChangeText()
+            self.needsDisplay = true
+        }
         view.onEdited = { [weak self, weak sidebar, weak view] in
             guard let self, let sidebar, let view else { return }
             sidebar.contentData = view.contentRTF()
@@ -1983,15 +2059,37 @@ extension PageStackView {
         return (host, host.viewRect(forFloating: placement.rect))
     }
 
-    func sidebarResizeHandleRect(_ viewRect: NSRect) -> NSRect {
+    /// Which side of the box a resize drag moves. The opposite edge is pinned,
+    /// so `.leading` widens the box leftward and `.trailing` rightward.
+    enum SidebarResizeEdge {
+        case leading, trailing
+    }
+
+    /// A box gets a handle on *both* bottom corners. One on the right alone was
+    /// useless for the common case: a sidebar parked against the right margin
+    /// has no room on that side, so there was no gesture that could widen it.
+    func sidebarResizeHandleRect(_ viewRect: NSRect, edge: SidebarResizeEdge = .trailing) -> NSRect {
         let magnification = enclosingScrollView?.magnification ?? 1
         let size = 11 / max(magnification, 0.01)
         return NSRect(
-            x: viewRect.maxX - size / 2,
+            x: (edge == .leading ? viewRect.minX : viewRect.maxX) - size / 2,
             y: viewRect.maxY - size / 2,
             width: size,
             height: size
         )
+    }
+
+    /// The handle under `point`, if any, with generous slop so the small corner
+    /// targets stay easy to grab. Leading is tested first: on a box narrowed to
+    /// its minimum the two handles can overlap, and the leading one is the only
+    /// one that can still widen a right-aligned box.
+    func sidebarResizeEdge(at point: NSPoint, boxRect: NSRect) -> SidebarResizeEdge? {
+        for edge in [SidebarResizeEdge.leading, .trailing]
+        where sidebarResizeHandleRect(boxRect, edge: edge)
+            .insetBy(dx: -6, dy: -6).contains(point) {
+            return edge
+        }
+        return nil
     }
 
     /// The sidebar whose box contains `point` on `pageView`.
@@ -2008,17 +2106,31 @@ extension PageStackView {
         if let id = selectedSidebar, enteredSidebar == nil,
            let sidebar = sidebarAttachments[id],
            let located = sidebarViewRect(id), located.view === pageView,
-           sidebarResizeHandleRect(located.rect).insetBy(dx: -6, dy: -6).contains(point) {
+           let edge = sidebarResizeEdge(at: point, boxRect: located.rect) {
             sidebarResizeSession = SidebarDragSession(
                 id: id, startPoint: point, startOrigin: located.rect.origin,
-                startWidth: sidebar.width, startPosition: sidebar.position
+                startWidth: sidebar.width, startPosition: sidebar.position, edge: edge
             )
             return true
         }
 
         if let id = sidebarID(at: point, in: pageView), let sidebar = sidebarAttachments[id] {
+            // The header band is the rename target; the body of the box is the
+            // text. A double-click therefore means two different things
+            // depending on which one it landed on.
+            let onHeader = sidebarViewRect(id).map { located in
+                located.view === pageView
+                    && point.y >= located.rect.minY
+                    && point.y < located.rect.minY + SidebarStyle.headerHeight
+            } ?? false
+
             if event.clickCount >= 2 {
-                enterSidebar(id)
+                if onHeader {
+                    selectSidebar(id, in: pageView)
+                    sidebarViews[id]?.beginTitleEditing()
+                } else {
+                    enterSidebar(id)
+                }
             } else {
                 selectSidebar(id, in: pageView)
                 sidebarMoveSession = SidebarDragSession(
@@ -2071,12 +2183,34 @@ extension PageStackView {
         if let session = sidebarResizeSession, let sidebar = sidebarAttachments[session.id] {
             guard let located = sidebarViewRect(session.id) else { return true }
             let point = located.view.convert(event.locationInWindow, from: nil)
-            let leftX = sidebar.position.map { $0.origin.x - pageLayout.leftMargin } ?? 0
-            let maxWidth = max(SidebarStyle.minWidth, pageLayout.contentWidth - leftX)
-            sidebar.width = min(
-                maxWidth,
-                max(SidebarStyle.minWidth, session.startWidth + (point.x - session.startPoint.x))
-            )
+            let drag = point.x - session.startPoint.x
+
+            // The pinned edge is the one the drag isn't holding, and it decides
+            // both how the drag maps to a width and how much room there is. A
+            // leading drag widens the box as the cursor moves *left*, growing
+            // into the column to the left of a right-pinned box.
+            let startLeft = (session.startPosition?.origin.x ?? pageLayout.leftMargin)
+                - pageLayout.leftMargin
+            let startRight = startLeft + session.startWidth
+            let room = session.edge == .leading
+                ? startRight
+                : pageLayout.contentWidth - startLeft
+            let maxWidth = max(SidebarStyle.minWidth, room)
+            let proposed = session.edge == .leading
+                ? session.startWidth - drag
+                : session.startWidth + drag
+
+            sidebar.width = min(maxWidth, max(SidebarStyle.minWidth, proposed))
+            // Widening leftward moves the box's origin; the right edge holds.
+            if session.edge == .leading, let position = session.startPosition {
+                sidebar.position = FloatingImagePosition(
+                    page: position.page,
+                    origin: CGPoint(
+                        x: position.origin.x + (session.startWidth - sidebar.width),
+                        y: position.origin.y
+                    )
+                )
+            }
             rebuildFloatingImageLayout()
             return true
         }
@@ -2168,13 +2302,15 @@ extension PageStackView {
         outline.lineWidth = 2 / max(magnification, 0.01)
         outline.stroke()
 
-        let handle = sidebarResizeHandleRect(located.rect)
-        NSColor.white.setFill()
-        handle.fill()
-        NSColor.controlAccentColor.setStroke()
-        let handlePath = NSBezierPath(rect: handle)
-        handlePath.lineWidth = 1 / max(magnification, 0.01)
-        handlePath.stroke()
+        for edge in [SidebarResizeEdge.leading, .trailing] {
+            let handle = sidebarResizeHandleRect(located.rect, edge: edge)
+            NSColor.white.setFill()
+            handle.fill()
+            NSColor.controlAccentColor.setStroke()
+            let handlePath = NSBezierPath(rect: handle)
+            handlePath.lineWidth = 1 / max(magnification, 0.01)
+            handlePath.stroke()
+        }
     }
 
     static func displaySize(of attachment: NSTextAttachment) -> NSSize {

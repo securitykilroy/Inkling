@@ -72,6 +72,10 @@ enum RichTextCodec {
         var originX: Double?
         var originY: Double?
         var content: Data?
+        /// Optional so sidecars written before titles existed still decode; a
+        /// missing title means "no title of its own" and the header falls back
+        /// to `SidebarStyle.defaultTitle`.
+        var title: String?
     }
 
     nonisolated static func decode(_ data: Data?) -> NSAttributedString? {
@@ -112,6 +116,7 @@ enum RichTextCodec {
                 position: position,
                 contentHeight: CGFloat(record.contentHeight)
             )
+            sidebar.title = record.title ?? ""
             attributedString.addAttribute(
                 .attachment,
                 value: sidebar,
@@ -239,7 +244,8 @@ enum RichTextCodec {
                 page: sidebar.position?.page,
                 originX: sidebar.position.map { Double($0.origin.x) },
                 originY: sidebar.position.map { Double($0.origin.y) },
-                content: sidebar.contentData
+                content: sidebar.contentData,
+                title: sidebar.title.isEmpty ? nil : sidebar.title
             ))
         }
         return records

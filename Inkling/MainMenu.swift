@@ -111,6 +111,12 @@ enum MainMenu {
         let redo = item("Redo", "redo:", "z")
         redo.keyEquivalentModifierMask = [.command, .shift]
 
+        // Plain Paste restyles the incoming text to match its destination, so
+        // the escape hatch is the one that keeps the source's own formatting.
+        // ⇧⌥⌘V is what Pages and Word use for the odd-one-out paste.
+        let pasteWithFormatting = item("Paste with Formatting", "pasteWithFormatting:", "v")
+        pasteWithFormatting.keyEquivalentModifierMask = [.command, .shift, .option]
+
         return submenu("Edit", [
             item("Undo", "undo:", "z"),
             redo,
@@ -118,6 +124,7 @@ enum MainMenu {
             item("Cut", "cut:", "x"),
             item("Copy", "copy:", "c"),
             item("Paste", "paste:", "v"),
+            pasteWithFormatting,
             item("Delete", "delete:", ""),
             item("Select All", "selectAll:", "a"),
             .separator(),

@@ -69,7 +69,11 @@ enum PlainTextExporter {
             guard let sidebar = value as? SidebarAttachment else { return }
             let text = (RichTextCodec.decode(sidebar.contentData)?.string ?? "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            anchors.append((range, "\n[SIDEBAR]\n\(text)\n[/SIDEBAR]\n"))
+            // A titled box carries its title *inside* the marker rather than
+            // replacing it, so the opening prefix and the closing tag stay
+            // fixed for anything parsing these files.
+            let open = sidebar.title.isEmpty ? "[SIDEBAR]" : "[SIDEBAR: \(sidebar.displayTitle)]"
+            anchors.append((range, "\n\(open)\n\(text)\n[/SIDEBAR]\n"))
         }
         // Replace back-to-front so earlier ranges stay valid.
         for anchor in anchors.sorted(by: { $0.range.location > $1.range.location }) {

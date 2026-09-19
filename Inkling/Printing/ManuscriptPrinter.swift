@@ -195,6 +195,7 @@ final class ManuscriptPrintView: NSView {
     private struct PlacedSidebar {
         let contentRect: NSRect
         let content: NSAttributedString
+        let title: String
     }
 
     private struct PageLayout {
@@ -439,7 +440,9 @@ final class ManuscriptPrintView: NSView {
                                      range: NSRange(location: 0, length: content.length))
             }
             byPage[position.page, default: []].append(
-                PlacedSidebar(contentRect: contentRect, content: content)
+                PlacedSidebar(
+                    contentRect: contentRect, content: content, title: sidebar.displayTitle
+                )
             )
         }
         return byPage
@@ -732,7 +735,7 @@ final class ManuscriptPrintView: NSView {
         SidebarStyle.fillColor.setFill()
         path.fill()
 
-        (SidebarStyle.headerLabel as NSString).draw(
+        (sidebar.title as NSString).draw(
             at: NSPoint(x: box.minX + SidebarStyle.padding, y: box.minY + 5),
             withAttributes: [
                 .font: NSFont.boldSystemFont(ofSize: 10),

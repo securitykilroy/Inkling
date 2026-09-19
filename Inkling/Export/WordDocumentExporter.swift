@@ -126,7 +126,10 @@ enum WordDocumentExporter {
         // so the aside is clearly labeled and its text is fully extractable in Word.
         var runs = ""
         if isSidebar, !attributeIsPresent(.inklingWordSidebar, in: attributed, at: range.location - 1) {
-            runs += #"<w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">\#(SidebarStyle.headerLabel) — </w:t></w:r>"#
+            let label = attributed.attribute(
+                .inklingWordSidebar, at: range.location, effectiveRange: nil
+            ) as? String ?? SidebarStyle.defaultTitle
+            runs += #"<w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">\#(escapeXML(label)) — </w:t></w:r>"#
         } else if let callout, isFirstCalloutParagraph(in: attributed, at: range.location, kind: callout) {
             runs += #"<w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">\#(callout.exportLabel) — </w:t></w:r>"#
         }
@@ -169,7 +172,14 @@ enum WordDocumentExporter {
             )
             if content.length == 0 { content.append(NSAttributedString(string: " ")) }
             if !content.string.hasSuffix("\n") { content.append(NSAttributedString(string: "\n")) }
-            content.addAttribute(.inklingWordSidebar, value: true, range: NSRange(location: 0, length: content.length))
+            // The attribute's *value* is the box's title, so the label run
+            // below can name the aside without re-finding its anchor. Presence
+            // is still what marks the paragraphs as sidebar text.
+            content.addAttribute(
+                .inklingWordSidebar,
+                value: sidebar.displayTitle,
+                range: NSRange(location: 0, length: content.length)
+            )
 
             let replacement = NSMutableAttributedString(string: "\n")
             replacement.append(content)
