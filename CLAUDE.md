@@ -8,7 +8,7 @@ Inkling is a native macOS app for writing and organizing multi-chapter projects 
 
 ## Build / Test / Run
 
-The project is saved in Xcode 27's project format (`objectVersion = 110`), which the released **Xcode 27** (`/Applications/Xcode.app`) reads, so a plain `xcodebuild` works. This used to require Xcode-beta and a `DEVELOPER_DIR` prefix; that is no longer true and the prefix now fails outright with `xcrun: error: missing DEVELOPER_DIR path`.
+Build with the current release of Xcode (`/Applications/Xcode.app`, Xcode 27 or later). The project is saved in Xcode 27's project format (`objectVersion = 110`), so older Xcodes can't open it. A plain `xcodebuild` works; no `DEVELOPER_DIR` override is needed.
 
 Headless build:
 ```sh
