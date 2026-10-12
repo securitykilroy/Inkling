@@ -23,15 +23,13 @@ Inkling is deliberately **not** a productivity gamifier. There are no streaks, w
 
 ## Requirements
 
-- macOS (built and tested against the macOS 26 SDK).
-- **Xcode 27.** The project is saved in Xcode 27's project format (`objectVersion = 110`), so it must be built with 
-at least Xcode 27. 
+- **macOS 26 or later** to run.
+- **Xcode 27 or later** to build. The project is saved in Xcode 27's project format (`objectVersion = 110`), so older versions of Xcode can't open it.
 
 ## Building
 
 ```sh
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
-  xcodebuild -project Inkling.xcodeproj -scheme Inkling \
+xcodebuild -project Inkling.xcodeproj -scheme Inkling \
   -destination 'platform=macOS' -configuration Debug build CODE_SIGNING_ALLOWED=NO
 ```
 
@@ -42,10 +40,11 @@ Or just open `Inkling.xcodeproj` in Xcode and run.
 Tests use the **Swift Testing** framework (`@Test` / `#expect`), not XCTest:
 
 ```sh
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
-  xcodebuild -project Inkling.xcodeproj -scheme Inkling \
+xcodebuild -project Inkling.xcodeproj -scheme Inkling \
   -destination 'platform=macOS' -configuration Debug clean test -only-testing:InklingTests
 ```
+
+Use `clean test` rather than a bare `test`: incremental runs can reuse a stale test bundle, silently skipping new or changed tests while still reporting success.
 
 ## Architecture
 
