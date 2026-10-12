@@ -57,4 +57,4 @@ Inkling is **MVVM with a 100% SwiftUI UI hosted inside an AppKit document app**.
 
 ## License
 
-No license is currently specified. All rights reserved by the author unless and until a license is added.
+Inkling is released under the [MIT License](LICENSE). Copyright (c) 2026 Ric Messier.
