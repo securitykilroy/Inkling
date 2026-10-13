@@ -52,6 +52,9 @@ struct ChapterDetailView: View {
                 .tooltip(typewriterScrolling
                     ? "Turn Off Typewriter Scrolling"
                     : "Turn On Typewriter Scrolling — keeps the line you're writing fixed in place as the page scrolls beneath it")
+                // A toggle: VoiceOver reads the name and whether it's on.
+                .accessibilityLabel("Typewriter Scrolling")
+                .accessibilityValue(typewriterScrolling ? "On" : "Off")
 
                 Button { showSidePanel.toggle() } label: {
                     Image(systemName: "sidebar.trailing")
@@ -59,6 +62,8 @@ struct ChapterDetailView: View {
                 .buttonStyle(.borderless)
                 .foregroundStyle(showSidePanel ? Color.accentColor : Color.secondary)
                 .tooltip(showSidePanel ? "Hide Panel" : "Show Panel")
+                .accessibilityLabel("Notes and Shelf Panel")
+                .accessibilityValue(showSidePanel ? "Shown" : "Hidden")
             }
             .padding(.horizontal, 16)
             .padding(.bottom, 8)

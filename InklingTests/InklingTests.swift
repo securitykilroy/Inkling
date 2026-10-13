@@ -465,53 +465,6 @@ struct InklingTests {
         #expect(size.width == 250)
     }
 
-    @Test func floatingImageExclusionMatchesImageHeightBelowFirstLine() {
-        // An image laid out partway down page 1 (well below the page's first
-        // line) must reserve exactly its own displayed height — plus the wrap
-        // gutter — so text does not leave a hole above the image.
-        let imageRect = NSRect(x: 0, y: 200, width: 240, height: 150)
-        let rect = PagedEditorLayout.letter.exclusionRect(forImageRect: imageRect)
-
-        #expect(rect.minY == 200)
-        #expect(rect.height == 158)
-    }
-
-    @Test func floatingImageExclusionClampsWidthToContentWidth() {
-        let imageRect = NSRect(x: 0, y: 0, width: 468, height: 100)
-        let rect = PagedEditorLayout.letter.exclusionRect(forImageRect: imageRect)
-
-        #expect(rect.width == PagedEditorLayout.letter.contentWidth)
-    }
-
-    @Test func floatingImageExclusionStopsAtPageTextBottom() {
-        let imageRect = NSRect(x: 0, y: 560, width: 240, height: 190)
-        let rect = PagedEditorLayout.letter.exclusionRect(forImageRect: imageRect)
-
-        #expect(rect.maxY == PagedEditorLayout.letter.contentBottom(forPage: 0))
-    }
-
-    /// An image anchored to the first line of a page *other than page 0* has
-    /// its top edge translated back into TextKit's pre-page-break "proposed"
-    /// coordinate space (see the big comment on `exclusionRect`). The bottom
-    /// edge must shift by that same amount, or the rect's height balloons by
-    /// a full page margin/gap: on a real manuscript this produced a tall,
-    /// bogus exclusion straddling the page break, which made TextKit collapse
-    /// everything after it into one degenerate zero-size line for the rest of
-    /// the chapter (11,654 characters in the reproduction case).
-    @Test func floatingImageExclusionHeightIsUnaffectedByFirstLineTranslation() {
-        let layout = PagedEditorLayout.letter
-        let page1Top = layout.contentTop(forPage: 1)
-        let imageRect = NSRect(x: 0, y: page1Top, width: 240, height: 150)
-        let rect = layout.exclusionRect(forImageRect: imageRect)
-
-        // Height must match the un-translated image height + gutter, exactly
-        // as it would for the same image sitting mid-page (not inflated by
-        // the page's margins/gap just because it happens to anchor the
-        // page's first line).
-        #expect(rect.height == 158)
-        #expect(rect.maxY == rect.minY + 158)
-    }
-
     @Test @MainActor func imageInsertionReplacesTheCurrentSelection() {
         let textView = NSTextView()
         textView.string = "before selected after"
@@ -588,24 +541,11 @@ struct InklingTests {
         )!
     }
 
-    @Test func pagedEditorPlacesFirstLineAtTopMarginWithoutDuplicateTitle() {
+    @Test func pagedEditorMapsAYPositionToItsPage() {
         let layout = PagedEditorLayout.letter
 
-        #expect(layout.lineOriginY(proposedY: 0, lineHeight: 20) == 72)
-    }
-
-    @Test func pagedEditorMovesWholeLineToNextPage() {
-        let layout = PagedEditorLayout.letter
-
-        #expect(layout.lineOriginY(proposedY: 710, lineHeight: 20) == 888)
+        #expect(layout.pageIndex(atY: 0) == 0)
         #expect(layout.pageIndex(atY: 888) == 1)
-    }
-
-    @Test func pagedEditorCountsPagesFromLaidOutContent() {
-        let layout = PagedEditorLayout.letter
-
-        #expect(layout.pageCount(forContentMaxY: 700) == 1)
-        #expect(layout.pageCount(forContentMaxY: 900) == 2)
     }
 
     @Test func documentControllerOverridesTheSystemOpenPath() throws {
@@ -1620,35 +1560,6 @@ struct InklingTests {
         )
 
         #expect(actual == expected)
-    }
-
-    @Test func displayRectStacksPagesAndOffsetsByLeftMargin() {
-        let layout = PagedEditorLayout.letter  // paper 612x792, 72pt margins, 24pt gap
-        let rect = layout.displayRect(
-            forPage: 1,
-            origin: CGPoint(x: 100, y: 150),
-            size: CGSize(width: 80, height: 60))
-        // container x = 100 - 72 = 28; y = 1*(792+24) + 150 = 966
-        #expect(rect == NSRect(x: 28, y: 966, width: 80, height: 60))
-    }
-
-    @Test func floatingPositionRoundTripsThroughDisplayRect() {
-        let layout = PagedEditorLayout.letter
-        let position = FloatingImagePosition(page: 2, origin: CGPoint(x: 120, y: 200))
-        let size = CGSize(width: 90, height: 70)
-        let rect = layout.displayRect(forPage: position.page, origin: position.origin, size: size)
-        #expect(layout.position(forDisplayOrigin: rect.origin, size: size) == position)
-    }
-
-    @Test func draggedPositionClampsOntoItsPage() {
-        let layout = PagedEditorLayout.letter
-        // Displayed origin near the bottom of page 0; a 60pt-tall image would
-        // spill into the page gap, so it clamps up to 792 - 60 = 732.
-        let position = layout.position(
-            forDisplayOrigin: CGPoint(x: 100, y: 760),
-            size: CGSize(width: 80, height: 60))
-        #expect(position.page == 0)
-        #expect(position.origin == CGPoint(x: 172, y: 732))  // paperX = 100 + 72
     }
 
     // MARK: - Printer floating-image parity

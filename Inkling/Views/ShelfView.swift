@@ -34,6 +34,7 @@ struct ShelfView: View {
                 }
                 .buttonStyle(.borderless)
                 .help("Add a Shelf Entry")
+                .accessibilityLabel("Add Shelf Entry")
             }
             .padding(8)
 
@@ -160,6 +161,8 @@ private struct ShelfEntryRow: View {
             .foregroundStyle(.secondary)
             .opacity(isHovering ? 1 : 0)
             .help("Remove from Shelf")
+            // Invisible until hovered, but VoiceOver still reaches it.
+            .accessibilityLabel("Remove from Shelf")
         }
         .onHover { isHovering = $0 }
     }

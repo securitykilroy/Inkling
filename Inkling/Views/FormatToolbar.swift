@@ -39,17 +39,20 @@ struct FormatToolbar: View {
             }
             .keyboardShortcut("b", modifiers: .command)
             .help("Bold (⌘B)")
+            .accessibilityLabel("Bold")
 
             Button { controller.toggleItalic() } label: {
                 Image(systemName: "italic")
             }
             .keyboardShortcut("i", modifiers: .command)
             .help("Italic (⌘I)")
+            .accessibilityLabel("Italic")
 
             Button { controller.toggleBulletList() } label: {
                 Image(systemName: "list.bullet")
             }
             .help("Bullet List")
+            .accessibilityLabel("Bullet List")
 
             Divider().frame(height: 16)
 
@@ -79,6 +82,7 @@ struct FormatToolbar: View {
                 Image(systemName: "sidebar.squares.right")
             }
             .help("Insert a floating Sidebar the text wraps around")
+            .accessibilityLabel("Insert Sidebar")
 
             Divider().frame(height: 16)
 
@@ -86,6 +90,7 @@ struct FormatToolbar: View {
                 Image(systemName: "photo.badge.plus")
             }
             .help("Insert Image")
+            .accessibilityLabel("Insert Image")
         }
         .buttonStyle(.borderless)
         .labelStyle(.titleAndIcon)

@@ -36,7 +36,7 @@ documentView: PageStackView (plain NSView, isFlipped)
 
 ## Leftovers
 
-- `PagedEditorLayout` still contains `exclusionRect(forImageRect:)`, `proposedY(forLaidOutY:)`, and `lineOriginY(proposedY:lineHeight:)`. They served only the deleted single-container editor; nothing in the app calls them, only their own tests in `InklingTests.swift`. They can be deleted along with those tests.
+- The old editor's leftover page math in `PagedEditorLayout` (`exclusionRect(forImageRect:)`, `proposedY`, `lineOriginY`, `displayRect`, `position(forDisplayOrigin:)`, `pageCount(forContentMaxY:)`, `contentTop`/`contentBottom`) was deleted on 2026-10-12 along with its tests.
 - Editor/printer layout code is not shared; the two are kept in agreement by tests rather than by one implementation.
 
 ## Alternative considered — TextKit 2

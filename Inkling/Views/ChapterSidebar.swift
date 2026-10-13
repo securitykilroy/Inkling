@@ -239,6 +239,7 @@ private struct ChapterRow: View {
         HStack(spacing: 8) {
             Image(systemName: "doc.text")
                 .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 1) {
                 Text(title.isEmpty ? "Untitled Chapter" : title)
                 Text("\(statistics.wordCount(for: chapter)) words")

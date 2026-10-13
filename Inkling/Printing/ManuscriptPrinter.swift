@@ -638,8 +638,8 @@ final class ManuscriptPrintView: NSView {
         sidebars: [Int: [PlacedSidebar]] = [:]
     ) -> LayoutPass {
         let storage = NSTextStorage(attributedString: text)
-        // A callout-aware layout manager (pageLayout nil: the print view draws
-        // one page per container, so each callout box is naturally page-bounded).
+        // A callout-aware layout manager. The print view draws one page per
+        // container, so each callout box is naturally page-bounded.
         let layoutManager = CalloutLayoutManager()
         storage.addLayoutManager(layoutManager)
 

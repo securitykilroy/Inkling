@@ -1528,16 +1528,37 @@ struct PageStackViewTests {
 
     // MARK: - Milestone 3: callouts
     //
-    // Callout chrome is drawn by the shared CalloutLayoutManager, which the
-    // stack builds with `pageLayout` nil — the printer's configuration, where
-    // each container is already exactly one page. So a callout should be bounded
-    // to its page for free, with no page-grouping logic.
+    // Callout chrome is drawn by the shared CalloutLayoutManager. Each
+    // container is exactly one page, in the editor as in the printer, so a
+    // callout is bounded to its page with no page-grouping logic.
 
-    @Test func theStackUsesThePrinterCalloutConfiguration() {
+    /// A callout crossing a page break draws one box per page, labelled only
+    /// on the page where it starts — and a redraw of part of a page draws the
+    /// same box as a redraw of the whole page.
+    @Test func aCalloutCrossingAPageBreakIsLabelledOnlyWhereItStarts() throws {
         let stack = PageStackView()
-        // nil means "each container is one page", so drawBackground restricts
-        // each box to the container being drawn instead of grouping by Y.
-        #expect(stack.sharedLayoutManager.pageLayout == nil)
+        stack.setAttributedString(Self.filler(paragraphs: 200))
+        let boundary = NSMaxRange(Self.characterRange(ofPage: 0, in: stack))
+        let calloutRange = NSRange(location: max(0, boundary - 150), length: 300)
+        stack.storage.addAttribute(.inklingCallout, value: CalloutKind.note.rawValue, range: calloutRange)
+        stack.rebuildPages()
+
+        // Asks for the boxes rather than drawing them: drawing into a
+        // graphics context here, while other suites draw in parallel, stalled
+        // the whole test run.
+        let manager = stack.sharedLayoutManager
+        let page0 = manager.glyphRange(for: try #require(stack.pageViews[0].textContainer))
+        let page1 = manager.glyphRange(for: try #require(stack.pageViews[1].textContainer))
+
+        let first = manager.calloutBoxes(forGlyphRange: page0)
+        let second = manager.calloutBoxes(forGlyphRange: page1)
+        #expect(first.map(\.showsLabel) == [true])
+        #expect(second.map(\.showsLabel) == [false])
+
+        // Redraw only the last few lines of page 1's share of the callout.
+        let calloutGlyphs = manager.glyphRange(forCharacterRange: calloutRange, actualCharacterRange: nil)
+        let tail = NSRange(location: NSMaxRange(calloutGlyphs) - 20, length: 20)
+        #expect(manager.calloutBoxes(forGlyphRange: tail) == second)
     }
 
     @Test func aCalloutSpanningAPageBreakStaysLaidOutOnBothPages() throws {

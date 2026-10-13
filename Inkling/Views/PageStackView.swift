@@ -469,9 +469,6 @@ final class PageStackView: NSView, NSTextStorageDelegate {
         self.pageLayout = pageLayout
         self.storage = NSTextStorage()
         self.sharedLayoutManager = CalloutLayoutManager()
-        // nil: each container is already exactly one page, so callout boxes are
-        // page-bounded for free — the same reason the printer leaves it nil.
-        self.sharedLayoutManager.pageLayout = nil
         super.init(frame: NSRect(origin: .zero, size: pageLayout.paperSize))
 
         storage.addLayoutManager(sharedLayoutManager)
@@ -977,9 +974,9 @@ final class PageStackView: NSView, NSTextStorageDelegate {
 // This is the payoff of the whole rearchitecture. Every rectangle below is
 // expressed in one coordinate space — the page's own text container, origin at
 // the text column's top-left — exactly like the printer. There is no
-// pre-pagination "proposed" space and no translation between spaces, so
-// `PagedEditorLayout.exclusionRect` / `proposedY` and the top-of-page special
-// cases they needed have no counterpart here. An image on a page's first line
+// pre-pagination "proposed" space and no translation between spaces, so the
+// old editor's exclusion translation and the top-of-page special cases it
+// needed have no counterpart here. An image on a page's first line
 // is simply an exclusion at y ≈ 0.
 
 extension PageStackView {
@@ -1498,9 +1495,8 @@ extension PageStackView {
 
     // MARK: - Dragging an image between pages
     //
-    // The single-container editor had to convert a dragged point through
-    // `PagedEditorLayout.position(forDisplayOrigin:size:)`, inferring the page
-    // from a Y offset in a synthetic stacked space. Here the page is simply the
+    // The single-container editor had to convert a dragged point back to a
+    // page, inferring it from a Y offset in a synthetic stacked space. Here the page is simply the
     // page view the cursor is over, and because each page view *is* its sheet of
     // paper, view coordinates are already paper coordinates. Dragging an image
     // onto another page is the same code path as moving it within one.
