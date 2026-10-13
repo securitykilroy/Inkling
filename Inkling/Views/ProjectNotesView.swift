@@ -34,6 +34,6 @@ struct ProjectNotesView: View {
     }
 
     private var bodyBinding: Binding<Data?> {
-        Binding(get: { project.projectNotesData }, set: { project.projectNotesData = $0 })
+        Binding(get: { project.projectNotesData }, set: { assignIfChanged(project, \.projectNotesData, $0) })
     }
 }

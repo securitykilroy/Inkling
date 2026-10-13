@@ -135,14 +135,14 @@ struct ChapterDetailView: View {
     }
 
     private var titleBinding: Binding<String> {
-        Binding(get: { chapter.title ?? "" }, set: { chapter.title = $0 })
+        Binding(get: { chapter.title ?? "" }, set: { assignIfChanged(chapter, \.title, $0) })
     }
 
     private var bodyBinding: Binding<Data?> {
-        Binding(get: { chapter.bodyData }, set: { chapter.bodyData = $0 })
+        Binding(get: { chapter.bodyData }, set: { assignIfChanged(chapter, \.bodyData, $0) })
     }
 
     private var notesBinding: Binding<Data?> {
-        Binding(get: { chapter.notesData }, set: { chapter.notesData = $0 })
+        Binding(get: { chapter.notesData }, set: { assignIfChanged(chapter, \.notesData, $0) })
     }
 }

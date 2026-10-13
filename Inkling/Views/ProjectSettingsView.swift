@@ -118,21 +118,21 @@ struct ProjectSettingsView: View {
     private var titleBinding: Binding<String> {
         Binding(
             get: { project.title ?? "" },
-            set: { project.title = $0 }
+            set: { assignIfChanged(project, \.title, $0) }
         )
     }
 
     private var subtitleBinding: Binding<String> {
         Binding(
             get: { project.subtitle ?? "" },
-            set: { project.subtitle = $0.isEmpty ? nil : $0 }
+            set: { assignIfChanged(project, \.subtitle, $0.isEmpty ? nil : $0) }
         )
     }
 
     private var authorBinding: Binding<String> {
         Binding(
             get: { project.author ?? "" },
-            set: { project.author = $0.isEmpty ? nil : $0 }
+            set: { assignIfChanged(project, \.author, $0.isEmpty ? nil : $0) }
         )
     }
 }

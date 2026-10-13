@@ -63,6 +63,45 @@ final class InklingDocument: NSPersistentDocument {
     /// user to save when its window closes or the application quits.
     override nonisolated class var autosavesInPlace: Bool { false }
 
+    // MARK: - Crash recovery
+
+    /// Keeps a safety copy of unsaved work outside the document's own file.
+    /// See `CrashRecovery.swift`. Created with the window, so a document that
+    /// is never shown (e.g. in tests) takes no snapshots.
+    private(set) var recovery: DocumentRecovery?
+
+    /// Called when this document was opened from a safety copy left by a
+    /// crash: it carries unsaved work, so treat it as edited (closing it must
+    /// ask to save), and keep that copy until the writer decides.
+    func adoptRecoveredCopy(at url: URL) {
+        if recovery == nil {
+            recovery = DocumentRecovery(document: self)
+        }
+        recovery?.adopt(url)
+        updateChangeCount(.changeDone)
+    }
+
+    override func save(
+        to url: URL,
+        ofType typeName: String,
+        for saveOperation: NSDocument.SaveOperationType,
+        completionHandler: @escaping (Error?) -> Void
+    ) {
+        super.save(to: url, ofType: typeName, for: saveOperation) { [weak self] error in
+            // Save To writes a copy and leaves this document's changes
+            // unsaved, so its safety copy is still needed.
+            if error == nil, saveOperation == .saveOperation || saveOperation == .saveAsOperation {
+                self?.recovery?.discard()
+            }
+            completionHandler(error)
+        }
+    }
+
+    override func revert(toContentsOf url: URL, ofType typeName: String) throws {
+        try super.revert(toContentsOf: url, ofType: typeName)
+        recovery?.discard()
+    }
+
     override func makeWindowControllers() {
         guard let context = managedObjectContext else {
             assertionFailure("Document has no managed object context")
@@ -102,6 +141,10 @@ final class InklingDocument: NSPersistentDocument {
         let controller = NSWindowController(window: window)
         controller.shouldCascadeWindows = true
         addWindowController(controller)
+
+        if recovery == nil {
+            recovery = DocumentRecovery(document: self)
+        }
     }
 
     /// Bridge for menu commands that drive this window's SwiftUI layer (Project
@@ -213,6 +256,10 @@ final class InklingDocument: NSPersistentDocument {
         persistLastEditPosition()
         projectNotesWindow?.close()
         projectNotesWindow = nil
+        // Closing is the writer's decision — saved, or "Don't Save" — so the
+        // safety copy has done its job. Only a crash skips this.
+        recovery?.stop()
+        recovery?.discard()
         super.close()
     }
 

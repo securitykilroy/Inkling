@@ -59,7 +59,11 @@ These decisions exist for specific reasons. Read the reason before "fixing" them
 
 - **Explicit save semantics:** `autosavesInPlace` is `false`. Editing an existing project prompts to save on window close / quit. New untitled documents seed their root `Project` with undo registration disabled so a pristine, untouched window doesn't nag to save or write a stray "Untitled" file.
 
-- **Lightweight migration is on** (`configurePersistentStoreCoordinator`), so files written by older model versions still open. The model is versioned (`Inkling.xcdatamodeld`); the current version is **Inkling 3**, which added `Project.subtitle` (Inkling 2 added `Project.author`). Schema changes must stay additive/optional so Core Data can infer the mapping — otherwise add a new model version, don't edit the current one in place.
+- **Crash recovery is a separate copy, never an autosave of the real file** (`CoreData/CrashRecovery.swift`). While a document has unsaved changes, `DocumentRecovery` writes a full copy every 30s to `Application Support/Inkling/Recovery/` (inside the sandbox container — an unsigned `CODE_SIGNING_ALLOWED=NO` build is *unsandboxed* and uses `~/Library/Application Support/Inkling/Recovery/` instead). Save, Revert, and Close (including "Don't Save") delete it; a copy that survives to launch is offered back by `AppDelegate` as an **untitled** document, so it can never overwrite the original. The launch prompt is skipped under XCTest — a modal there hangs the test runner.
+
+- **SwiftUI bindings into Core Data go through `assignIfChanged`** (`Models/ManagedObjectEditing.swift`). A `TextField` writes its unchanged text back during layout, and Core Data counts even a same-value assignment as an edit — that made merely opening a project dirty it.
+
+- **Lightweight migration is on** (`configurePersistentStoreCoordinator`), so files written by older model versions still open. The model is versioned (`Inkling.xcdatamodeld`); the current version is **Inkling 6** (2 added `Project.author`, 3 `Project.subtitle`, 4 `Project.bodyFontFamily`, 5 the `ShelfEntry` entity, 6 `Project.projectNotesData`). Schema changes must stay additive/optional so Core Data can infer the mapping — otherwise add a new model version, don't edit the current one in place.
 
 - **Entity is named `Chapter`, not `Section`** — `Section` collides with `SwiftUI.Section`.
 
@@ -67,11 +71,12 @@ These decisions exist for specific reasons. Read the reason before "fixing" them
 
 ## Data model
 
-Two Core Data entities (`Inkling.xcdatamodeld`):
-- **`Project`** — `id`, `title`, `subtitle`, `author`, `createdAt`, and a cascade-delete to-many `chapters`.
+Three Core Data entities (`Inkling.xcdatamodeld`):
+- **`Project`** — `id`, `title`, `subtitle`, `author`, `createdAt`, `bodyFontFamily`, `projectNotesData`, and cascade-delete to-many `chapters` and `shelfEntries`.
 - **`Chapter`** — `id`, `title`, `sortIndex` (ordering), `createdAt`, `bodyData`, `notesData`.
+- **`ShelfEntry`** — `id`, `sortIndex`, `createdAt`, `bodyData` (one scrap on the project-wide Shelf).
 
-Rich text (chapter body + per-chapter notes) is stored as binary in `bodyData` / `notesData`. `RichTextCodec` is the single format boundary: it writes **RTFD** (so inline image attachments survive) with an **RTF fallback** so older files stay readable, and side-stores attachment sizes in embedded JSON.
+Rich text (chapter body + per-chapter notes) is stored as binary in `bodyData` / `notesData`. `RichTextCodec` is the single format boundary: it writes **RTFD** (so inline image attachments survive) with an **RTF fallback** so older files stay readable, and side-stores attachment sizes, floating-image positions, and image captions in embedded JSON (`__inkling_attachment_sizes.json`). On decode, position and caption ride as in-memory attributes (`.inklingFloatingImagePosition`, `.inklingImageCaption`) until the editor or printer builds a `FloatingImageAttachment`.
 
 ## Layout
 
