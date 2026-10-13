@@ -133,9 +133,13 @@ enum WordDocumentExporter {
         } else if let callout, isFirstCalloutParagraph(in: attributed, at: range.location, kind: callout) {
             runs += #"<w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">\#(callout.exportLabel) — </w:t></w:r>"#
         }
+        var captions: [String] = []
         attributed.enumerateAttributes(in: range) { attributes, runRange, _ in
             if let attachment = attributes[.attachment] as? NSTextAttachment,
                let image = pngData(from: attachment) {
+                let caption = (attachment as? FloatingImageAttachment).map(\.caption)
+                    ?? attributes[.inklingImageCaption] as? String
+                if let caption = ImageCaption.normalized(caption) { captions.append(caption) }
                 let name = "image\(state.imageIndex).png"
                 state.media.append((name, image.data))
                 runs += imageRunXML(
@@ -155,7 +159,14 @@ enum WordDocumentExporter {
             guard !text.isEmpty else { return }
             runs += textRunXML(text, font: attributes[.font] as? NSFont)
         }
-        return "<w:p>\(properties)\(runs)</w:p>"
+        // A caption follows its image's paragraph as a centred, small italic
+        // paragraph of its own. Keeping it physically grouped with a freely
+        // positioned Word drawing would need a DrawingML group; this keeps the
+        // text with the picture without that.
+        let captionParagraphs = captions.map { caption in
+            #"<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:rPr><w:i/><w:sz w:val="20"/></w:rPr><w:t xml:space="preserve">\#(escapeXML(caption))</w:t></w:r></w:p>"#
+        }
+        return "<w:p>\(properties)\(runs)</w:p>" + captionParagraphs.joined()
     }
 
     /// Replaces each floating sidebar anchor with its content as real paragraphs,

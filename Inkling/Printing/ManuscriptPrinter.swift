@@ -190,6 +190,9 @@ final class ManuscriptPrintView: NSView {
     private struct PlacedImage {
         let contentRect: NSRect
         let image: NSImage
+        var caption: String?
+        var captionFont: NSFont?
+        var captionHeight: CGFloat = 0
     }
 
     private struct PlacedSidebar {
@@ -370,6 +373,54 @@ final class ManuscriptPrintView: NSView {
         /// image sitting at its paragraph's top must not let its exclusion
         /// reach into the line above, or that line gets narrowed and shoved.
         var anchoredToParagraph = false
+        /// Mirrors `PageStackView.FloatingPlacement`: the caption beneath the
+        /// image and the height it adds.
+        var caption: String?
+        var captionFont: NSFont?
+        var captionHeight: CGFloat = 0
+
+        var footprintRect: NSRect {
+            NSRect(
+                x: contentRect.minX,
+                y: contentRect.minY,
+                width: contentRect.width,
+                height: contentRect.height + captionHeight
+            )
+        }
+    }
+
+    /// The caption stored for the image at `location`, and the font it is set
+    /// in — small italic in the family of the surrounding text, as the editor
+    /// does.
+    private static func caption(at location: Int, in text: NSAttributedString) -> (String, NSFont)? {
+        guard location < text.length,
+              let caption = ImageCaption.normalized(
+                  text.attribute(.inklingImageCaption, at: location, effectiveRange: nil) as? String
+              )
+        else { return nil }
+        let textFont = text.attribute(.font, at: location, effectiveRange: nil) as? NSFont
+        return (caption, ImageCaption.font(near: textFont))
+    }
+
+    private static func captionHeight(at location: Int, in text: NSAttributedString, width: CGFloat) -> CGFloat {
+        guard let (caption, font) = caption(at: location, in: text) else { return 0 }
+        return ImageCaption.height(of: caption, width: width, font: font)
+    }
+
+    /// `placement` with the caption of the image at `location` attached.
+    private static func withCaption(
+        _ placement: FloatingPlacement,
+        at location: Int,
+        in text: NSAttributedString
+    ) -> FloatingPlacement {
+        guard let (caption, font) = caption(at: location, in: text) else { return placement }
+        var placement = placement
+        placement.caption = caption
+        placement.captionFont = font
+        placement.captionHeight = ImageCaption.height(
+            of: caption, width: placement.contentRect.width, font: font
+        )
+        return placement
     }
 
     private struct LayoutPass {
@@ -414,7 +465,11 @@ final class ManuscriptPrintView: NSView {
                 leftMargin: leftMargin,
                 topMargin: topMargin
             )
-            placements.append(FloatingPlacement(page: position.page, contentRect: contentRect, image: image))
+            placements.append(Self.withCaption(
+                FloatingPlacement(page: position.page, contentRect: contentRect, image: image),
+                at: range.location,
+                in: text
+            ))
         }
         return placements
     }
@@ -537,24 +592,38 @@ final class ManuscriptPrintView: NSView {
                     topMargin: topMargin
                 )
                 var targetPage = page
+                let captionHeight = Self.captionHeight(at: range.location, in: storage, width: rect.width)
                 // Matches the editor: an imported offset can drop a tall image
                 // past the bottom of the page its paragraph landed on, so park
                 // it at the top of the next page instead of bleeding over.
-                if rect.minY > 0, rect.maxY > pageSize.height {
+                if rect.minY > 0, rect.maxY + captionHeight > pageSize.height {
                     targetPage = page + 1
                     rect.origin.y = 0
                 }
-                placement = FloatingPlacement(page: targetPage, contentRect: rect, image: image,
-                                             anchoredToParagraph: true)
+                placement = Self.withCaption(
+                    FloatingPlacement(page: targetPage, contentRect: rect, image: image,
+                                      anchoredToParagraph: true),
+                    at: range.location,
+                    in: storage
+                )
                 return
             }
 
-            let fits = lineRect.minY + size.height <= pageSize.height
+            // The caption counts, as in the editor: an image must not leave
+            // its caption on another page.
+            let width = min(size.width, pageSize.width)
+            let footprintHeight = size.height
+                + Self.captionHeight(at: range.location, in: storage, width: width)
+            let fits = lineRect.minY + footprintHeight <= pageSize.height
             let placedPage = fits ? page : page + 1
             let y: CGFloat = fits ? lineRect.minY : 0
-            let contentRect = NSRect(x: 0, y: y, width: min(size.width, pageSize.width), height: size.height)
-            placement = FloatingPlacement(page: placedPage, contentRect: contentRect, image: image,
-                                         anchoredToParagraph: true)
+            let contentRect = NSRect(x: 0, y: y, width: width, height: size.height)
+            placement = Self.withCaption(
+                FloatingPlacement(page: placedPage, contentRect: contentRect, image: image,
+                                  anchoredToParagraph: true),
+                at: range.location,
+                in: storage
+            )
         }
         return placement
     }
@@ -579,7 +648,7 @@ final class ManuscriptPrintView: NSView {
         for (page, list) in placements {
             for placement in list {
                 if var rect = FloatingImagePlacement.exclusionRect(
-                    contentRect: placement.contentRect,
+                    contentRect: placement.footprintRect,
                     contentWidth: pageSize.width,
                     gutter: 8,
                     topGutter: placement.anchoredToParagraph ? 0 : nil
@@ -591,9 +660,13 @@ final class ManuscriptPrintView: NSView {
                     }
                     exclusions[page, default: []].append(NSBezierPath(rect: rect))
                 }
-                drawables[page, default: []].append(
-                    PlacedImage(contentRect: placement.contentRect, image: placement.image)
-                )
+                drawables[page, default: []].append(PlacedImage(
+                    contentRect: placement.contentRect,
+                    image: placement.image,
+                    caption: placement.caption,
+                    captionFont: placement.captionFont,
+                    captionHeight: placement.captionHeight
+                ))
             }
         }
         // Sidebars reserve the same kind of exclusion so body text wraps around them.
@@ -702,6 +775,14 @@ final class ManuscriptPrintView: NSView {
                     respectFlipped: true,
                     hints: nil
                 )
+                if let caption = placed.caption, let font = placed.captionFont {
+                    ImageCaption.draw(
+                        caption,
+                        in: ImageCaption.textRect(below: placed.contentRect, height: placed.captionHeight)
+                            .offsetBy(dx: origin.x, dy: origin.y),
+                        font: font
+                    )
+                }
             }
             for sidebar in page.sidebars {
                 drawSidebar(sidebar, at: origin)

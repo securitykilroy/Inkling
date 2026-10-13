@@ -25,6 +25,8 @@ final class FloatingImageAttachment: NSTextAttachment {
     /// the user hasn't moved yet).
     var position: FloatingImagePosition?
     var importedPlacementHint: ImportedImagePlacementHint?
+    /// Plain text shown beneath the image; nil for none. See `ImageCaption`.
+    var caption: String?
 
     init(copying source: NSTextAttachment, displaySize: NSSize) {
         self.displaySize = displaySize

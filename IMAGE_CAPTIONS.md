@@ -1,5 +1,7 @@
 # Image Captions — Implementation Overview
 
+*Status: **implemented** (2026-10-12) as described below. Captions are added or edited by double-clicking an image or from its right-click menu. Caption font is small italic in the family of the text around the image. In Word export, the caption is a centred italic paragraph after the image's paragraph. Code: `Models/ImageCaption.swift`; tests: `InklingTests/ImageCaptionTests.swift`.*
+
 ## Recommended first version
 
 Give each image an optional plain-text caption. Display it directly below the

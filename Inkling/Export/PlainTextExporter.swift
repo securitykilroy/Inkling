@@ -37,7 +37,7 @@ enum PlainTextExporter {
     /// formatting (e.g. for NotebookLM). Non-callout stretches are emitted as-is;
     /// callouts are separated from surrounding text by a blank line.
     nonisolated static func bodyText(from attributed: NSAttributedString) -> String {
-        let attributed = expandingSidebars(attributed)
+        let attributed = expandingSidebars(expandingImageCaptions(attributed))
         let string = attributed.string as NSString
         var pieces: [String] = []
         attributed.enumerateAttribute(
@@ -55,6 +55,27 @@ enum PlainTextExporter {
             }
         }
         return pieces.joined(separator: "\n\n")
+    }
+
+    /// Replaces each captioned image's anchor with `[IMAGE: caption]` on a line
+    /// of its own, so the text keeps a note of what the picture was. Images
+    /// without a caption are dropped, as before.
+    nonisolated private static func expandingImageCaptions(_ attributed: NSAttributedString) -> NSAttributedString {
+        let mutable = NSMutableAttributedString(attributedString: attributed)
+        var anchors: [(range: NSRange, text: String)] = []
+        mutable.enumerateAttribute(
+            .attachment, in: NSRange(location: 0, length: mutable.length)
+        ) { value, range, _ in
+            guard value is NSTextAttachment, !(value is SidebarAttachment) else { return }
+            let caption = (value as? FloatingImageAttachment).map(\.caption)
+                ?? mutable.attribute(.inklingImageCaption, at: range.location, effectiveRange: nil) as? String
+            guard let caption = ImageCaption.normalized(caption) else { return }
+            anchors.append((range, "\n[IMAGE: \(caption)]\n"))
+        }
+        for anchor in anchors.sorted(by: { $0.range.location > $1.range.location }) {
+            mutable.replaceCharacters(in: anchor.range, with: NSAttributedString(string: anchor.text))
+        }
+        return mutable
     }
 
     /// Replaces each floating sidebar anchor with its text wrapped in

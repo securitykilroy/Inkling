@@ -50,6 +50,9 @@ enum RichTextCodec {
         var originX: Double?
         var originY: Double?
         var importedPlacementHint: ImportedImagePlacementHint?
+        // Optional so older sidecars decode; an older app reading a newer
+        // sidecar ignores it (and would drop the caption if it saved).
+        var caption: String?
     }
 
     /// A callout run: the paragraph range it covers and its kind. RTF can't
@@ -308,6 +311,13 @@ enum RichTextCodec {
                     at: range.location,
                     effectiveRange: nil
                 ) as? ImportedImagePlacementHint
+            // Same fallback as `position`, for the same offline rewrites.
+            let caption = (attachment as? FloatingImageAttachment).map(\.caption)
+                ?? attributedString.attribute(
+                    .inklingImageCaption,
+                    at: range.location,
+                    effectiveRange: nil
+                ) as? String
             records.append(AttachmentSizeRecord(
                 location: range.location,
                 width: size.width,
@@ -315,7 +325,8 @@ enum RichTextCodec {
                 page: position?.page,
                 originX: position.map { Double($0.origin.x) },
                 originY: position.map { Double($0.origin.y) },
-                importedPlacementHint: position == nil ? importedPlacementHint : nil
+                importedPlacementHint: position == nil ? importedPlacementHint : nil,
+                caption: ImageCaption.normalized(caption)
             ))
         }
         return records
@@ -352,6 +363,14 @@ enum RichTextCodec {
                 attributedString.addAttribute(
                     .inklingImportedImagePlacementHint,
                     value: hint,
+                    range: NSRange(location: record.location, length: 1)
+                )
+            }
+
+            if let caption = ImageCaption.normalized(record.caption) {
+                attributedString.addAttribute(
+                    .inklingImageCaption,
+                    value: caption,
                     range: NSRange(location: record.location, length: 1)
                 )
             }

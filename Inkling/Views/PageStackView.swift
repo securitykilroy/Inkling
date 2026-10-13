@@ -2,8 +2,8 @@
 //  PageStackView.swift
 //  Inkling
 //
-//  MILESTONE 0 PROTOTYPE — the go/no-go gate for the per-page-container editor
-//  rearchitecture (docs/per-page-container-editor-plan.md).
+//  The chapter body editor: one text view per page over one shared text
+//  storage. Background: docs/per-page-container-editor-plan.md.
 //
 //  The editor this replaced (`PagedTextView`, now deleted — see
 //  `PagedEditorLayout.swift`) laid a whole chapter into ONE infinitely tall text
@@ -18,15 +18,11 @@
 //  backed by its own small NSTextView. TextKit flows text container→container
 //  natively, so pagination is real and every exclusion path is page-local.
 //
-//  Milestone 0 (the selection gate) is passed: N text views sharing one layout
-//  manager keep a single insertion point, selection spans page breaks, the caret
-//  crosses boundaries, and first-responder handoff doesn't fork the selection.
-//
-//  Milestone 1 (here) brings text-only parity with the shipping editor:
-//  repagination driven by editing, the scrolling/magnifying canvas, and the
-//  paper-and-shadow chrome. Still deliberately excluded: floating images,
-//  sidebars, callout chrome, typewriter scrolling. Nothing here is wired into
-//  the shipping editor.
+//  N text views sharing one layout manager keep a single insertion point:
+//  selection spans page breaks, the caret crosses boundaries, and
+//  first-responder handoff doesn't fork the selection — all native TextKit 1.
+//  Find is the exception; see the `NSTextFinderClient` overrides on
+//  `PageTextView`.
 //
 
 import AppKit
@@ -110,6 +106,11 @@ final class PageTextView: NSTextView {
         didSet { needsDisplay = true }
     }
 
+    /// Captions beneath this page's floating images, in the same coordinates.
+    var floatingCaptions: [(rect: NSRect, text: String, font: NSFont)] = [] {
+        didSet { needsDisplay = true }
+    }
+
     /// This page view's rect for a floating image, in view coordinates. The view
     /// is the whole sheet of paper, so view coordinates *are* paper coordinates.
     func viewRect(forFloating rect: NSRect) -> NSRect {
@@ -164,6 +165,9 @@ final class PageTextView: NSTextView {
                 hints: nil
             )
         }
+        for caption in floatingCaptions {
+            ImageCaption.draw(caption.text, in: viewRect(forFloating: caption.rect), font: caption.font)
+        }
         stack?.drawImageSelection(in: self)
         stack?.drawSidebarSelection(in: self)
         stack?.drawSnapGuide(in: self)
@@ -181,10 +185,44 @@ final class PageTextView: NSTextView {
         // then image handles — handles sit on the image's corners and extend
         // past its edge, so an image-body hit test would swallow them.
         if stack?.handleSidebarMouseDown(at: point, in: self, event: event) == true { return }
+        // Double-clicking an image edits its caption.
+        if event.clickCount == 2, let hit = floatingImage(at: point) {
+            stack?.editCaption(ofImageAt: hit.location)
+            return
+        }
         if stack?.beginImageResize(at: point, windowPoint: event.locationInWindow, in: self) == true { return }
         if stack?.beginImageDrag(at: point, in: self) == true { return }
         stack?.clearImageSelection()
         super.mouseDown(with: event)
+    }
+
+    /// Right-clicking an image offers its caption; anywhere else, the usual
+    /// text menu.
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let point = convert(event.locationInWindow, from: nil)
+        guard let stack, let hit = floatingImage(at: point),
+              let attachment = stack.floatingAttachment(at: hit.location)
+        else { return super.menu(for: event) }
+
+        stack.selectImage(at: hit.location, in: self)
+        let menu = NSMenu()
+        let edit = NSMenuItem(
+            title: attachment.caption == nil ? "Add Caption…" : "Edit Caption…",
+            action: #selector(PageStackView.editSelectedImageCaption(_:)),
+            keyEquivalent: ""
+        )
+        edit.target = stack
+        menu.addItem(edit)
+        if attachment.caption != nil {
+            let remove = NSMenuItem(
+                title: "Remove Caption",
+                action: #selector(PageStackView.removeSelectedImageCaption(_:)),
+                keyEquivalent: ""
+            )
+            remove.target = stack
+            menu.addItem(remove)
+        }
+        return menu
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -957,6 +995,21 @@ extension PageStackView {
         /// than at a spot the user dragged it to. Such an image must not let
         /// its exclusion reach up into the line above — see `appendExclusion`.
         var anchoredToParagraph = false
+        /// The caption beneath the image, if any, and the height it adds.
+        var caption: String?
+        var captionFont: NSFont?
+        var captionHeight: CGFloat = 0
+
+        /// The image and its caption together — what text wraps around and
+        /// what has to fit on the page.
+        var footprintRect: NSRect {
+            NSRect(
+                x: contentRect.minX,
+                y: contentRect.minY,
+                width: contentRect.width,
+                height: contentRect.height + captionHeight
+            )
+        }
     }
 
     /// Gutter between an image and the text that wraps around it. Matches the
@@ -995,6 +1048,9 @@ extension PageStackView {
             floating.importedPlacementHint = storage.attribute(
                 .inklingImportedImagePlacementHint, at: range.location, effectiveRange: nil
             ) as? ImportedImagePlacementHint
+            floating.caption = ImageCaption.normalized(storage.attribute(
+                .inklingImageCaption, at: range.location, effectiveRange: nil
+            ) as? String)
             replacements.append((range, floating))
         }
 
@@ -1097,13 +1153,22 @@ extension PageStackView {
         }
 
         var drawables: [Int: [(location: Int, rect: NSRect, image: NSImage)]] = [:]
+        var captions: [Int: [(rect: NSRect, text: String, font: NSFont)]] = [:]
         for placement in placements {
             drawables[placement.page, default: []].append(
                 (placement.location, placement.contentRect, placement.image)
             )
+            if let caption = placement.caption, let font = placement.captionFont {
+                captions[placement.page, default: []].append((
+                    ImageCaption.textRect(below: placement.contentRect, height: placement.captionHeight),
+                    caption,
+                    font
+                ))
+            }
         }
         for (index, view) in pageViews.enumerated() {
             view.floatingImages = drawables[index] ?? []
+            view.floatingCaptions = captions[index] ?? []
         }
 
         positionSidebarViews()
@@ -1115,7 +1180,7 @@ extension PageStackView {
         to exclusions: inout [Int: [NSBezierPath]]
     ) {
         guard var rect = FloatingImagePlacement.exclusionRect(
-            contentRect: placement.contentRect,
+            contentRect: placement.footprintRect,
             contentWidth: pageLayout.contentWidth,
             gutter: Self.imageGutter,
             topGutter: placement.anchoredToParagraph ? 0 : nil
@@ -1189,7 +1254,7 @@ extension PageStackView {
         forEachFloatingImage { location, floating, image in
             guard let position = floating.position else { return }
             // The paper origin converts straight to container coordinates.
-            placements.append(FloatingPlacement(
+            placements.append(withCaption(FloatingPlacement(
                 location: location,
                 page: position.page,
                 contentRect: FloatingImagePlacement.contentRect(
@@ -1199,7 +1264,7 @@ extension PageStackView {
                     topMargin: pageLayout.topMargin
                 ),
                 image: image
-            ))
+            ), of: floating))
         }
         return placements
     }
@@ -1279,42 +1344,156 @@ extension PageStackView {
                 topMargin: pageLayout.topMargin
             )
             var targetPage = page
+            let captionHeight = self.captionHeight(of: floating, width: rect.width, at: location)
             // Word paginated this document differently than Inkling does, so an
             // imported offset can drop a tall image past the bottom of the page
             // its paragraph landed on. Same rule as an un-hinted image: park it
             // at the top of the next page rather than let it bleed. Skipping
             // this left the image hanging off the page bottom *and* pushed its
             // own paragraph onto the following page, stranding the two apart.
-            if rect.minY > 0, rect.maxY > pageLayout.contentHeight {
+            if rect.minY > 0, rect.maxY + captionHeight > pageLayout.contentHeight {
                 targetPage = page + 1
                 rect.origin.y = 0
             }
-            return FloatingPlacement(
+            return withCaption(FloatingPlacement(
                 location: location,
                 page: targetPage,
                 contentRect: rect,
                 image: image,
                 anchoredToParagraph: true
-            )
+            ), of: floating)
         }
         // If the image can't fit in what's left of this page, park it at the top
-        // of the next one rather than let it run past the bottom margin.
-        let fits = lineRect.minY + floating.displaySize.height <= pageLayout.contentHeight
+        // of the next one rather than let it run past the bottom margin. The
+        // caption counts: an image must not leave its caption on another page.
+        let width = min(floating.displaySize.width, pageLayout.contentWidth)
+        let footprintHeight = floating.displaySize.height
+            + captionHeight(of: floating, width: width, at: location)
+        let fits = lineRect.minY + footprintHeight <= pageLayout.contentHeight
         let targetPage = fits ? page : page + 1
         let y = fits ? lineRect.minY : 0
 
-        return FloatingPlacement(
+        return withCaption(FloatingPlacement(
             location: location,
             page: targetPage,
             contentRect: NSRect(
                 x: 0,
                 y: y,
-                width: min(floating.displaySize.width, pageLayout.contentWidth),
+                width: width,
                 height: floating.displaySize.height
             ),
             image: image,
             anchoredToParagraph: true
+        ), of: floating)
+    }
+
+    /// The font a caption is set in: small italic in the family of the text
+    /// the image is anchored in. Matches the printer.
+    private func captionFont(at location: Int) -> NSFont {
+        let textFont = location < storage.length
+            ? storage.attribute(.font, at: location, effectiveRange: nil) as? NSFont
+            : nil
+        return ImageCaption.font(near: textFont)
+    }
+
+    private func captionHeight(of floating: FloatingImageAttachment, width: CGFloat, at location: Int) -> CGFloat {
+        guard floating.caption != nil else { return 0 }
+        return ImageCaption.height(of: floating.caption, width: width, font: captionFont(at: location))
+    }
+
+    /// `placement` with its image's caption measured and attached.
+    private func withCaption(
+        _ placement: FloatingPlacement,
+        of floating: FloatingImageAttachment
+    ) -> FloatingPlacement {
+        guard let caption = ImageCaption.normalized(floating.caption) else { return placement }
+        var placement = placement
+        let font = captionFont(at: placement.location)
+        placement.caption = caption
+        placement.captionFont = font
+        placement.captionHeight = ImageCaption.height(
+            of: caption, width: placement.contentRect.width, font: font
         )
+        return placement
+    }
+
+    /// The image plus its caption, for keeping a dragged image's caption on
+    /// the paper too.
+    func footprintSize(of floating: FloatingImageAttachment, at location: Int) -> NSSize {
+        NSSize(
+            width: floating.displaySize.width,
+            height: floating.displaySize.height
+                + captionHeight(of: floating, width: floating.displaySize.width, at: location)
+        )
+    }
+
+    // MARK: - Image captions
+
+    /// Selects the image at `location`, as pressing it does.
+    func selectImage(at location: Int, in pageView: PageTextView) {
+        selectedImageLocation = location
+        pageView.setSelectedRange(NSRange(location: location, length: 1))
+        pageViews.forEach { $0.needsDisplay = true }
+    }
+
+    @objc func editSelectedImageCaption(_ sender: Any?) {
+        guard let location = selectedImageLocation else { return }
+        editCaption(ofImageAt: location)
+    }
+
+    @objc func removeSelectedImageCaption(_ sender: Any?) {
+        guard let location = selectedImageLocation else { return }
+        setCaption(nil, ofImageAt: location)
+    }
+
+    /// Asks for the caption of the image at `location` in a sheet.
+    func editCaption(ofImageAt location: Int) {
+        guard let attachment = floatingAttachment(at: location), let window else { return }
+
+        let alert = NSAlert()
+        alert.messageText = attachment.caption == nil ? "Add Caption" : "Edit Caption"
+        alert.informativeText = "The caption appears beneath the image, on screen and in print."
+        let field = NSTextField(string: attachment.caption ?? "")
+        field.placeholderString = "Caption"
+        field.frame = NSRect(x: 0, y: 0, width: 320, height: 24)
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+        if attachment.caption != nil {
+            alert.addButton(withTitle: "Remove Caption")
+        }
+        alert.window.initialFirstResponder = field
+
+        alert.beginSheetModal(for: window) { [weak self] response in
+            switch response {
+            case .alertFirstButtonReturn:
+                self?.setCaption(field.stringValue, ofImageAt: location)
+            case .alertThirdButtonReturn:
+                self?.setCaption(nil, ofImageAt: location)
+            default:
+                break
+            }
+        }
+    }
+
+    /// Sets (or, with nil or blank text, removes) the caption of the image at
+    /// `location`, with undo.
+    func setCaption(_ caption: String?, ofImageAt location: Int) {
+        guard let attachment = floatingAttachment(at: location) else { return }
+        let old = attachment.caption
+        let new = ImageCaption.normalized(caption)
+        guard old != new else { return }
+
+        attachment.caption = new
+        undoManager?.registerUndo(withTarget: self) { stack in
+            stack.setCaption(old, ofImageAt: location)
+        }
+        undoManager?.setActionName(new == nil ? "Remove Caption" : "Edit Caption")
+        rebuildFloatingImageLayout()
+        // Like a move, a caption lives on the attachment rather than in the
+        // characters, so no storage edit fires. Tell the delegate directly or
+        // the change never reaches the chapter's bodyData.
+        pageViews.first?.didChangeText()
     }
 
     // MARK: - Dragging an image between pages
@@ -1331,6 +1510,7 @@ extension PageStackView {
         /// Where inside the image the user grabbed, so it doesn't jump to the
         /// cursor on the first drag event.
         let grabOffset: NSSize
+        /// The image plus its caption, so the pair stays on the paper.
         let size: NSSize
         let startPosition: FloatingImagePosition?
         let startImportedPlacementHint: ImportedImagePlacementHint?
@@ -1348,7 +1528,7 @@ extension PageStackView {
         moveSession = ImageMoveSession(
             location: hit.location,
             grabOffset: NSSize(width: point.x - rect.minX, height: point.y - rect.minY),
-            size: attachment.displaySize,
+            size: footprintSize(of: attachment, at: hit.location),
             startPosition: attachment.position,
             startImportedPlacementHint: attachment.importedPlacementHint
         )
@@ -1652,11 +1832,16 @@ extension PageStackView {
                 ? contentOrigin.x + session.originalSize.width
                 : pageLayout.contentWidth - contentOrigin.x
         )
+        // A caption sits below the image, so growing downward must leave it
+        // room on the page.
+        let captionRoom = floatingAttachment(at: session.location).map {
+            captionHeight(of: $0, width: session.originalSize.width, at: session.location)
+        } ?? 0
         let maximumHeight = max(
             session.originalSize.height,
             session.handle.dragsTopEdge
                 ? contentOrigin.y + session.originalSize.height
-                : pageLayout.contentHeight - contentOrigin.y
+                : pageLayout.contentHeight - contentOrigin.y - captionRoom
         )
         let size = ImageResizeGeometry.resizedSize(
             original: session.originalSize,
