@@ -722,6 +722,35 @@ struct InklingTests {
         #expect(stored == original)
     }
 
+    /// When an edit can't be encoded the last good data must stay put, and the
+    /// editor must remember the edits are unsaved until an encode succeeds.
+    @Test @MainActor func anUnencodableEditKeepsTheLastGoodDataAndIsFlagged() throws {
+        let document = InklingDocument()
+        let context = try #require(document.managedObjectContext)
+        let chapter = Chapter(context: context)
+        let original = try #require(RichTextCodec.encode(NSAttributedString(string: "saved")))
+        var stored: Data? = original
+        let editor = RichTextEditor(
+            data: Binding(get: { stored }, set: { stored = $0 }),
+            documentID: chapter.objectID
+        )
+        let coordinator = editor.makeCoordinator()
+        let scrollView = ContinuousTextView.makeScrollView()
+        let textView = try #require(scrollView.documentView as? NSTextView)
+        coordinator.load(stored, documentID: chapter.objectID, into: textView)
+
+        coordinator.encode = { _ in nil }
+        textView.textStorage?.setAttributedString(NSAttributedString(string: "lost?"))
+        coordinator.textDidChange(Notification(name: NSText.didChangeNotification, object: textView))
+        #expect(stored == original)
+        #expect(coordinator.hasUnsavableEdits)
+
+        coordinator.encode = RichTextCodec.encode
+        coordinator.textDidChange(Notification(name: NSText.didChangeNotification, object: textView))
+        #expect(!coordinator.hasUnsavableEdits)
+        #expect(stored.flatMap(RichTextCodec.decode)?.string == "lost?")
+    }
+
     @Test @MainActor func pagedEditorAlsoProtectsUnreadableRichText() throws {
         let document = InklingDocument()
         let context = try #require(document.managedObjectContext)

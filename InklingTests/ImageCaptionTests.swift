@@ -206,6 +206,52 @@ struct ImageCaptionTests {
             <= layout.paperSize.height + 0.5)
     }
 
+    /// A long caption pushes a fixed image near the page foot up the page;
+    /// undo must put the image back where it was, not just drop the words.
+    @Test func undoingACaptionRestoresTheImagesPosition() throws {
+        let stack = try Self.stack(lines: 4, caption: nil)
+        let location = try #require(Self.imageLocation(in: stack))
+        let attachment = try #require(stack.floatingAttachment(at: location))
+        let layout = PagedEditorLayout.letter
+        let original = FloatingImagePosition(
+            page: 0,
+            origin: CGPoint(
+                x: layout.leftMargin,
+                y: layout.paperSize.height - attachment.displaySize.height
+            )
+        )
+        attachment.position = original
+        stack.rebuildFloatingImageLayout()
+
+        stack.setCaption(Self.longCaption, ofImageAt: location)
+        let shifted = try #require(attachment.position)
+        #expect(shifted.origin.y < original.origin.y)
+
+        stack.sharedUndoManager.undo()
+        #expect(attachment.caption == nil)
+        #expect(attachment.position == original)
+
+        stack.sharedUndoManager.redo()
+        #expect(attachment.caption == ImageCaption.normalized(Self.longCaption))
+        #expect(attachment.position == shifted)
+    }
+
+    /// The image popover remembers its image, not a character index: typing
+    /// before the image while the popover is open must not misdirect Apply.
+    @Test func imageSettingsFollowTheImageAfterTextBeforeItChanges() throws {
+        let stack = try Self.stack(lines: 3, caption: nil)
+        let location = try #require(Self.imageLocation(in: stack))
+        let attachment = try #require(stack.floatingAttachment(at: location))
+
+        stack.storage.replaceCharacters(in: NSRange(location: 0, length: 0), with: "Inserted. ")
+        #expect(stack.floatingAttachment(at: location) !== attachment)
+
+        stack.applyImageSettings(caption: "Moved along", followsText: true, to: attachment)
+
+        #expect(attachment.caption == "Moved along")
+        #expect(stack.location(of: attachment) == location + 10)
+    }
+
     @Test func narrowingAFixedCaptionedImageReclampsTheCombinedFootprint() throws {
         let stack = try Self.stack(lines: 4, caption: Self.longCaption)
         let location = try #require(Self.imageLocation(in: stack))

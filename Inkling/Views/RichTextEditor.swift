@@ -273,18 +273,40 @@ struct RichTextEditor: NSViewRepresentable {
             else { return }
             (textView as? PageTextView)?.pageStack?.prepareFloatingImages()
             let attributed = textView.attributedString()
-            let attempted = RichTextCodec.encode(attributed)
-            guard attempted != nil else {
-                NSSound.beep()
+            guard let encoded = encode(attributed) else {
+                // The last good data stays in the store, but these edits can't
+                // reach it — and since nothing was written, nothing marks the
+                // document edited either. Keep it edited so closing still
+                // asks, and say so once rather than letting the edits vanish.
+                reportUnsavableEdits(in: textView)
                 return
             }
-            let encoded = RichTextCodec.dataForPersistence(
-                encoded: attempted,
-                previous: loadedData ?? parent.data
-            )
+            hasUnsavableEdits = false
             parent.data = encoded
             loadedData = encoded
             parent.onTextChange?(textView.string)
+        }
+
+        /// The serializer, replaceable so tests can make it fail.
+        var encode: (NSAttributedString) -> Data? = RichTextCodec.encode
+        /// True while the text on screen holds edits that couldn't be encoded.
+        private(set) var hasUnsavableEdits = false
+
+        private func reportUnsavableEdits(in textView: NSTextView) {
+            let window = textView.window
+            (window?.windowController?.document as? NSDocument)?.updateChangeCount(.changeDone)
+            guard !hasUnsavableEdits else { return }
+            hasUnsavableEdits = true
+            guard let window else { return }
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "Inkling can’t save your latest changes to this text"
+            alert.informativeText = """
+                Your edits are still on screen, but saving would keep the last version \
+                that could be stored. Undo the most recent change (often a pasted or \
+                dropped item), or copy the text somewhere safe.
+                """
+            alert.beginSheetModal(for: window)
         }
 
         func textViewDidChangeSelection(_ notification: Notification) {

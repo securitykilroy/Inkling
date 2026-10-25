@@ -1601,23 +1601,15 @@ extension PageStackView {
         popover.contentViewController = NSHostingController(rootView: ImageInspectorView(
             caption: attachment.caption,
             followsText: attachment.position == nil,
-            onApply: { [weak self, weak popover] caption, followsText in
-                guard let self else { return }
-                let captionChanged = ImageCaption.normalized(caption) != attachment.caption
-                let placementChanged = followsText != (attachment.position == nil)
-                guard captionChanged || placementChanged else {
-                    popover?.close()
-                    return
+            onApply: { [weak self, weak popover, weak attachment] caption, followsText in
+                if let self, let attachment {
+                    self.applyImageSettings(caption: caption, followsText: followsText, to: attachment)
                 }
-                self.undoManager?.beginUndoGrouping()
-                self.setCaption(caption, ofImageAt: location)
-                self.setImageFollowsText(followsText, at: location)
-                self.undoManager?.endUndoGrouping()
-                self.undoManager?.setActionName("Edit Image")
                 popover?.close()
             },
-            onRemoveCaption: { [weak self] in
-                self?.setCaption(nil, ofImageAt: location)
+            onRemoveCaption: { [weak self, weak attachment] in
+                guard let self, let attachment, let location = self.location(of: attachment) else { return }
+                self.setCaption(nil, ofImageAt: location)
             }
         ))
         imageInspectorPopover = popover
@@ -1626,6 +1618,22 @@ extension PageStackView {
             of: pageView,
             preferredEdge: .maxX
         )
+    }
+
+    /// The popover's Apply, as one undo step. Takes the attachment rather than
+    /// a character index because the popover outlives the click that opened
+    /// it: text edited meanwhile would shift a remembered index onto another
+    /// image. Does nothing if the image has since been deleted.
+    func applyImageSettings(caption: String, followsText: Bool, to attachment: FloatingImageAttachment) {
+        guard let location = location(of: attachment) else { return }
+        let captionChanged = ImageCaption.normalized(caption) != attachment.caption
+        let placementChanged = followsText != (attachment.position == nil)
+        guard captionChanged || placementChanged else { return }
+        undoManager?.beginUndoGrouping()
+        setCaption(caption, ofImageAt: location)
+        setImageFollowsText(followsText, at: location)
+        undoManager?.endUndoGrouping()
+        undoManager?.setActionName("Edit Image")
     }
 
     @objc func followSelectedImageText(_ sender: Any?) {
@@ -1707,16 +1715,43 @@ extension PageStackView {
         let new = ImageCaption.normalized(caption)
         guard old != new else { return }
 
+        let oldPosition = attachment.position
         attachment.caption = new
+        // A longer caption can push a fixed image up to keep both on the
+        // paper, so undo has to put the image back as well as the words.
         normalizePosition(of: attachment, at: location)
+        let actionName = new == nil ? "Remove Caption" : "Edit Caption"
         undoManager?.registerUndo(withTarget: self) { stack in
-            stack.setCaption(old, ofImageAt: location)
+            stack.restoreCaption(old, position: oldPosition, ofImageAt: location, actionName: actionName)
         }
-        undoManager?.setActionName(new == nil ? "Remove Caption" : "Edit Caption")
+        undoManager?.setActionName(actionName)
         rebuildFloatingImageLayout()
         // Like a move, a caption lives on the attachment rather than in the
         // characters, so no storage edit fires. Tell the delegate directly or
         // the change never reaches the chapter's bodyData.
+        pageViews.first?.didChangeText()
+    }
+
+    /// Undo/redo for `setCaption`: puts back an exact caption and position
+    /// pair, without re-clamping, and registers the inverse.
+    private func restoreCaption(
+        _ caption: String?,
+        position: FloatingImagePosition?,
+        ofImageAt location: Int,
+        actionName: String
+    ) {
+        guard let attachment = floatingAttachment(at: location) else { return }
+        let currentCaption = attachment.caption
+        let currentPosition = attachment.position
+        attachment.caption = caption
+        attachment.position = position
+        undoManager?.registerUndo(withTarget: self) { stack in
+            stack.restoreCaption(
+                currentCaption, position: currentPosition, ofImageAt: location, actionName: actionName
+            )
+        }
+        undoManager?.setActionName(actionName)
+        rebuildFloatingImageLayout()
         pageViews.first?.didChangeText()
     }
 
@@ -1864,6 +1899,22 @@ extension PageStackView {
         return storage.attribute(
             .attachment, at: location, effectiveRange: nil
         ) as? FloatingImageAttachment
+    }
+
+    /// Where `attachment` sits in the storage now, or nil once it's gone. For
+    /// UI that outlives a single event (the image popover): text edited in
+    /// the meantime shifts a remembered character index onto another image.
+    func location(of attachment: FloatingImageAttachment) -> Int? {
+        var found: Int?
+        storage.enumerateAttribute(
+            .attachment, in: NSRange(location: 0, length: storage.length)
+        ) { value, range, stop in
+            if (value as? FloatingImageAttachment) === attachment {
+                found = range.location
+                stop.pointee = true
+            }
+        }
+        return found
     }
 
     func containsProtectedFloatingImage(in range: NSRange) -> Bool {
