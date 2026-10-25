@@ -226,6 +226,21 @@ final class ManuscriptPrintView: NSView {
         return pages[bodyPage - 1].images.count
     }
 
+    /// Complete image-and-caption rectangles in printable-content coordinates.
+    /// Exposed for geometry regression tests.
+    func floatingImageFootprints(onPage physicalPage: Int) -> [NSRect] {
+        let bodyPage = physicalPage - titlePageCount
+        guard bodyPage >= 1, pages.indices.contains(bodyPage - 1) else { return [] }
+        return pages[bodyPage - 1].images.map { image in
+            NSRect(
+                x: image.contentRect.minX,
+                y: image.contentRect.minY,
+                width: image.contentRect.width,
+                height: image.contentRect.height + image.captionHeight
+            )
+        }
+    }
+
     /// 1 when a leading title page is present, 0 otherwise. Body pages are
     /// shifted by this so the title page occupies physical page 1 on its own.
     private var titlePageCount: Int { titlePage == nil ? 0 : 1 }
@@ -450,23 +465,43 @@ final class ManuscriptPrintView: NSView {
         let fullRange = NSRange(location: 0, length: text.length)
         text.enumerateAttribute(.attachment, in: fullRange) { value, range, _ in
             guard let attachment = value as? NSTextAttachment,
-                  let position = text.attribute(
+                  let savedPosition = text.attribute(
                       .inklingFloatingImagePosition,
                       at: range.location,
                       effectiveRange: nil
                   ) as? FloatingImagePosition,
+                  savedPosition.isValidForPersistence,
                   let size = sizes[ObjectIdentifier(attachment)],
                   let image = attachment.image
             else { return }
 
-            let contentRect = FloatingImagePlacement.contentRect(
-                origin: position.origin,
-                imageSize: size,
-                leftMargin: leftMargin,
-                topMargin: topMargin
+            let captionHeight = Self.captionHeight(
+                at: range.location,
+                in: text,
+                width: size.width
+            )
+            // The print view represents the printer's imageable area, not the
+            // full sheet. Translate the saved paper origin into that space and
+            // clamp the complete footprint there so neither image nor caption
+            // is silently clipped by a printer's non-printable margins.
+            let contentOrigin = CGPoint(
+                x: savedPosition.origin.x - leftMargin,
+                y: savedPosition.origin.y - topMargin
+            )
+            let clampedContentOrigin = FloatingImagePlacement.clampedOrigin(
+                contentOrigin,
+                imageSize: NSSize(
+                    width: size.width,
+                    height: size.height + captionHeight
+                ),
+                paperSize: pageSize
+            )
+            let contentRect = NSRect(
+                origin: clampedContentOrigin,
+                size: size
             )
             placements.append(Self.withCaption(
-                FloatingPlacement(page: position.page, contentRect: contentRect, image: image),
+                FloatingPlacement(page: savedPosition.page, contentRect: contentRect, image: image),
                 at: range.location,
                 in: text
             ))

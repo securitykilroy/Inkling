@@ -13,9 +13,19 @@ import CoreGraphics
 
 /// A floating image's fixed placement: which page it lives on, and the top-left
 /// corner of the image in that page's paper coordinates.
-nonisolated struct FloatingImagePosition: Equatable {
+nonisolated struct FloatingImagePosition: Equatable, Hashable {
+    /// Matches the editor's hard pagination ceiling. Persisted positions beyond
+    /// this are treated as damaged input rather than being allowed to allocate
+    /// an effectively unbounded number of page views.
+    static let maximumPageIndex = 4_999
+
     var page: Int
     var origin: CGPoint
+
+    var isValidForPersistence: Bool {
+        page >= 0 && page <= Self.maximumPageIndex
+            && origin.x.isFinite && origin.y.isFinite
+    }
 }
 
 nonisolated enum ImportedImageReference: String, Codable, Equatable {
@@ -145,6 +155,28 @@ enum FloatingImagePlacement {
         return CGPoint(
             x: min(max(0, origin.x), maxX),
             y: min(max(0, origin.y), maxY)
+        )
+    }
+
+    /// Normalizes a saved placement against the complete visible footprint.
+    /// `captionHeight` is supplied by the caller because caption font choice is
+    /// editor/print specific, while the clamping itself must remain identical.
+    static func clampedPosition(
+        _ position: FloatingImagePosition,
+        imageSize: CGSize,
+        captionHeight: CGFloat,
+        paperSize: CGSize
+    ) -> FloatingImagePosition {
+        FloatingImagePosition(
+            page: min(max(0, position.page), FloatingImagePosition.maximumPageIndex),
+            origin: clampedOrigin(
+                position.origin,
+                imageSize: CGSize(
+                    width: imageSize.width,
+                    height: imageSize.height + max(0, captionHeight)
+                ),
+                paperSize: paperSize
+            )
         )
     }
 

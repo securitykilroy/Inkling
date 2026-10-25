@@ -97,12 +97,20 @@ struct ProjectSettingsView: View {
 
         for entry in shelfEntries {
             guard let attributed = RichTextCodec.decode(entry.bodyData) else { continue }
-            entry.bodyData = RichTextCodec.encode(ProjectFontStyler.restyled(attributed, familyName: familyName))
+            entry.bodyData = RichTextCodec.dataForPersistence(
+                encoded: RichTextCodec.encode(
+                    ProjectFontStyler.restyled(attributed, familyName: familyName)
+                ),
+                previous: entry.bodyData
+            )
         }
 
         if let notes = RichTextCodec.decode(project.projectNotesData) {
-            project.projectNotesData = RichTextCodec.encode(
-                ProjectFontStyler.restyled(notes, familyName: familyName)
+            project.projectNotesData = RichTextCodec.dataForPersistence(
+                encoded: RichTextCodec.encode(
+                    ProjectFontStyler.restyled(notes, familyName: familyName)
+                ),
+                previous: project.projectNotesData
             )
         }
     }

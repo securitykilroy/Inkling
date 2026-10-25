@@ -11,9 +11,16 @@ import ObjectiveC.runtime
 import PDFKit
 import SwiftUI
 import Testing
+import UniformTypeIdentifiers
 @testable import Inkling
 
 struct InklingTests {
+
+    @Test func failedRichTextEncodingPreservesTheLastKnownGoodData() {
+        let previous = Data("last known good".utf8)
+
+        #expect(RichTextCodec.dataForPersistence(encoded: nil, previous: previous) == previous)
+    }
 
     @Test func pagedEditorFitsWidePaperIntoNarrowEditorPane() {
         let scale = PagedEditorScrollView.fitMagnification(
@@ -2002,6 +2009,129 @@ struct InklingTests {
         // 1,828,800 × 914,400 EMU is exactly 144 × 72 points (2 × 1 inches).
         #expect(abs(attachment.bounds.width - 144) < 0.01)
         #expect(abs(attachment.bounds.height - 72) < 0.01)
+    }
+
+    @Test @MainActor func importerPreservesOriginalPNGBytes() throws {
+        let imageData = testPNGData()
+        let xml = wrapInDocument("""
+            <w:p><w:r><w:drawing><wp:inline>
+            <a:graphic><a:graphicData><a:blip r:embed="rId1"/></a:graphicData></a:graphic>
+            </wp:inline></w:drawing></w:r></w:p>
+            """)
+        let url = try writeTempFile(makeDocx(documentXML: xml, media: ["pic.png": imageData]))
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let attributed = try WordDocumentImporter.importChapterBody(from: url, maximumImageWidth: 468)
+        let attachment = try #require(
+            attributed.attribute(.attachment, at: 0, effectiveRange: nil) as? NSTextAttachment
+        )
+
+        #expect(attachment.fileWrapper?.regularFileContents == imageData)
+        #expect(attachment.fileWrapper?.preferredFilename?.hasSuffix(".png") == true)
+    }
+
+    /// Keeping the source bytes must not cost the display size: an attachment
+    /// backed only by a file wrapper lays out at its full pixel size, which is
+    /// how a plain text view (Notes, Shelf) shows a non-floating image.
+    @Test @MainActor func aByteKeepingAttachmentStillLaysOutAtItsFittedSize() throws {
+        let image = NSImage(size: NSSize(width: 400, height: 300), flipped: false) { rect in
+            NSColor.systemBlue.setFill()
+            rect.fill()
+            return true
+        }
+        let tiff = try #require(image.tiffRepresentation)
+        let png = try #require(
+            NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:])
+        )
+        let decoded = try #require(NSImage(data: png))
+        let attachment = RichTextImageInserter.makeAttachment(
+            for: decoded,
+            sourceData: png,
+            contentType: UTType.png,
+            filename: "photo.png",
+            maximumWidth: 200
+        )
+
+        let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: 500, height: 100))
+        let layoutManager = try #require(textView.layoutManager)
+        let container = try #require(textView.textContainer)
+        textView.textStorage?.setAttributedString(NSAttributedString(attachment: attachment))
+        layoutManager.ensureLayout(for: container)
+        let used = layoutManager.usedRect(for: container)
+
+        #expect(attachment.fileWrapper?.regularFileContents == png)
+        #expect(used.height < 160)
+        #expect(used.height >= 150)
+    }
+
+    @Test @MainActor func importerAssociatesAWordCaptionWithThePrecedingImage() throws {
+        let imageData = testPNGData()
+        let xml = wrapInDocument("""
+            <w:p><w:r><w:drawing><wp:inline>
+            <a:graphic><a:graphicData><a:blip r:embed="rId1"/></a:graphicData></a:graphic>
+            </wp:inline></w:drawing></w:r></w:p>
+            <w:p><w:pPr><w:pStyle w:val="Caption"/></w:pPr><w:r><w:t>Harbour at dusk</w:t></w:r></w:p>
+            """)
+        let url = try writeTempFile(makeDocx(documentXML: xml, media: ["pic.png": imageData]))
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let attributed = try WordDocumentImporter.importChapterBody(from: url, maximumImageWidth: 468)
+
+        #expect(attributed.attribute(.inklingImageCaption, at: 0, effectiveRange: nil) as? String == "Harbour at dusk")
+        #expect(!attributed.string.contains("Harbour at dusk"))
+    }
+
+    /// The exporter writes one Caption paragraph per captioned image, in order;
+    /// Word's own captions carry a SEQ field whose instruction text must not
+    /// leak into the caption.
+    @Test @MainActor func importerMatchesCaptionsToImagesInOrderAndSkipsFieldCodes() throws {
+        let imageData = testPNGData()
+        let drawing = """
+            <w:r><w:drawing><wp:inline>
+            <a:graphic><a:graphicData><a:blip r:embed="rId1"/></a:graphicData></a:graphic>
+            </wp:inline></w:drawing></w:r>
+            """
+        let xml = wrapInDocument("""
+            <w:p>\(drawing)<w:r><w:t> and </w:t></w:r>\(drawing)</w:p>
+            <w:p><w:pPr><w:pStyle w:val="Caption"/></w:pPr><w:r><w:t>First</w:t></w:r></w:p>
+            <w:p><w:pPr><w:pStyle w:val="Caption"/></w:pPr>\
+            <w:r><w:t xml:space="preserve">Figure </w:t></w:r>\
+            <w:r><w:instrText xml:space="preserve"> SEQ Figure \\* ARABIC </w:instrText></w:r>\
+            <w:r><w:t>2</w:t></w:r></w:p>
+            """)
+        let url = try writeTempFile(makeDocx(documentXML: xml, media: ["pic.png": imageData]))
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let attributed = try WordDocumentImporter.importChapterBody(from: url, maximumImageWidth: 468)
+        var captions: [String?] = []
+        attributed.enumerateAttribute(
+            .attachment,
+            in: NSRange(location: 0, length: attributed.length)
+        ) { value, range, _ in
+            guard value is NSTextAttachment else { return }
+            captions.append(attributed.attribute(.inklingImageCaption, at: range.location, effectiveRange: nil) as? String)
+        }
+
+        #expect(captions == ["First", "Figure 2"])
+        #expect(!attributed.string.contains("First"))
+        #expect(!attributed.string.contains("SEQ"))
+    }
+
+    @Test @MainActor func codecDropsAnOutOfRangeFloatingImagePage() throws {
+        let imageData = testPNGData()
+        let attachment = NSTextAttachment(data: imageData, ofType: "public.png")
+        attachment.image = NSImage(data: imageData)
+        attachment.bounds = NSRect(x: 0, y: 0, width: 10, height: 10)
+        let body = NSMutableAttributedString(attachment: attachment)
+        body.addAttribute(
+            .inklingFloatingImagePosition,
+            value: FloatingImagePosition(page: 6_000, origin: CGPoint(x: 72, y: 72)),
+            range: NSRange(location: 0, length: 1)
+        )
+
+        let decoded = try #require(RichTextCodec.decode(try #require(RichTextCodec.encode(body))))
+
+        #expect(decoded.attribute(.inklingFloatingImagePosition, at: 0, effectiveRange: nil) == nil)
     }
 
     @Test @MainActor func importerPreservesWordAnchorPlacementAsAnEditableHint() throws {

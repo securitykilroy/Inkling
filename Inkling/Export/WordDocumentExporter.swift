@@ -164,7 +164,7 @@ enum WordDocumentExporter {
         // positioned Word drawing would need a DrawingML group; this keeps the
         // text with the picture without that.
         let captionParagraphs = captions.map { caption in
-            #"<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:rPr><w:i/><w:sz w:val="20"/></w:rPr><w:t xml:space="preserve">\#(escapeXML(caption))</w:t></w:r></w:p>"#
+            #"<w:p><w:pPr><w:pStyle w:val="Caption"/><w:jc w:val="center"/></w:pPr><w:r><w:rPr><w:i/><w:sz w:val="20"/></w:rPr><w:t xml:space="preserve">\#(escapeXML(caption))</w:t></w:r></w:p>"#
         }
         return "<w:p>\(properties)\(runs)</w:p>" + captionParagraphs.joined()
     }
@@ -536,6 +536,8 @@ enum WordDocumentExporter {
         <w:rPr><w:b/><w:sz w:val="44"/></w:rPr></w:style>\
         <w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="heading 2"/><w:basedOn w:val="Normal"/>\
         <w:rPr><w:b/><w:sz w:val="34"/></w:rPr></w:style>\
+        <w:style w:type="paragraph" w:styleId="Caption"><w:name w:val="Caption"/><w:basedOn w:val="Normal"/>\
+        <w:pPr><w:jc w:val="center"/></w:pPr><w:rPr><w:i/><w:sz w:val="20"/></w:rPr></w:style>\
         \(CalloutKind.allCases.map(calloutStyleXML).joined())\
         \(sidebarStyleXML)\
         </w:styles>

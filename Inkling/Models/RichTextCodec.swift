@@ -106,12 +106,19 @@ enum RichTextCodec {
               let records = try? JSONDecoder().decode([SidebarRecord].self, from: metadata)
         else { return }
 
-        for record in records where record.location < attributedString.length {
-            guard attributedString.attribute(.attachment, at: record.location, effectiveRange: nil) is NSTextAttachment
+        for record in records where record.location >= 0 && record.location < attributedString.length {
+            guard attributedString.attribute(.attachment, at: record.location, effectiveRange: nil) is NSTextAttachment,
+                  record.width.isFinite,
+                  record.contentHeight.isFinite,
+                  record.width > 0,
+                  record.contentHeight >= 0,
+                  record.width <= 10_000,
+                  record.contentHeight <= 10_000
             else { continue }
             var position: FloatingImagePosition?
             if let page = record.page, let x = record.originX, let y = record.originY {
-                position = FloatingImagePosition(page: page, origin: CGPoint(x: x, y: y))
+                let candidate = FloatingImagePosition(page: page, origin: CGPoint(x: x, y: y))
+                if candidate.isValidForPersistence { position = candidate }
             }
             let sidebar = SidebarAttachment(
                 contentData: record.content,
@@ -232,6 +239,13 @@ enum RichTextCodec {
         return wrapper.serializedRepresentation
     }
 
+    /// A failed rich-text serialization must never replace content that was
+    /// previously saved successfully. Kept as a small boundary helper so every
+    /// editor/offline rewrite follows the same rule.
+    nonisolated static func dataForPersistence(encoded: Data?, previous: Data?) -> Data? {
+        encoded ?? previous
+    }
+
     /// One record per floating sidebar, capturing its anchor, geometry, and RTF.
     nonisolated private static func sidebarRecords(in attributedString: NSAttributedString) -> [SidebarRecord] {
         var records: [SidebarRecord] = []
@@ -341,24 +355,34 @@ enum RichTextCodec {
               let records = try? JSONDecoder().decode([AttachmentSizeRecord].self, from: metadata)
         else { return }
 
-        for record in records where record.location < attributedString.length {
+        for record in records where record.location >= 0 && record.location < attributedString.length {
             guard let attachment = attributedString.attribute(
                 .attachment,
                 at: record.location,
                 effectiveRange: nil
-            ) as? NSTextAttachment else { continue }
+            ) as? NSTextAttachment,
+                  record.width.isFinite,
+                  record.height.isFinite,
+                  record.width > 0,
+                  record.height > 0,
+                  record.width <= 10_000,
+                  record.height <= 10_000
+            else { continue }
 
             // Carry any stored page placement forward as an in-memory attribute
             // so the editor and printer can build a positioned attachment from it.
             if let page = record.page, let originX = record.originX, let originY = record.originY {
-                attributedString.addAttribute(
-                    .inklingFloatingImagePosition,
-                    value: FloatingImagePosition(
-                        page: page,
-                        origin: CGPoint(x: originX, y: originY)
-                    ),
-                    range: NSRange(location: record.location, length: 1)
+                let position = FloatingImagePosition(
+                    page: page,
+                    origin: CGPoint(x: originX, y: originY)
                 )
+                if position.isValidForPersistence {
+                    attributedString.addAttribute(
+                        .inklingFloatingImagePosition,
+                        value: position,
+                        range: NSRange(location: record.location, length: 1)
+                    )
+                }
             } else if let hint = record.importedPlacementHint {
                 attributedString.addAttribute(
                     .inklingImportedImagePlacementHint,

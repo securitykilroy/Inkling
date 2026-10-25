@@ -26,6 +26,13 @@
 //
 
 import AppKit
+import SwiftUI
+
+extension NSPasteboard.PasteboardType {
+    /// Rich text copied between Inkling editors, including the private RTFD
+    /// sidecar that carries image size, placement, and captions.
+    static let inklingRichText = NSPasteboard.PasteboardType("com.washere.inkling.rich-text")
+}
 
 extension PagedEditorLayout {
     /// Height of one page's text area — the container height in the per-page
@@ -103,8 +110,12 @@ final class PageTextView: NSTextView {
     /// (origin = the text column's top-left). `location` is the attachment's
     /// character index, so a hit test can map back to the attachment.
     var floatingImages: [(location: Int, rect: NSRect, image: NSImage)] = [] {
-        didSet { needsDisplay = true }
+        didSet {
+            rebuildFloatingImageAccessibilityElements()
+            needsDisplay = true
+        }
     }
+    private var floatingImageAccessibilityElements: [NSAccessibilityElement] = []
 
     /// Captions beneath this page's floating images, in the same coordinates.
     var floatingCaptions: [(rect: NSRect, text: String, font: NSFont)] = [] {
@@ -149,6 +160,52 @@ final class PageTextView: NSTextView {
         )
     }
 
+    override var writablePasteboardTypes: [NSPasteboard.PasteboardType] {
+        [.inklingRichText] + super.writablePasteboardTypes.filter { $0 != .inklingRichText }
+    }
+
+    override var readablePasteboardTypes: [NSPasteboard.PasteboardType] {
+        [.inklingRichText] + super.readablePasteboardTypes.filter { $0 != .inklingRichText }
+    }
+
+    override func writeSelection(
+        to pboard: NSPasteboard,
+        type: NSPasteboard.PasteboardType
+    ) -> Bool {
+        guard type == .inklingRichText else {
+            return super.writeSelection(to: pboard, type: type)
+        }
+        let range = selectedRange()
+        guard range.location != NSNotFound,
+              range.length > 0,
+              let storage = textStorage,
+              NSMaxRange(range) <= storage.length,
+              let data = RichTextCodec.encode(storage.attributedSubstring(from: range))
+        else { return false }
+        return pboard.setData(data, forType: type)
+    }
+
+    override func readSelection(
+        from pboard: NSPasteboard,
+        type: NSPasteboard.PasteboardType
+    ) -> Bool {
+        guard type == .inklingRichText else {
+            return super.readSelection(from: pboard, type: type)
+        }
+        let range = selectedRange()
+        guard let data = pboard.data(forType: type),
+              let attributed = RichTextCodec.decode(data),
+              let storage = textStorage,
+              range.location != NSNotFound,
+              NSMaxRange(range) <= storage.length,
+              shouldChangeText(in: range, replacementString: attributed.string)
+        else { return false }
+        storage.replaceCharacters(in: range, with: attributed)
+        setSelectedRange(NSRange(location: range.location + attributed.length, length: 0))
+        didChangeText()
+        return true
+    }
+
     @objc func pasteWithFormatting(_ sender: Any?) {
         super.paste(sender)
     }
@@ -171,6 +228,50 @@ final class PageTextView: NSTextView {
         stack?.drawImageSelection(in: self)
         stack?.drawSidebarSelection(in: self)
         stack?.drawSnapGuide(in: self)
+    }
+
+    override func accessibilityChildren() -> [Any]? {
+        var children = super.accessibilityChildren() ?? []
+        children.append(contentsOf: floatingImageAccessibilityElements)
+        return children
+    }
+
+    private func rebuildFloatingImageAccessibilityElements() {
+        floatingImageAccessibilityElements = floatingImages.map { item in
+            let caption = stack?.floatingAttachment(at: item.location)?.caption
+            let label = ImageCaption.normalized(caption) ?? "Image"
+            let element = NSAccessibilityElement()
+            element.setAccessibilityRole(.image)
+            element.setAccessibilityLabel(label)
+            element.setAccessibilityParent(self)
+            // Relative to this view, so the frame follows scrolling and window
+            // moves. A screen frame captured here would go stale on the first
+            // scroll.
+            element.setAccessibilityFrameInParentSpace(viewRect(forFloating: item.rect))
+            element.setAccessibilityHelp(
+                "Use the Edit Image action to change the caption and placement."
+            )
+            element.setAccessibilityCustomActions([
+                NSAccessibilityCustomAction(name: "Edit Image") { [weak self] in
+                    guard let self, let stack = self.stack else { return false }
+                    stack.selectImage(at: item.location, in: self)
+                    stack.editCaption(ofImageAt: item.location)
+                    return true
+                }
+            ])
+            return element
+        }
+    }
+
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 36,
+           let stack,
+           let location = stack.selectedImageLocation,
+           selectedRange() == NSRange(location: location, length: 1) {
+            stack.editCaption(ofImageAt: location)
+            return
+        }
+        super.keyDown(with: event)
     }
 
     // MARK: - Image dragging
@@ -207,7 +308,7 @@ final class PageTextView: NSTextView {
         stack.selectImage(at: hit.location, in: self)
         let menu = NSMenu()
         let edit = NSMenuItem(
-            title: attachment.caption == nil ? "Add Caption…" : "Edit Caption…",
+            title: "Image Settings…",
             action: #selector(PageStackView.editSelectedImageCaption(_:)),
             keyEquivalent: ""
         )
@@ -222,6 +323,23 @@ final class PageTextView: NSTextView {
             remove.target = stack
             menu.addItem(remove)
         }
+        menu.addItem(.separator())
+        let follow = NSMenuItem(
+            title: "Follow Text",
+            action: #selector(PageStackView.followSelectedImageText(_:)),
+            keyEquivalent: ""
+        )
+        follow.target = stack
+        follow.state = attachment.position == nil ? .on : .off
+        menu.addItem(follow)
+        let lock = NSMenuItem(
+            title: "Lock to Page",
+            action: #selector(PageStackView.lockSelectedImageToPage(_:)),
+            keyEquivalent: ""
+        )
+        lock.target = stack
+        lock.state = attachment.position == nil ? .off : .on
+        menu.addItem(lock)
         return menu
     }
 
@@ -637,6 +755,7 @@ final class PageStackView: NSView, NSTextStorageDelegate {
     var resizeSession: ImageResizeSession?
     /// Character index of the selected image, which shows resize handles.
     var selectedImageLocation: Int?
+    private var imageInspectorPopover: NSPopover?
 
     // Sidebars: one child editor per anchor in the storage, hosted by the page
     // view its box lands on.
@@ -699,7 +818,7 @@ final class PageStackView: NSView, NSTextStorageDelegate {
     var activeSnapPage: Int?
 
     /// Upper bound on pages, so a pathological layout can't hang the app.
-    private static let maxPages = 5_000
+    private static let maxPages = FloatingImagePosition.maximumPageIndex + 1
 
     private func appendPage() {
         let index = pageViews.count
@@ -1208,7 +1327,10 @@ extension PageStackView {
     ) {
         let lastImagePage = placements.map(\.page).max() ?? -1
         let lastSidebarPage = sidebarPlacements.values.map(\.page).max() ?? -1
-        let lastAnchoredPage = max(lastImagePage, lastSidebarPage)
+        let lastAnchoredPage = min(
+            FloatingImagePosition.maximumPageIndex,
+            max(lastImagePage, lastSidebarPage)
+        )
         minimumPageCount = lastAnchoredPage >= 0 ? max(1, lastAnchoredPage + 1) : 1
         while pageCount < minimumPageCount { appendPage() }
 
@@ -1249,7 +1371,24 @@ extension PageStackView {
     private func explicitFloatingPlacements() -> [FloatingPlacement] {
         var placements: [FloatingPlacement] = []
         forEachFloatingImage { location, floating, image in
-            guard let position = floating.position else { return }
+            guard let savedPosition = floating.position else { return }
+            // A damaged placement falls back to following the text (the
+            // anchored pass runs after this one) rather than dropping the
+            // image from every page.
+            guard savedPosition.isValidForPersistence else {
+                floating.position = nil
+                return
+            }
+            let position = normalizedPosition(
+                savedPosition,
+                imageSize: floating.displaySize,
+                captionHeight: captionHeight(
+                    of: floating,
+                    width: floating.displaySize.width,
+                    at: location
+                )
+            )
+            if position != savedPosition { floating.position = position }
             // The paper origin converts straight to container coordinates.
             placements.append(withCaption(FloatingPlacement(
                 location: location,
@@ -1443,34 +1582,121 @@ extension PageStackView {
         setCaption(nil, ofImageAt: location)
     }
 
-    /// Asks for the caption of the image at `location` in a sheet.
+    /// Opens nonmodal image controls beside the selected image. The multiline
+    /// caption field and placement toggle stay visible while the author refers
+    /// to surrounding prose, unlike the old modal single-line alert.
     func editCaption(ofImageAt location: Int) {
-        guard let attachment = floatingAttachment(at: location), let window else { return }
+        guard let attachment = floatingAttachment(at: location),
+              let pageView = pageViews.first(where: { view in
+                  view.floatingImages.contains { $0.location == location }
+              }),
+              let item = pageView.floatingImages.first(where: { $0.location == location })
+        else { return }
 
-        let alert = NSAlert()
-        alert.messageText = attachment.caption == nil ? "Add Caption" : "Edit Caption"
-        alert.informativeText = "The caption appears beneath the image, on screen and in print."
-        let field = NSTextField(string: attachment.caption ?? "")
-        field.placeholderString = "Caption"
-        field.frame = NSRect(x: 0, y: 0, width: 320, height: 24)
-        alert.accessoryView = field
-        alert.addButton(withTitle: "Save")
-        alert.addButton(withTitle: "Cancel")
-        if attachment.caption != nil {
-            alert.addButton(withTitle: "Remove Caption")
-        }
-        alert.window.initialFirstResponder = field
-
-        alert.beginSheetModal(for: window) { [weak self] response in
-            switch response {
-            case .alertFirstButtonReturn:
-                self?.setCaption(field.stringValue, ofImageAt: location)
-            case .alertThirdButtonReturn:
+        selectedImageLocation = location
+        imageInspectorPopover?.close()
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.contentSize = NSSize(width: 360, height: 220)
+        popover.contentViewController = NSHostingController(rootView: ImageInspectorView(
+            caption: attachment.caption,
+            followsText: attachment.position == nil,
+            onApply: { [weak self, weak popover] caption, followsText in
+                guard let self else { return }
+                let captionChanged = ImageCaption.normalized(caption) != attachment.caption
+                let placementChanged = followsText != (attachment.position == nil)
+                guard captionChanged || placementChanged else {
+                    popover?.close()
+                    return
+                }
+                self.undoManager?.beginUndoGrouping()
+                self.setCaption(caption, ofImageAt: location)
+                self.setImageFollowsText(followsText, at: location)
+                self.undoManager?.endUndoGrouping()
+                self.undoManager?.setActionName("Edit Image")
+                popover?.close()
+            },
+            onRemoveCaption: { [weak self] in
                 self?.setCaption(nil, ofImageAt: location)
-            default:
-                break
             }
+        ))
+        imageInspectorPopover = popover
+        popover.show(
+            relativeTo: pageView.viewRect(forFloating: item.rect),
+            of: pageView,
+            preferredEdge: .maxX
+        )
+    }
+
+    @objc func followSelectedImageText(_ sender: Any?) {
+        guard let location = selectedImageLocation else { return }
+        setImageFollowsText(true, at: location)
+    }
+
+    @objc func lockSelectedImageToPage(_ sender: Any?) {
+        guard let location = selectedImageLocation else { return }
+        setImageFollowsText(false, at: location)
+    }
+
+    private func setImageFollowsText(_ followsText: Bool, at location: Int) {
+        guard let attachment = floatingAttachment(at: location) else { return }
+        let oldPosition = attachment.position
+        let oldHint = attachment.importedPlacementHint
+        let newPosition = followsText ? nil : currentPosition(ofImageAt: location)
+        let newHint = followsText ? oldHint : nil
+        guard oldPosition != newPosition || oldHint != newHint else { return }
+
+        attachment.position = newPosition
+        attachment.importedPlacementHint = newHint
+        undoManager?.registerUndo(withTarget: self) { stack in
+            stack.setImagePlacement(
+                oldPosition,
+                importedPlacementHint: oldHint,
+                at: location,
+                actionName: "Change Image Placement"
+            )
         }
+        undoManager?.setActionName("Change Image Placement")
+        rebuildFloatingImageLayout()
+        pageViews.first?.didChangeText()
+    }
+
+    private func setImagePlacement(
+        _ position: FloatingImagePosition?,
+        importedPlacementHint: ImportedImagePlacementHint?,
+        at location: Int,
+        actionName: String
+    ) {
+        guard let attachment = floatingAttachment(at: location) else { return }
+        let previousPosition = attachment.position
+        let previousHint = attachment.importedPlacementHint
+        attachment.position = position
+        attachment.importedPlacementHint = importedPlacementHint
+        undoManager?.registerUndo(withTarget: self) { stack in
+            stack.setImagePlacement(
+                previousPosition,
+                importedPlacementHint: previousHint,
+                at: location,
+                actionName: actionName
+            )
+        }
+        undoManager?.setActionName(actionName)
+        rebuildFloatingImageLayout()
+        pageViews.first?.didChangeText()
+    }
+
+    private func currentPosition(ofImageAt location: Int) -> FloatingImagePosition? {
+        for (page, view) in pageViews.enumerated() {
+            guard let item = view.floatingImages.first(where: { $0.location == location }) else { continue }
+            return FloatingImagePosition(
+                page: page,
+                origin: CGPoint(
+                    x: item.rect.minX + pageLayout.leftMargin,
+                    y: item.rect.minY + pageLayout.topMargin
+                )
+            )
+        }
+        return nil
     }
 
     /// Sets (or, with nil or blank text, removes) the caption of the image at
@@ -1482,6 +1708,7 @@ extension PageStackView {
         guard old != new else { return }
 
         attachment.caption = new
+        normalizePosition(of: attachment, at: location)
         undoManager?.registerUndo(withTarget: self) { stack in
             stack.setCaption(old, ofImageAt: location)
         }
@@ -1958,6 +2185,7 @@ extension PageStackView {
         // The inline anchor stays tiny — the visible image is drawn as an
         // overlay, not as a glyph.
         attachment.bounds = NSRect(x: 0, y: 0, width: 0.1, height: 0.1)
+        normalizePosition(of: attachment, at: location)
 
         // An attachment's size is measured during glyph generation and cached,
         // so mutating it in place is invisible until the glyph for this
@@ -1972,6 +2200,39 @@ extension PageStackView {
         )
 
         rebuildFloatingImageLayout()
+    }
+
+    /// Keeps a fixed image's complete visible footprint — image plus wrapped
+    /// caption — on its paper. Caption height is intentionally measured at the
+    /// current width because narrowing an image can add many caption lines.
+    private func normalizePosition(of attachment: FloatingImageAttachment, at location: Int) {
+        guard let position = attachment.position else { return }
+        guard position.isValidForPersistence else {
+            attachment.position = nil
+            return
+        }
+        attachment.position = normalizedPosition(
+            position,
+            imageSize: attachment.displaySize,
+            captionHeight: captionHeight(
+                of: attachment,
+                width: attachment.displaySize.width,
+                at: location
+            )
+        )
+    }
+
+    private func normalizedPosition(
+        _ position: FloatingImagePosition,
+        imageSize: NSSize,
+        captionHeight: CGFloat
+    ) -> FloatingImagePosition {
+        FloatingImagePlacement.clampedPosition(
+            position,
+            imageSize: imageSize,
+            captionHeight: captionHeight,
+            paperSize: pageLayout.paperSize
+        )
     }
 
     /// Draws the selection outline and corner handles over the selected image.

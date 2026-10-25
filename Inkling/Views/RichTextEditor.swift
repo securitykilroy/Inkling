@@ -273,7 +273,15 @@ struct RichTextEditor: NSViewRepresentable {
             else { return }
             (textView as? PageTextView)?.pageStack?.prepareFloatingImages()
             let attributed = textView.attributedString()
-            let encoded = RichTextCodec.encode(attributed)
+            let attempted = RichTextCodec.encode(attributed)
+            guard attempted != nil else {
+                NSSound.beep()
+                return
+            }
+            let encoded = RichTextCodec.dataForPersistence(
+                encoded: attempted,
+                previous: loadedData ?? parent.data
+            )
             parent.data = encoded
             loadedData = encoded
             parent.onTextChange?(textView.string)

@@ -182,6 +182,110 @@ struct ImageCaptionTests {
         #expect(stack.floatingAttachment(at: location)?.caption == nil)
     }
 
+    @Test func addingACaptionKeepsAFixedImageAndCaptionInsideThePaper() throws {
+        let stack = try Self.stack(lines: 4, caption: nil)
+        let location = try #require(Self.imageLocation(in: stack))
+        let attachment = try #require(stack.floatingAttachment(at: location))
+        let layout = PagedEditorLayout.letter
+        attachment.position = FloatingImagePosition(
+            page: 0,
+            origin: CGPoint(
+                x: layout.leftMargin,
+                y: layout.paperSize.height - attachment.displaySize.height
+            )
+        )
+        stack.rebuildFloatingImageLayout()
+
+        stack.setCaption(Self.longCaption, ofImageAt: location)
+
+        let caption = try #require(stack.pageViews[0].floatingCaptions.first)
+        #expect(caption.rect.maxY + layout.topMargin <= layout.paperSize.height + 0.5)
+        let position = try #require(attachment.position)
+        #expect(position.origin.y + attachment.displaySize.height
+            + ImageCaption.height(of: Self.longCaption, width: attachment.displaySize.width, font: caption.font)
+            <= layout.paperSize.height + 0.5)
+    }
+
+    @Test func narrowingAFixedCaptionedImageReclampsTheCombinedFootprint() throws {
+        let stack = try Self.stack(lines: 4, caption: Self.longCaption)
+        let location = try #require(Self.imageLocation(in: stack))
+        let attachment = try #require(stack.floatingAttachment(at: location))
+        let layout = PagedEditorLayout.letter
+        attachment.position = FloatingImagePosition(
+            page: 0,
+            origin: CGPoint(x: layout.leftMargin, y: layout.paperSize.height - 180)
+        )
+        stack.rebuildFloatingImageLayout()
+
+        stack.setImageSize(NSSize(width: 50, height: 37.5), at: location)
+
+        let caption = try #require(stack.pageViews[0].floatingCaptions.first)
+        #expect(caption.rect.maxY + layout.topMargin <= layout.paperSize.height + 0.5)
+    }
+
+    @Test func inklingPastePreservesImageCaptionSizeAndPlacement() throws {
+        let source = try Self.stack(lines: 2, caption: "Copied caption")
+        let location = try #require(Self.imageLocation(in: source))
+        let sourceAttachment = try #require(source.floatingAttachment(at: location))
+        sourceAttachment.displaySize = NSSize(width: 123, height: 91)
+        sourceAttachment.position = FloatingImagePosition(page: 2, origin: CGPoint(x: 88, y: 144))
+        source.pageViews[0].setSelectedRange(NSRange(location: location, length: 1))
+
+        source.pageViews[0].copy(nil)
+
+        let destination = PageStackView()
+        destination.setAttributedString(NSAttributedString(string: "Destination "))
+        let destinationView = destination.pageViews[0]
+        destinationView.setSelectedRange(NSRange(location: destination.storage.length, length: 0))
+        destinationView.paste(nil)
+        destination.prepareFloatingImages()
+
+        var pasted: FloatingImageAttachment?
+        destination.storage.enumerateAttribute(
+            .attachment,
+            in: NSRange(location: 0, length: destination.storage.length)
+        ) { value, _, stop in
+            if let value = value as? FloatingImageAttachment {
+                pasted = value
+                stop.pointee = true
+            }
+        }
+        let attachment = try #require(pasted)
+        #expect(attachment.caption == "Copied caption")
+        #expect(attachment.displaySize == NSSize(width: 123, height: 91))
+        #expect(attachment.position == FloatingImagePosition(page: 2, origin: CGPoint(x: 88, y: 144)))
+    }
+
+    @Test func followTextIsUndoableForAFixedImage() throws {
+        let stack = try Self.stack(lines: 3, caption: "Caption")
+        let location = try #require(Self.imageLocation(in: stack))
+        let attachment = try #require(stack.floatingAttachment(at: location))
+        let fixed = FloatingImagePosition(page: 1, origin: CGPoint(x: 100, y: 140))
+        attachment.position = fixed
+        stack.rebuildFloatingImageLayout()
+        let page = try #require(stack.pageViews.first { view in
+            view.floatingImages.contains { $0.location == location }
+        })
+        stack.selectImage(at: location, in: page)
+
+        stack.followSelectedImageText(nil)
+
+        #expect(attachment.position == nil)
+        stack.sharedUndoManager.undo()
+        #expect(attachment.position == fixed)
+    }
+
+    @Test func aCaptionedFloatingImageIsExposedToAccessibility() throws {
+        let stack = try Self.stack(lines: 2, caption: "Lighthouse at dusk")
+        let page = try #require(stack.pageViews.first { !$0.floatingImages.isEmpty })
+
+        let imageElement = (page.accessibilityChildren() ?? [])
+            .compactMap { $0 as? NSAccessibilityElement }
+            .first { $0.accessibilityRole() == .image }
+
+        #expect(imageElement?.accessibilityLabel() == "Lighthouse at dusk")
+    }
+
     // MARK: - Printing
 
     /// A caption has to stay on its image's page. Some image heights fit the
@@ -211,6 +315,39 @@ struct ImageCaptionTests {
             if captioned > plain { movedByCaption += 1 }
         }
         #expect(movedByCaption > 0)
+    }
+
+    @Test func printingClampsAFixedImageAndCaptionInsideThePaper() throws {
+        let decoded = try #require(RichTextCodec.decode(
+            try Self.chapterData(lines: 2, caption: Self.longCaption)
+        ))
+        var imageLocation: Int?
+        decoded.enumerateAttribute(
+            .attachment,
+            in: NSRange(location: 0, length: decoded.length)
+        ) { value, range, stop in
+            if value is NSTextAttachment {
+                imageLocation = range.location
+                stop.pointee = true
+            }
+        }
+        let location = try #require(imageLocation)
+        let mutable = NSMutableAttributedString(attributedString: decoded)
+        mutable.addAttribute(
+            .inklingFloatingImagePosition,
+            value: FloatingImagePosition(page: 0, origin: CGPoint(x: 72, y: 642)),
+            range: NSRange(location: location, length: 1)
+        )
+        let data = try #require(RichTextCodec.encode(mutable))
+        let view = ManuscriptPrintView(
+            chapters: [PrintableChapter(title: "One", bodyData: data)],
+            pageSize: NSSize(width: 468, height: 648),
+            leftMargin: 72,
+            topMargin: 72
+        )
+
+        let footprint = try #require(view.floatingImageFootprints(onPage: 1).first)
+        #expect(footprint.maxY <= 648.5)
     }
 
     // MARK: - Export

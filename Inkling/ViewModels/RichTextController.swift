@@ -113,9 +113,15 @@ final class RichTextController: ObservableObject {
         let completion: (NSApplication.ModalResponse) -> Void = { [weak self] response in
             guard response == .OK,
                   let url = panel.url,
-                  let image = NSImage(contentsOf: url)
+                  let data = try? Data(contentsOf: url),
+                  let image = NSImage(data: data)
             else { return }
-            self?.insertImage(image)
+            self?.insertImage(
+                image,
+                sourceData: data,
+                contentType: try? url.resourceValues(forKeys: [.contentTypeKey]).contentType,
+                filename: url.lastPathComponent
+            )
         }
 
         if let window = textView.window {
@@ -125,13 +131,21 @@ final class RichTextController: ObservableObject {
         }
     }
 
-    func insertImage(_ image: NSImage) {
+    func insertImage(
+        _ image: NSImage,
+        sourceData: Data? = nil,
+        contentType: UTType? = nil,
+        filename: String? = nil
+    ) {
         guard let textView else { return }
         let maximumWidth = (textView as? PageTextView)?.pageStack?.pageLayout.contentWidth
             ?? textView.textContainer?.containerSize.width
             ?? image.size.width
         RichTextImageInserter.insert(
             image,
+            sourceData: sourceData,
+            contentType: contentType,
+            filename: filename,
             into: textView,
             at: textView.selectedRange(),
             maximumWidth: maximumWidth

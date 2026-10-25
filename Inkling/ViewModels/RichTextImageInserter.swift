@@ -101,20 +101,31 @@ enum RichTextImageInserter {
     /// any NSTextView exists.
     static func makeAttachment(
         for image: NSImage,
+        sourceData: Data? = nil,
+        contentType: UTType? = nil,
+        filename: String? = nil,
         preferredDisplaySize: NSSize? = nil,
         maximumWidth: CGFloat
     ) -> NSTextAttachment {
-        let attachment = NSTextAttachment(
-            data: image.tiffRepresentation,
-            ofType: UTType.tiff.identifier
-        )
+        let storedType = contentType ?? .tiff
+        let data = sourceData ?? image.tiffRepresentation ?? Data()
+        let wrapper = FileWrapper(regularFileWithContents: data)
+        wrapper.preferredFilename = filename
+            ?? "image.\(storedType.preferredFilenameExtension ?? "tiff")"
+        let attachment = NSTextAttachment(fileWrapper: wrapper)
         let requestedSize = preferredDisplaySize.flatMap {
             $0.width > 0 && $0.height > 0 ? $0 : nil
         } ?? image.size
         let displaySize = fittedSize(requestedSize, maximumWidth: maximumWidth)
+        // Keep the file-wrapper bytes authoritative. Assigning `image` makes
+        // NSTextAttachment immediately re-encode the wrapper (even when the
+        // source is already a PNG), which needlessly changes imported files.
+        // But a wrapper-only attachment lays out at the image's full pixel
+        // size, ignoring `bounds`, so the sized display image goes on the cell
+        // instead: that keeps the bytes and draws at the fitted size.
         let displayImage = (image.copy() as? NSImage) ?? image
         displayImage.size = displaySize
-        attachment.image = displayImage
+        attachment.attachmentCell = NSTextAttachmentCell(imageCell: displayImage)
         attachment.bounds = NSRect(origin: .zero, size: displaySize)
         return attachment
     }
@@ -123,6 +134,9 @@ enum RichTextImageInserter {
     @discardableResult
     static func insert(
         _ image: NSImage,
+        sourceData: Data? = nil,
+        contentType: UTType? = nil,
+        filename: String? = nil,
         into textView: NSTextView,
         at range: NSRange,
         maximumWidth: CGFloat
@@ -133,7 +147,13 @@ enum RichTextImageInserter {
               textView.shouldChangeText(in: range, replacementString: "\u{fffc}")
         else { return false }
 
-        let attachment = makeAttachment(for: image, maximumWidth: maximumWidth)
+        let attachment = makeAttachment(
+            for: image,
+            sourceData: sourceData,
+            contentType: contentType,
+            filename: filename,
+            maximumWidth: maximumWidth
+        )
 
         storage.replaceCharacters(in: range, with: NSAttributedString(attachment: attachment))
         let insertionPoint = range.location + 1

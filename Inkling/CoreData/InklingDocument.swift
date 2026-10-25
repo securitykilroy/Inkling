@@ -534,7 +534,11 @@ final class InklingDocument: NSPersistentDocument {
                 chapter.createdAt = Date()
                 chapter.sortIndex = nextSortIndex
                 chapter.project = project
-                chapter.bodyData = RichTextCodec.encode(styledBody)
+                guard let encoded = RichTextCodec.encode(styledBody) else {
+                    context.delete(chapter)
+                    throw WordDocumentImporter.ImportError.richTextEncodingFailed
+                }
+                chapter.bodyData = encoded
                 nextSortIndex += 1
                 importedCount += 1
             } catch {

@@ -19,6 +19,7 @@
 
 import AppKit
 import Foundation
+import UniformTypeIdentifiers
 
 enum WordDocumentImporter {
 
@@ -26,6 +27,7 @@ enum WordDocumentImporter {
         case notAZipArchive
         case missingDocumentXML
         case malformedDocumentXML
+        case richTextEncodingFailed
 
         var errorDescription: String? {
             switch self {
@@ -35,6 +37,8 @@ enum WordDocumentImporter {
                 return "The file is missing its document contents."
             case .malformedDocumentXML:
                 return "The file's document contents could not be read."
+            case .richTextEncodingFailed:
+                return "The imported document could not be converted to Inkling rich text."
             }
         }
     }
@@ -65,11 +69,39 @@ enum WordDocumentImporter {
 
         let result = NSMutableAttributedString()
         let paragraphs = paragraphsInDocumentOrder(from: body)
+        // Images in the last body paragraph still waiting for a caption. The
+        // exporter writes one Caption paragraph per captioned image, in order,
+        // after the image's paragraph, so captions are matched up in order.
+        var uncaptionedImageLocations: [Int] = []
         for paragraph in paragraphs {
-            result.append(attributedString(
+            let paragraphText = attributedString(
                 for: paragraph, reader: reader, relationships: relationships, maximumImageWidth: maximumImageWidth
-            ))
+            )
+            // The caption text comes from the parsed runs, not the XML's
+            // `stringValue`, which would also pull in field instructions such
+            // as Word's own "SEQ Figure \* ARABIC" numbering.
+            if paragraphStyleID(of: paragraph) == "Caption",
+               !uncaptionedImageLocations.isEmpty,
+               let caption = ImageCaption.normalized(paragraphText.string) {
+                result.addAttribute(
+                    .inklingImageCaption,
+                    value: caption,
+                    range: NSRange(location: uncaptionedImageLocations.removeFirst(), length: 1)
+                )
+                continue
+            }
+
+            let paragraphStart = result.length
+            var imageLocations: [Int] = []
+            paragraphText.enumerateAttribute(
+                .attachment,
+                in: NSRange(location: 0, length: paragraphText.length)
+            ) { value, range, _ in
+                if value is NSTextAttachment { imageLocations.append(paragraphStart + range.location) }
+            }
+            result.append(paragraphText)
             result.append(NSAttributedString(string: "\n"))
+            uncaptionedImageLocations = imageLocations
         }
         return result
     }
@@ -116,16 +148,20 @@ enum WordDocumentImporter {
     /// (`Title`, `Heading1`, `Heading2`, …) regardless of the document's
     /// display language, so matching on the ID alone is safe.
     private static func paragraphStyle(of paragraph: XMLElement) -> TextStyle {
-        guard let pPr = child(of: paragraph, localName: "pPr"),
-              let pStyle = child(of: pPr, localName: "pStyle"),
-              let styleId = pStyle.attribute(forLocalName: "val", uri: wordNamespace)?.stringValue
-        else { return .body }
+        guard let styleId = paragraphStyleID(of: paragraph) else { return .body }
 
         switch styleId {
         case "Title": return .title
         case "Heading1": return .heading
         default: return styleId.hasPrefix("Heading") ? .subheading : .body
         }
+    }
+
+    private static func paragraphStyleID(of paragraph: XMLElement) -> String? {
+        guard let pPr = child(of: paragraph, localName: "pPr"),
+              let pStyle = child(of: pPr, localName: "pStyle")
+        else { return nil }
+        return pStyle.attribute(forLocalName: "val", uri: wordNamespace)?.stringValue
     }
 
     /// Inkling doesn't model real lists — its own bullet button just prefixes
@@ -225,6 +261,9 @@ enum WordDocumentImporter {
 
         return RichTextImageInserter.makeAttachment(
             for: image,
+            sourceData: imageData,
+            contentType: UTType(filenameExtension: (target as NSString).pathExtension),
+            filename: (target as NSString).lastPathComponent,
             preferredDisplaySize: displayedSize(of: drawing),
             maximumWidth: maximumImageWidth
         )
