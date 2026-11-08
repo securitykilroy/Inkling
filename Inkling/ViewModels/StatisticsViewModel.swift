@@ -92,10 +92,11 @@ final class StatisticsViewModel: ObservableObject {
     }
 
     /// Updates a single chapter's word count from the editor's live text (no RTF
-    /// decode needed). Called from the body editor on every change.
-    func update(_ chapter: Chapter, plainText: String) {
+    /// decode needed). Called from the body editor on every change, including
+    /// edits inside a sidebar box.
+    func update(_ chapter: Chapter, text: NSAttributedString) {
         guard let id = chapter.id else { return }
-        wordCounts[id] = TextStatistics.wordCount(in: plainText)
+        wordCounts[id] = TextStatistics.wordCount(in: text)
         bodySnapshots[id] = BodySnapshot(data: chapter.bodyData)
     }
 

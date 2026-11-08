@@ -55,9 +55,33 @@ enum TextStatistics {
         }
     }
 
+    /// A chapter's words: its body plus the text and titles of its sidebar
+    /// boxes, which are part of the manuscript (they print and export).
+    /// Image captions aren't counted. They're stored as attributes, not text,
+    /// so the body string never contains them.
     static func wordCount(inRTF data: Data?) -> Int {
-        guard let string = RichTextCodec.decodeText(data)?.string
-        else { return 0 }
-        return wordCount(in: string)
+        guard let decoded = RichTextCodec.decodeTextAndSidebars(data) else { return 0 }
+        return decoded.sidebars.reduce(wordCount(in: decoded.text.string)) {
+            $0 + sidebarWordCount(title: $1.title, content: $1.content)
+        }
+    }
+
+    /// The live count for the chapter being edited: the editor's text, with
+    /// each sidebar box's words read from its attachment.
+    static func wordCount(in text: NSAttributedString) -> Int {
+        var count = wordCount(in: text.string)
+        text.enumerateAttribute(
+            .attachment, in: NSRange(location: 0, length: text.length)
+        ) { value, _, _ in
+            guard let sidebar = value as? SidebarAttachment else { return }
+            count += sidebarWordCount(title: sidebar.title, content: sidebar.contentData)
+        }
+        return count
+    }
+
+    /// An empty title shows the default header, which the writer didn't type
+    /// and isn't counted.
+    private static func sidebarWordCount(title: String, content: Data?) -> Int {
+        wordCount(in: title) + wordCount(in: RichTextCodec.decodeText(content)?.string ?? "")
     }
 }

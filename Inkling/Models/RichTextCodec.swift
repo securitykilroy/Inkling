@@ -111,6 +111,25 @@ enum RichTextCodec {
             ?? NSAttributedString(rtf: data, documentAttributes: nil)
     }
 
+    /// `decodeText` plus each sidebar box's title and content, read straight
+    /// from the sidecar without rebuilding attachments. For word counts, which
+    /// count what's written in sidebars along with the body. Parses the
+    /// package once for both.
+    nonisolated static func decodeTextAndSidebars(
+        _ data: Data?
+    ) -> (text: NSAttributedString, sidebars: [(title: String, content: Data?)])? {
+        guard let data else { return nil }
+        guard let wrapper = FileWrapper(serializedRepresentation: data),
+              let text = NSAttributedString(rtfdFileWrapper: wrapper, documentAttributes: nil)
+        else {
+            return decodeText(data).map { ($0, []) }
+        }
+        guard let metadata = wrapper.fileWrappers?[sidebarMetadataFilename]?.regularFileContents,
+              let records = try? JSONDecoder().decode([SidebarRecord].self, from: metadata)
+        else { return (text, []) }
+        return (text, records.map { ($0.title ?? "", $0.content) })
+    }
+
     /// Rebuilds a full `SidebarAttachment` (content + placement + width) at each
     /// recorded anchor. The generic attachment produced by RTFD decoding is
     /// replaced in place, carrying over the surrounding run's attributes.

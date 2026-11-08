@@ -76,7 +76,7 @@ struct ChapterDetailView: View {
                     documentID: chapter.objectID,
                     controller: controller,
                     presentation: .paged,
-                    onTextChange: { statistics.update(chapter, plainText: $0) },
+                    onTextChange: { statistics.update(chapter, text: $0) },
                     onPageCountChange: { laidOutPageCount = $0; statistics.updatePageCount(chapter, pages: $0) },
                     onCaretChange: onCaretChange,
                     fontFamilyName: project.bodyFontFamily,

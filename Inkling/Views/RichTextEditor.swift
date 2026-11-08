@@ -68,8 +68,8 @@ struct RichTextEditor: NSViewRepresentable {
     let documentID: NSManagedObjectID
     var controller: RichTextController? = nil
     var presentation: RichTextEditorPresentation = .continuous
-    /// Called with the editor's plain text on every edit (used for live stats).
-    var onTextChange: ((String) -> Void)? = nil
+    /// Called with the editor's text on every edit (used for live stats).
+    var onTextChange: ((NSAttributedString) -> Void)? = nil
     var onPageCountChange: ((Int) -> Void)? = nil
     /// Called with the caret's character offset whenever the selection moves,
     /// so the document can remember where the user was for reopening.
@@ -284,7 +284,7 @@ struct RichTextEditor: NSViewRepresentable {
             hasUnsavableEdits = false
             parent.data = encoded
             loadedData = encoded
-            parent.onTextChange?(textView.string)
+            parent.onTextChange?(attributed)
         }
 
         /// The serializer, replaceable so tests can make it fail.
