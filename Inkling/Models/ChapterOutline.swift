@@ -21,7 +21,8 @@ struct OutlineHeading: Identifiable, Hashable {
 enum ChapterOutline {
 
     static func headings(in data: Data?) -> [OutlineHeading] {
-        guard let attributed = RichTextCodec.decode(data),
+        // Text-only: headings need fonts and offsets, not images or sidecars.
+        guard let attributed = RichTextCodec.decodeText(data),
               attributed.length > 0
         else { return [] }
 

@@ -27,7 +27,9 @@ struct PrintableChapter {
     }
 
     nonisolated var hasUnreadableBody: Bool {
-        bodyData != nil && RichTextCodec.decode(bodyData) == nil
+        // Text-only decode: it fails exactly when the full decode does, without
+        // restoring every image just to check the bytes are readable.
+        bodyData != nil && RichTextCodec.decodeText(bodyData) == nil
     }
 
     nonisolated func decodedBody() throws -> NSAttributedString {
@@ -50,7 +52,7 @@ struct PrintableChapter {
     /// trimming). Empty chapters are skipped so they don't print blank pages.
     nonisolated var hasContent: Bool {
         if hasUnreadableBody { return true }
-        guard let decoded = RichTextCodec.decode(bodyData) else { return false }
+        guard let decoded = RichTextCodec.decodeText(bodyData) else { return false }
         return !decoded.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 }
@@ -217,6 +219,10 @@ final class ManuscriptPrintView: NSView {
     private let titlePage: NSAttributedString?
     private var layouts: [ChapterLayout] = []
     private var pages: [PageLayout] = []
+    /// Each image attachment's full-resolution image, read once from its bytes.
+    /// Decoded attachments are data-backed and carry no `image` of their own;
+    /// see `ImageAttachmentContent`.
+    private var attachmentImages: [ObjectIdentifier: NSImage] = [:]
 
     /// Number of floating images drawn on a physical page (title page excluded).
     /// Exposed for tests.
@@ -331,15 +337,31 @@ final class ManuscriptPrintView: NSView {
             // inline glyph to near nothing; every attachment is drawn manually
             // regardless of whether it ends up positioned or auto-floated.
             var sizes: [ObjectIdentifier: NSSize] = [:]
+            var cellBacked: [(NSRange, NSTextAttachment)] = []
             baseText.enumerateAttribute(
                 .attachment, in: NSRange(location: 0, length: baseText.length)
-            ) { value, _, _ in
+            ) { value, range, _ in
                 guard let attachment = value as? NSTextAttachment,
                       !(attachment is SidebarAttachment),
                       let size = Self.displaySize(of: attachment)
                 else { return }
-                sizes[ObjectIdentifier(attachment)] = size
-                attachment.bounds = NSRect(x: 0, y: 0, width: 0.1, height: 0.1)
+                var anchor = attachment
+                // A cell-backed attachment lays out at its image's full size
+                // and ignores `bounds`, so its "near nothing" glyph would
+                // shove the text aside. Swap in a data-backed copy.
+                if attachment.attachmentCell != nil,
+                   let payload = ImageAttachmentContent.storedPayload(of: attachment) {
+                    anchor = ImageAttachmentContent.makeSizedAttachment(payload: payload, size: size)
+                    cellBacked.append((range, anchor))
+                }
+                sizes[ObjectIdentifier(anchor)] = size
+                attachmentImages[ObjectIdentifier(anchor)] = ImageAttachmentContent.image(of: attachment)
+                anchor.bounds = NSRect(x: 0, y: 0, width: 0.1, height: 0.1)
+            }
+            if !cellBacked.isEmpty, let mutable = baseText as? NSMutableAttributedString {
+                for (range, anchor) in cellBacked {
+                    mutable.addAttribute(.attachment, value: anchor, range: range)
+                }
             }
 
             let explicitPlacements = floatingPlacementsWithSavedPosition(in: baseText, sizes: sizes)
@@ -447,7 +469,9 @@ final class ManuscriptPrintView: NSView {
     private static func displaySize(of attachment: NSTextAttachment) -> NSSize? {
         let boundsSize = attachment.bounds.size
         if boundsSize.width > 0, boundsSize.height > 0 { return boundsSize }
-        guard let imageSize = attachment.image?.size, imageSize.width > 0, imageSize.height > 0 else { return nil }
+        guard let imageSize = (attachment.image ?? ImageAttachmentContent.image(of: attachment))?.size,
+              imageSize.width > 0, imageSize.height > 0
+        else { return nil }
         return imageSize
     }
 
@@ -472,7 +496,7 @@ final class ManuscriptPrintView: NSView {
                   ) as? FloatingImagePosition,
                   savedPosition.isValidForPersistence,
                   let size = sizes[ObjectIdentifier(attachment)],
-                  let image = attachment.image
+                  let image = attachmentImages[ObjectIdentifier(attachment)]
             else { return }
 
             let captionHeight = Self.captionHeight(
@@ -557,7 +581,7 @@ final class ManuscriptPrintView: NSView {
                   !(attachment is SidebarAttachment),
                   text.attribute(.inklingFloatingImagePosition, at: range.location, effectiveRange: nil) == nil,
                   sizes[ObjectIdentifier(attachment)] != nil,
-                  attachment.image != nil
+                  attachmentImages[ObjectIdentifier(attachment)] != nil
             else { return }
             locations.append(range.location)
         }
@@ -577,7 +601,7 @@ final class ManuscriptPrintView: NSView {
             guard let attachment = value as? NSTextAttachment,
                   !(attachment is SidebarAttachment),
                   let size = sizes[ObjectIdentifier(attachment)],
-                  let image = attachment.image
+                  let image = attachmentImages[ObjectIdentifier(attachment)]
             else { return }
 
             let hint = storage.attribute(

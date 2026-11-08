@@ -57,7 +57,8 @@ enum ProjectSearch {
         guard !query.isEmpty else { return [] }
         var matches: [SearchMatch] = []
         for chapter in chapters {
-            guard let attributed = RichTextCodec.decode(chapter.bodyData) else { continue }
+            // Text-only: matching needs the string, not restored images.
+            guard let attributed = RichTextCodec.decodeText(chapter.bodyData) else { continue }
             let text = attributed.string as NSString
             for range in allRanges(of: query, in: text, caseSensitive: caseSensitive) {
                 matches.append(SearchMatch(

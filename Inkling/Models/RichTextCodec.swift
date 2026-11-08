@@ -87,11 +87,28 @@ enum RichTextCodec {
             ?? NSAttributedString(rtf: data, documentAttributes: nil)
         else { return nil }
         let mutable = NSMutableAttributedString(attributedString: attributed)
-        restoreAttachmentSizes(in: mutable, from: data)
+        // Parsed once for all three sidecars. Each used to re-parse the whole
+        // RTFD package, image bytes included, so a decode cost four parses.
+        let sidecars = FileWrapper(serializedRepresentation: data)?.fileWrappers ?? [:]
+        restoreAttachmentSizes(in: mutable, from: sidecars)
         applyDefaultParagraphStyling(in: mutable)
-        restoreCallouts(in: mutable, from: data)
-        restoreSidebars(in: mutable, from: data)
+        restoreCallouts(in: mutable, from: sidecars)
+        restoreSidebars(in: mutable, from: sidecars)
         return mutable
+    }
+
+    /// The stored text and its character attributes only, with none of the
+    /// sidecar restoration: no image sizing, placements, callouts or sidebars,
+    /// and no paragraph-style backfill. The string, fonts and character
+    /// offsets match `decode`.
+    ///
+    /// For readers that only need words or fonts, like word counts and the
+    /// outline, which run once per chapter when a project opens and once per
+    /// keystroke for the chapter being edited.
+    nonisolated static func decodeText(_ data: Data?) -> NSAttributedString? {
+        guard let data else { return nil }
+        return NSAttributedString(rtfd: data, documentAttributes: nil)
+            ?? NSAttributedString(rtf: data, documentAttributes: nil)
     }
 
     /// Rebuilds a full `SidebarAttachment` (content + placement + width) at each
@@ -99,10 +116,9 @@ enum RichTextCodec {
     /// replaced in place, carrying over the surrounding run's attributes.
     nonisolated private static func restoreSidebars(
         in attributedString: NSMutableAttributedString,
-        from data: Data
+        from sidecars: [String: FileWrapper]
     ) {
-        guard let wrapper = FileWrapper(serializedRepresentation: data),
-              let metadata = wrapper.fileWrappers?[sidebarMetadataFilename]?.regularFileContents,
+        guard let metadata = sidecars[sidebarMetadataFilename]?.regularFileContents,
               let records = try? JSONDecoder().decode([SidebarRecord].self, from: metadata)
         else { return }
 
@@ -140,10 +156,9 @@ enum RichTextCodec {
     /// paragraphs get their reserved box padding rather than the default spacing.
     nonisolated private static func restoreCallouts(
         in attributedString: NSMutableAttributedString,
-        from data: Data
+        from sidecars: [String: FileWrapper]
     ) {
-        guard let wrapper = FileWrapper(serializedRepresentation: data),
-              let metadata = wrapper.fileWrappers?[calloutMetadataFilename]?.regularFileContents,
+        guard let metadata = sidecars[calloutMetadataFilename]?.regularFileContents,
               let records = try? JSONDecoder().decode([CalloutRecord].self, from: metadata)
         else { return }
 
@@ -215,17 +230,18 @@ enum RichTextCodec {
     }
 
     nonisolated static func encode(_ attributedString: NSAttributedString) -> Data? {
-        guard let rtfd = attributedString.rtfd(
-            from: NSRange(location: 0, length: attributedString.length),
-            documentAttributes: [:]
-        ) else { return nil }
-
+        let fullRange = NSRange(location: 0, length: attributedString.length)
         let sizeRecords = attachmentSizeRecords(in: attributedString)
         let calloutRecords = calloutRecords(in: attributedString)
         let sidebarRecords = sidebarRecords(in: attributedString)
-        guard !sizeRecords.isEmpty || !calloutRecords.isEmpty || !sidebarRecords.isEmpty,
-              let wrapper = FileWrapper(serializedRepresentation: rtfd)
-        else { return rtfd }
+        guard !sizeRecords.isEmpty || !calloutRecords.isEmpty || !sidebarRecords.isEmpty else {
+            return attributedString.rtfd(from: fullRange, documentAttributes: [:])
+        }
+        // Build the package directly rather than serializing it, parsing it
+        // back, and serializing again: with images, each of those steps copies
+        // every image's bytes, and this runs on every keystroke.
+        guard let wrapper = attributedString.rtfdFileWrapper(from: fullRange, documentAttributes: [:])
+        else { return nil }
 
         if !sizeRecords.isEmpty, let metadata = try? JSONEncoder().encode(sizeRecords) {
             replaceFile(named: attachmentMetadataFilename, contents: metadata, in: wrapper)
@@ -348,10 +364,9 @@ enum RichTextCodec {
 
     nonisolated private static func restoreAttachmentSizes(
         in attributedString: NSMutableAttributedString,
-        from data: Data
+        from sidecars: [String: FileWrapper]
     ) {
-        guard let wrapper = FileWrapper(serializedRepresentation: data),
-              let metadata = wrapper.fileWrappers?[attachmentMetadataFilename]?.regularFileContents,
+        guard let metadata = sidecars[attachmentMetadataFilename]?.regularFileContents,
               let records = try? JSONDecoder().decode([AttachmentSizeRecord].self, from: metadata)
         else { return }
 
@@ -400,28 +415,25 @@ enum RichTextCodec {
             }
 
             // RTFD decoding produces a *cell-backed* attachment whose layout size
-            // comes from the embedded image and ignores `bounds`. Convert it to a
-            // plain image-backed attachment so our stored display size is honored.
-            if attachment.image == nil {
-                let cellImage = (attachment.attachmentCell as? NSTextAttachmentCell).flatMap { cell in
-                    Thread.isMainThread ? MainActor.assumeIsolated { cell.image } : nil
-                }
-                if let cellImage {
-                    attachment.image = cellImage
-                } else if let contents = attachment.fileWrapper?.regularFileContents,
-                          let image = NSImage(data: contents) {
-                    attachment.image = image
-                }
+            // comes from the embedded image and ignores `bounds`. Rebuild it as
+            // a data-backed attachment, which honors `bounds` and keeps the
+            // original bytes. This used to assign `attachment.image` instead,
+            // and AppKit then re-encoded every image as PNG: a JPEG grew ~4x
+            // the first time a chapter was reopened. See `ImageAttachmentContent`.
+            let size = NSSize(width: record.width, height: record.height)
+            let range = NSRange(location: record.location, length: 1)
+            if let payload = ImageAttachmentContent.storedPayload(of: attachment) {
+                attributedString.addAttribute(
+                    .attachment,
+                    value: ImageAttachmentContent.makeSizedAttachment(payload: payload, size: size),
+                    range: range
+                )
+            } else {
+                // No bytes to keep (an image-only attachment). Size it in
+                // place; it has nothing for AppKit to re-encode.
+                attachment.image?.size = size
+                attachment.bounds = NSRect(origin: .zero, size: size)
             }
-            attachment.attachmentCell = nil
-
-            attachment.image?.size = NSSize(width: record.width, height: record.height)
-            attachment.bounds = NSRect(
-                x: 0,
-                y: 0,
-                width: record.width,
-                height: record.height
-            )
         }
     }
 }

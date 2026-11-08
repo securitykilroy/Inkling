@@ -144,10 +144,10 @@ struct ChapterDetailView: View {
     }
 
     private var bodyBinding: Binding<Data?> {
-        Binding(get: { chapter.bodyData }, set: { assignIfChanged(chapter, \.bodyData, $0) })
+        Binding(get: { chapter.bodyData }, set: { assignRichTextIfChanged(chapter, \.bodyData, $0) })
     }
 
     private var notesBinding: Binding<Data?> {
-        Binding(get: { chapter.notesData }, set: { assignIfChanged(chapter, \.notesData, $0) })
+        Binding(get: { chapter.notesData }, set: { assignRichTextIfChanged(chapter, \.notesData, $0) })
     }
 }

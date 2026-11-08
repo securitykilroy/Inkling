@@ -9,6 +9,7 @@
 
 import AppKit
 import Foundation
+import UniformTypeIdentifiers
 
 private extension NSAttributedString.Key {
     /// Export-only tag marking paragraphs that came from an expanded floating
@@ -53,8 +54,8 @@ enum WordDocumentExporter {
 
         let state = ExportState()
         let bodyXML = documentBodyXML(from: body, state: state)
-        let relationships = relationshipsXML(forImageCount: state.media.count)
-        let contentTypes = contentTypesXML(hasImages: !state.media.isEmpty)
+        let relationships = relationshipsXML(forMediaNames: state.media.map(\.name))
+        let contentTypes = contentTypesXML(mediaNames: state.media.map(\.name))
         let document = documentXML(bodyXML: bodyXML)
 
         var entries: [(String, Data)] = [
@@ -136,11 +137,11 @@ enum WordDocumentExporter {
         var captions: [String] = []
         attributed.enumerateAttributes(in: range) { attributes, runRange, _ in
             if let attachment = attributes[.attachment] as? NSTextAttachment,
-               let image = pngData(from: attachment) {
+               let image = imageData(from: attachment) {
                 let caption = (attachment as? FloatingImageAttachment).map(\.caption)
                     ?? attributes[.inklingImageCaption] as? String
                 if let caption = ImageCaption.normalized(caption) { captions.append(caption) }
-                let name = "image\(state.imageIndex).png"
+                let name = "image\(state.imageIndex).\(image.fileExtension)"
                 state.media.append((name, image.data))
                 runs += imageRunXML(
                     relationshipID: "rId\(state.imageIndex)",
@@ -457,15 +458,29 @@ enum WordDocumentExporter {
         return "<wp:position\(axis) relativeFrom=\"\(relativeFrom)\">\(value)</wp:position\(axis)>"
     }
 
-    private static func pngData(from attachment: NSTextAttachment) -> (data: Data, displaySize: CGSize)? {
-        let image = attachment.image
-            ?? (attachment.attachmentCell as? NSTextAttachmentCell)?.image
-            ?? attachment.fileWrapper?.regularFileContents.flatMap(NSImage.init(data:))
-        guard let image,
-              let tiff = image.tiffRepresentation,
-              let rep = NSBitmapImageRep(data: tiff),
-              let data = rep.representation(using: .png, properties: [:])
-        else { return nil }
+    /// The image's bytes for the .docx package. PNG and JPEG go in exactly as
+    /// stored, since Word reads both; anything else is converted to PNG. This
+    /// used to convert everything, which turned a camera JPEG into a PNG
+    /// several times its size.
+    private static func imageData(
+        from attachment: NSTextAttachment
+    ) -> (data: Data, fileExtension: String, displaySize: CGSize)? {
+        let payload = ImageAttachmentContent.payload(of: attachment)
+        let data: Data
+        let fileExtension: String
+        var image: NSImage?
+        if let payload, payload.typeIdentifier == UTType.png.identifier {
+            (data, fileExtension) = (payload.data, "png")
+        } else if let payload, payload.typeIdentifier == UTType.jpeg.identifier {
+            (data, fileExtension) = (payload.data, "jpeg")
+        } else {
+            image = ImageAttachmentContent.image(of: attachment)
+            guard let tiff = image?.tiffRepresentation,
+                  let rep = NSBitmapImageRep(data: tiff),
+                  let png = rep.representation(using: .png, properties: [:])
+            else { return nil }
+            (data, fileExtension) = (png, "png")
+        }
         let displaySize: CGSize
         if let floating = attachment as? FloatingImageAttachment,
            floating.displaySize.width > 0,
@@ -473,10 +488,12 @@ enum WordDocumentExporter {
             displaySize = floating.displaySize
         } else if attachment.bounds.width > 0, attachment.bounds.height > 0 {
             displaySize = attachment.bounds.size
+        } else if let size = (image ?? ImageAttachmentContent.image(of: attachment))?.size {
+            displaySize = size
         } else {
-            displaySize = image.size
+            return nil
         }
-        return (data, displaySize)
+        return (data, fileExtension, displaySize)
     }
 
     private static func documentXML(bodyXML: String) -> String {
@@ -499,9 +516,10 @@ enum WordDocumentExporter {
         </Relationships>
         """
 
-    private static func relationshipsXML(forImageCount count: Int) -> String {
-        let images = count == 0 ? "" : (1...count).map {
-            #"<Relationship Id="rId\#($0)" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image\#($0).png"/>"#
+    private static func relationshipsXML(forMediaNames names: [String]) -> String {
+        // Media are numbered from 1 in insertion order, matching `rId<n>`.
+        let images = names.enumerated().map { index, name in
+            #"<Relationship Id="rId\#(index + 1)" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/\#(name)"/>"#
         }.joined()
         return """
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -511,8 +529,14 @@ enum WordDocumentExporter {
         """
     }
 
-    private static func contentTypesXML(hasImages: Bool) -> String {
-        let pngDefault = hasImages ? #"<Default Extension="png" ContentType="image/png"/>"# : ""
+    private static func contentTypesXML(mediaNames: [String]) -> String {
+        var pngDefault = ""
+        if mediaNames.contains(where: { $0.hasSuffix(".png") }) {
+            pngDefault += #"<Default Extension="png" ContentType="image/png"/>"#
+        }
+        if mediaNames.contains(where: { $0.hasSuffix(".jpeg") }) {
+            pngDefault += #"<Default Extension="jpeg" ContentType="image/jpeg"/>"#
+        }
         return """
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
         <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">\

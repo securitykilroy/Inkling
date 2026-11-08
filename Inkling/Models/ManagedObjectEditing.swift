@@ -10,7 +10,8 @@
 //  Core Data go through `assignIfChanged` so only a real change counts.
 //
 
-import Foundation
+import AppKit
+import CoreData
 
 func assignIfChanged<Root: AnyObject, Value: Equatable>(
     _ root: Root,
@@ -19,4 +20,38 @@ func assignIfChanged<Root: AnyObject, Value: Equatable>(
 ) {
     guard root[keyPath: keyPath] != value else { return }
     root[keyPath: keyPath] = value
+}
+
+/// For rich-text blobs that the editors rewrite on every keystroke (chapter
+/// body and notes, shelf entries, project notes). Stores the value without
+/// registering it with the context's undo manager, then marks the owning
+/// document edited directly.
+///
+/// The text views keep their own undo stacks, so Core Data's copy was never
+/// used for undoing typing. But it kept the *previous* encoded chapter,
+/// images included, once per keystroke: measured at 1 GB after 200 edits to a
+/// 5 MB chapter. Core Data registers undo when it processes pending changes,
+/// not at assignment, so the change is flushed inside the disabled window.
+@MainActor
+func assignRichTextIfChanged<Root: NSManagedObject>(
+    _ root: Root,
+    _ keyPath: ReferenceWritableKeyPath<Root, Data?>,
+    _ value: Data?
+) {
+    guard root[keyPath: keyPath] != value else { return }
+    guard let context = root.managedObjectContext,
+          let undoManager = context.undoManager
+    else {
+        root[keyPath: keyPath] = value
+        return
+    }
+    context.processPendingChanges()
+    undoManager.disableUndoRegistration()
+    root[keyPath: keyPath] = value
+    context.processPendingChanges()
+    undoManager.enableUndoRegistration()
+    // Document dirtiness is driven by undo registration, which this skipped.
+    NSDocumentController.shared.documents
+        .first { ($0 as? NSPersistentDocument)?.managedObjectContext === context }?
+        .updateChangeCount(.changeDone)
 }

@@ -187,6 +187,7 @@ private struct ChapterOutlineRow: View {
     let onJump: (OutlineHeading) -> Void
 
     @State private var headings: [OutlineHeading] = []
+    @State private var refreshTask: Task<Void, Never>?
 
     var body: some View {
         Group {
@@ -212,7 +213,10 @@ private struct ChapterOutlineRow: View {
             }
         }
         .onAppear(perform: refreshHeadings)
-        .onChange(of: chapter.bodyData) { _, _ in refreshHeadings() }
+        // The body changes on every keystroke in the chapter being edited, so
+        // wait for a pause in typing rather than re-parsing the whole chapter
+        // per character.
+        .onChange(of: chapter.bodyData) { _, _ in scheduleHeadingsRefresh() }
         // Reordering the sidebar hands an existing row a *different* chapter
         // rather than building a new one, and neither hook above fires for
         // that: `onAppear` already happened, and the new chapter's bodyData is
@@ -224,7 +228,17 @@ private struct ChapterOutlineRow: View {
     }
 
     private func refreshHeadings() {
+        refreshTask?.cancel()
         headings = ChapterOutline.headings(in: chapter.bodyData)
+    }
+
+    private func scheduleHeadingsRefresh() {
+        refreshTask?.cancel()
+        refreshTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled else { return }
+            refreshHeadings()
+        }
     }
 }
 

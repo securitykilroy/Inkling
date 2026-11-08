@@ -168,6 +168,6 @@ private struct ShelfEntryRow: View {
     }
 
     private var bodyBinding: Binding<Data?> {
-        Binding(get: { entry.bodyData }, set: { assignIfChanged(entry, \.bodyData, $0) })
+        Binding(get: { entry.bodyData }, set: { assignRichTextIfChanged(entry, \.bodyData, $0) })
     }
 }

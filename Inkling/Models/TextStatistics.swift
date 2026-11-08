@@ -27,7 +27,7 @@ enum TextStatistics {
     }
 
     static func wordCount(inRTF data: Data?) -> Int {
-        guard let string = RichTextCodec.decode(data)?.string
+        guard let string = RichTextCodec.decodeText(data)?.string
         else { return 0 }
         return wordCount(in: string)
     }

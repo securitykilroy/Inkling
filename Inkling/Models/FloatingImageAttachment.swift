@@ -28,25 +28,22 @@ final class FloatingImageAttachment: NSTextAttachment {
     /// Plain text shown beneath the image; nil for none. See `ImageCaption`.
     var caption: String?
 
+    /// On-screen pixels per point the display copy is rendered at: Retina's 2×
+    /// with headroom for zooming in past 100%.
+    private static let displayPixelsPerPoint: CGFloat = 3
+
+    private var cachedDisplayImage: NSImage?
+    private var cachedDisplayPixelSize = 0
+
+    /// Holds the source's original image bytes, never re-encoded: see
+    /// `ImageAttachmentContent`. Deliberately never assigns `image`, which
+    /// would make AppKit replace those bytes with a much larger PNG.
     init(copying source: NSTextAttachment, displaySize: NSSize) {
         self.displaySize = displaySize
-        let filename = source.fileWrapper?.preferredFilename
-            ?? source.fileWrapper?.filename
-            ?? "image.tiff"
-        let type = UTType(filenameExtension: (filename as NSString).pathExtension)?.identifier
-            ?? UTType.tiff.identifier
-        let data = source.fileWrapper?.regularFileContents ?? source.image?.tiffRepresentation
-        super.init(data: data, ofType: type)
-
-        if let sourceImage = source.image {
-            image = (sourceImage.copy() as? NSImage) ?? sourceImage
-        } else if let cell = source.attachmentCell as? NSTextAttachmentCell,
-                  let cellImage = cell.image {
-            image = (cellImage.copy() as? NSImage) ?? cellImage
-        } else if let contents = source.fileWrapper?.regularFileContents {
-            image = NSImage(data: contents)
-        }
-        image?.size = displaySize
+        let payload = ImageAttachmentContent.payload(of: source)
+        super.init(data: payload?.data, ofType: payload?.typeIdentifier)
+        // The visible image is drawn by the page view as an overlay; in the
+        // text it is only a near-zero anchor.
         bounds = NSRect(x: 0, y: 0, width: 0.1, height: 0.1)
     }
 
@@ -54,4 +51,46 @@ final class FloatingImageAttachment: NSTextAttachment {
         displaySize = .zero
         super.init(coder: coder)
     }
+
+    /// The image for on-screen drawing at `displaySize`, downsampled from the
+    /// original so a camera photo doesn't cost a full-resolution bitmap per
+    /// image on every scroll frame. Regenerated only when the image has grown
+    /// past the resolution of the cached copy.
+    var displayImage: NSImage? {
+        guard displaySize.width > 0, displaySize.height > 0,
+              let data = contents, !data.isEmpty
+        else { return nil }
+        let needed = Int((max(displaySize.width, displaySize.height) * Self.displayPixelsPerPoint).rounded(.up))
+        if let cached = cachedDisplayImage, cachedDisplayPixelSize >= needed {
+            cached.size = displaySize
+            return cached
+        }
+        // A little headroom so a live resize doesn't re-render on every step.
+        let requested = Int(Double(needed) * 1.25)
+        let image = ImageAttachmentContent.displayImage(
+            from: data, pointSize: displaySize, maxPixelSize: requested
+        ) ?? NSImage(data: data)
+        image?.size = displaySize
+        cachedDisplayImage = image
+        cachedDisplayPixelSize = image == nil ? 0 : requested
+        return image
+    }
+
+    /// The original, full-resolution image, for printing and export. Decoded
+    /// on demand and not cached: it is large and rarely needed.
+    var fullImage: NSImage? {
+        contents.flatMap(NSImage.init(data:))
+    }
+
+    /// The inline anchor is 0.1pt and draws nothing. Without this override
+    /// AppKit would decode the full image just to draw that speck.
+    override func image(
+        forBounds imageBounds: NSRect,
+        textContainer: NSTextContainer?,
+        characterIndex charIndex: Int
+    ) -> NSImage? {
+        Self.emptyImage
+    }
+
+    private static let emptyImage = NSImage(size: NSSize(width: 1, height: 1))
 }

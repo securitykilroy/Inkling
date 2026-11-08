@@ -577,6 +577,9 @@ final class PageStackView: NSView, NSTextStorageDelegate {
     /// triggers.
     private var isRebuilding = false
     private var paginationScheduled = false
+    /// Set while `setImageGeometry` swaps an image's anchor character, which
+    /// it follows with its own synchronous rebuild.
+    var isApplyingImageGeometry = false
 
     override var isFlipped: Bool { true }
 
@@ -632,7 +635,8 @@ final class PageStackView: NSView, NSTextStorageDelegate {
         // `.editedAttributes` callbacks (attribute fixing runs after every
         // character edit) can't feed back into another rebuild.
         guard editedMask.contains(.editedCharacters)
-                || editedMask.contains(.editedAttributes)
+                || editedMask.contains(.editedAttributes),
+              !isApplyingImageGeometry
         else { return }
         if needsFloatingRebuild(afterEditAt: editedRange.location) {
             scheduleFloatingRebuild()
@@ -1152,9 +1156,13 @@ extension PageStackView {
             // size — is scaled down to fit it. Left full size, it overran the
             // page with its resize handles off the paper, so it could be neither
             // shrunk nor moved.
-            let size = RichTextImageInserter.fittedSize(
+            let caption = ImageCaption.normalized(storage.attribute(
+                .inklingImageCaption, at: range.location, effectiveRange: nil
+            ) as? String)
+            let size = fittedFloatingSize(
                 Self.displaySize(of: attachment),
-                within: NSSize(width: pageLayout.contentWidth, height: pageLayout.contentHeight)
+                caption: caption,
+                at: range.location
             )
             guard size.width > 0, size.height > 0 else { return }
             let floating = FloatingImageAttachment(copying: attachment, displaySize: size)
@@ -1164,9 +1172,7 @@ extension PageStackView {
             floating.importedPlacementHint = storage.attribute(
                 .inklingImportedImagePlacementHint, at: range.location, effectiveRange: nil
             ) as? ImportedImagePlacementHint
-            floating.caption = ImageCaption.normalized(storage.attribute(
-                .inklingImageCaption, at: range.location, effectiveRange: nil
-            ) as? String)
+            floating.caption = caption
             replacements.append((range, floating))
         }
 
@@ -1180,6 +1186,25 @@ extension PageStackView {
         if !replacements.isEmpty {
             rebuildFloatingImageLayout()
         }
+    }
+
+    /// `natural` scaled down to fit one page's text area *together with* its
+    /// caption. Fitting the image alone to the full page height left no room
+    /// for a caption, so a tall image's caption hung off the bottom of the
+    /// page. A narrower image can wrap its caption onto more lines, so the
+    /// fit is re-checked once after shrinking.
+    private func fittedFloatingSize(_ natural: NSSize, caption: String?, at location: Int) -> NSSize {
+        let page = NSSize(width: pageLayout.contentWidth, height: pageLayout.contentHeight)
+        var size = RichTextImageInserter.fittedSize(natural, within: page)
+        guard let caption, size.width > 0 else { return size }
+        let font = captionFont(at: location)
+        for _ in 0..<2 {
+            let captionHeight = ImageCaption.height(of: caption, width: size.width, font: font)
+            guard size.height + captionHeight > page.height else { break }
+            let room = NSSize(width: page.width, height: max(32, page.height - captionHeight))
+            size = RichTextImageInserter.fittedSize(size, within: room)
+        }
+        return size
     }
 
     /// Pulls an image that landed alone on its own line back into the
@@ -1243,19 +1268,28 @@ extension PageStackView {
     /// introducing the feedback.
     func rebuildFloatingImageLayout() {
         floatingLayoutRebuildCount += 1
-        // Start from an unwrapped baseline, so a previous exclusion can't
-        // influence the anchor used to build its replacement. Routed through
-        // `syncExclusions` so pages that already had none aren't invalidated.
-        syncExclusions([:])
-        for view in pageViews { view.floatingImages = [] }
-        minimumPageCount = 1
-        rebuildPages()
-
-        syncSidebarViews()
-        var exclusions = layoutSidebars()
 
         // Dragged images and sidebars are pinned to a saved spot, so they don't
-        // depend on where the text falls and are in place before any measuring.
+        // depend on where the text falls. They form the baseline: no anchored
+        // image's exclusion survives from the previous pass, so none can
+        // influence the anchor used to build its replacement.
+        //
+        // The baseline used to be *empty*, with the pinned exclusions re-added
+        // straight after. That invalidated and re-laid-out every page holding
+        // a pinned image twice per rebuild, and an image drag rebuilds on
+        // every mouse-move. `syncExclusions` leaves a page alone when its set
+        // is unchanged, so dragging one image now touches only the pages it
+        // leaves and enters.
+        //
+        // The layout must be settled before any exclusion is assigned. An
+        // edit that is still pending (inserting a sidebar's anchor, say)
+        // leaves the containers' glyph ranges unknown, and a path assigned
+        // then never invalidates the stale lines: text was left running full
+        // width underneath a sidebar. During a drag this is a no-op, since
+        // the previous rebuild already settled everything.
+        rebuildPages()
+        syncSidebarViews()
+        var exclusions = layoutSidebars()
         var placements = explicitFloatingPlacements()
         for placement in placements { appendExclusion(for: placement, to: &exclusions) }
         installExclusions(exclusions, growingToFit: placements)
@@ -1283,12 +1317,38 @@ extension PageStackView {
             }
         }
         for (index, view) in pageViews.enumerated() {
-            view.floatingImages = drawables[index] ?? []
-            view.floatingCaptions = captions[index] ?? []
+            // Assigning redraws the page and rebuilds its accessibility
+            // elements, so skip the pages this pass didn't change.
+            let images = drawables[index] ?? []
+            if !Self.sameFloatingImages(view.floatingImages, images) {
+                view.floatingImages = images
+            }
+            let pageCaptions = captions[index] ?? []
+            if !Self.sameCaptions(view.floatingCaptions, pageCaptions) {
+                view.floatingCaptions = pageCaptions
+            }
         }
 
         positionSidebarViews()
         needsDisplay = true
+    }
+
+    private static func sameFloatingImages(
+        _ lhs: [(location: Int, rect: NSRect, image: NSImage)],
+        _ rhs: [(location: Int, rect: NSRect, image: NSImage)]
+    ) -> Bool {
+        lhs.count == rhs.count && zip(lhs, rhs).allSatisfy {
+            $0.location == $1.location && $0.rect == $1.rect && $0.image === $1.image
+        }
+    }
+
+    private static func sameCaptions(
+        _ lhs: [(rect: NSRect, text: String, font: NSFont)],
+        _ rhs: [(rect: NSRect, text: String, font: NSFont)]
+    ) -> Bool {
+        lhs.count == rhs.count && zip(lhs, rhs).allSatisfy {
+            $0.rect == $1.rect && $0.text == $1.text && $0.font == $1.font
+        }
     }
 
     private func appendExclusion(
@@ -1423,7 +1483,7 @@ extension PageStackView {
             .attachment, in: NSRange(location: 0, length: storage.length)
         ) { value, range, _ in
             guard let floating = value as? FloatingImageAttachment,
-                  let image = floating.image,
+                  let image = floating.displayImage,
                   floating.displaySize.width > 0,
                   floating.displaySize.height > 0
             else { return }
@@ -2232,7 +2292,6 @@ extension PageStackView {
         attachment.displaySize = size
         attachment.position = position
         attachment.importedPlacementHint = importedPlacementHint
-        attachment.image?.size = size
         // The inline anchor stays tiny — the visible image is drawn as an
         // overlay, not as a glyph.
         attachment.bounds = NSRect(x: 0, y: 0, width: 0.1, height: 0.1)
@@ -2245,10 +2304,14 @@ extension PageStackView {
         let range = NSRange(location: location, length: 1)
         var attributes = storage.attributes(at: location, effectiveRange: nil)
         attributes[.attachment] = attachment
+        // The rebuild below is synchronous, so the one this edit would queue
+        // is redundant: a second full relayout per resize step.
+        isApplyingImageGeometry = true
         storage.replaceCharacters(
             in: range,
             with: NSAttributedString(string: "\u{fffc}", attributes: attributes)
         )
+        isApplyingImageGeometry = false
 
         rebuildFloatingImageLayout()
     }
@@ -2836,7 +2899,7 @@ extension PageStackView {
             let cellSize = cell.cellSize()
             if cellSize.width > 0, cellSize.height > 0 { return cellSize }
         }
-        if let data = attachment.fileWrapper?.regularFileContents,
+        if let data = ImageAttachmentContent.storedBytes(of: attachment),
            let image = NSImage(data: data),
            image.size.width > 0, image.size.height > 0 {
             return image.size
