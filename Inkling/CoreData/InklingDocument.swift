@@ -51,6 +51,14 @@ final class InklingDocument: NSPersistentDocument {
         var options = storeOptions ?? [:]
         options[NSMigratePersistentStoresAutomaticallyOption] = true
         options[NSInferMappingModelAutomaticallyOption] = true
+        // A project saved before the switch to SQLite is an XML store. Open it
+        // as one; `write(to:...)` converts it the next time it is saved.
+        let storeType = ProjectFileFormat.storeType(forFileAt: url)
+        if storeType == ProjectFileFormat.storeType {
+            options.merge(ProjectFileFormat.sqliteOptions) { _, new in new }
+        }
+        storeTypeBeingOpened = storeType
+        defer { storeTypeBeingOpened = nil }
         try super.configurePersistentStoreCoordinator(
             for: url,
             ofType: fileType,
@@ -58,6 +66,124 @@ final class InklingDocument: NSPersistentDocument {
             storeOptions: options
         )
     }
+
+    /// Extends the sandbox to SQLite's journal beside the current file. See
+    /// `SQLiteJournalAccess`.
+    private var journalAccess: SQLiteJournalAccess?
+
+    nonisolated override var fileURL: URL? {
+        didSet {
+            guard fileURL != oldValue else { return }
+            if Thread.isMainThread {
+                MainActor.assumeIsolated { updateJournalAccess() }
+            } else {
+                DispatchQueue.main.async { self.updateJournalAccess() }
+            }
+        }
+    }
+
+    private func updateJournalAccess() {
+        journalAccess?.invalidate()
+        journalAccess = fileURL.map(SQLiteJournalAccess.init(projectURL:))
+    }
+
+    /// True while the open file is still a pre-SQLite XML store.
+    var isBackedByLegacyStore: Bool {
+        managedObjectContext?.persistentStoreCoordinator?.persistentStores
+            .contains { $0.type == NSXMLStoreType } ?? false
+    }
+
+    /// The store type `configurePersistentStoreCoordinator` is opening, so
+    /// the superclass opens a legacy XML file as XML rather than as SQLite.
+    private var storeTypeBeingOpened: String?
+
+    /// New projects, and every project saved from now on, are SQLite. See
+    /// `ProjectFileFormat`.
+    override func persistentStoreType(forFileType fileType: String) -> String {
+        storeTypeBeingOpened ?? ProjectFileFormat.storeType
+    }
+
+    /// A plain Save writes into the store the file was opened with, so a
+    /// legacy XML project would stay XML for ever. Convert it instead. (Save
+    /// As and a new project's first save already migrate to SQLite through
+    /// the superclass, via `persistentStoreType(forFileType:)`.)
+    nonisolated override func write(
+        to url: URL,
+        ofType typeName: String,
+        for saveOperation: NSDocument.SaveOperationType,
+        originalContentsURL absoluteOriginalContentsURL: URL?
+    ) throws {
+        // NSPersistentDocument saves on the main thread.
+        let converts = MainActor.assumeIsolated {
+            saveOperation == .saveOperation && isBackedByLegacyStore
+        }
+        guard converts else {
+            try super.write(
+                to: url, ofType: typeName, for: saveOperation,
+                originalContentsURL: absoluteOriginalContentsURL
+            )
+            return
+        }
+        try MainActor.assumeIsolated { try convertLegacyStore(savingTo: url) }
+    }
+
+    /// Rewrites the open XML store as SQLite at `url`, unsaved changes
+    /// included.
+    ///
+    /// The SQLite database is created at its final path rather than built
+    /// elsewhere and moved into place: SQLite treats moving an open database
+    /// file as corruption ("vnode renamed while in use") and drops its file
+    /// handles, which left the document unable to save again. An XML store is
+    /// held entirely in memory once open, so its file can be set aside first.
+    /// If anything fails before the SQLite file exists, the XML file is put
+    /// back exactly as it was.
+    private func convertLegacyStore(savingTo url: URL) throws {
+        guard let context = managedObjectContext,
+              let coordinator = context.persistentStoreCoordinator,
+              let legacy = coordinator.persistentStores.first(where: { $0.type == NSXMLStoreType })
+        else { throw CocoaError(.fileWriteUnknown) }
+
+        let fileManager = FileManager.default
+        // Inside the sandbox container, which needs no extra file access.
+        let backupDirectory = fileManager.temporaryDirectory
+            .appendingPathComponent("InklingConversion-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: backupDirectory, withIntermediateDirectories: true)
+        let backup = backupDirectory.appendingPathComponent(url.lastPathComponent)
+        try fileManager.copyItem(at: url, to: backup)
+        coordinator.setURL(backup, for: legacy)
+
+        do {
+            try fileManager.removeItem(at: url)
+            _ = try coordinator.migratePersistentStore(
+                legacy, to: url,
+                options: ProjectFileFormat.sqliteOptions,
+                withType: ProjectFileFormat.storeType
+            )
+        } catch {
+            // Nothing was converted: restore the original file and store.
+            if fileManager.fileExists(atPath: url.path) {
+                try? fileManager.removeItem(at: url)
+            }
+            do {
+                try fileManager.copyItem(at: backup, to: url)
+                coordinator.setURL(url, for: legacy)
+                try? fileManager.removeItem(at: backupDirectory)
+            } catch {
+                // Keep the backup: it is now the only copy on disk, and the
+                // store still points at it, so the document stays intact and
+                // Save As can write it somewhere else.
+                NSLog("Inkling: could not restore %@ after a failed conversion; the original is at %@",
+                      url.path, backup.path)
+            }
+            throw error
+        }
+        try? fileManager.removeItem(at: backupDirectory)
+        // The SQLite file now holds everything the XML file did. If writing
+        // the unsaved changes fails, they stay in memory and the next save
+        // writes them in place, like any other SQLite save.
+        try context.save()
+    }
+
 
     /// Keep explicit save semantics: an edited existing project must ask the
     /// user to save when its window closes or the application quits.
@@ -249,6 +375,8 @@ final class InklingDocument: NSPersistentDocument {
     /// outlive the document. `close()` fires when the document closes for any
     /// reason (window close, quit), so tear the notes window down here.
     override func close() {
+        journalAccess?.invalidate()
+        journalAccess = nil
         // First, and synchronously: AppKit can lay this window out again after
         // `super.close()` has taken the persistent store away, and anything
         // still reading a fetched Chapter at that point throws inside layout.

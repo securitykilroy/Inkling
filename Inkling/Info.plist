@@ -18,6 +18,20 @@
 			<key>NSDocumentClass</key>
 			<string>InklingDocument</string>
 		</dict>
+		<dict>
+			<key>CFBundleTypeExtensions</key>
+			<array>
+				<string>inkling-journal</string>
+			</array>
+			<key>CFBundleTypeName</key>
+			<string>Inkling Project Journal</string>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>LSHandlerRank</key>
+			<string>None</string>
+			<key>NSIsRelatedItemType</key>
+			<true/>
+		</dict>
 	</array>
 	<key>UTExportedTypeDeclarations</key>
 	<array>
