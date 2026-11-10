@@ -302,7 +302,40 @@ final class InklingDocument: NSPersistentDocument {
         projectCommands.requestNewChapter()
     }
 
-    // MARK: - Project Notes
+    // MARK: - Find from anywhere in the project window
+
+    /// The chapter editor's page holding the caret, if this window shows one.
+    private var chapterEditorPage: PageTextView? {
+        guard let content = windowControllers.first?.window?.contentView,
+              let stack = Self.firstPageStack(in: content)
+        else { return nil }
+        return stack.focusedPageView ?? stack.pageViews.first
+    }
+
+    private static func firstPageStack(in view: NSView) -> PageStackView? {
+        if let stack = view as? PageStackView { return stack }
+        for subview in view.subviews {
+            if let stack = firstPageStack(in: subview) { return stack }
+        }
+        return nil
+    }
+
+    /// The Find menu (⌘F, ⌘G, ⌘E…) travels the responder chain from whatever
+    /// has focus. With the chapter list focused nothing on that path handles
+    /// it, so it beeped. The document is the chain's last stop for its window:
+    /// hand the command to the chapter editor, focused, as if the author had
+    /// clicked into it first. A text view that handles find itself (the notes
+    /// panel) never lets the command get this far.
+    @objc func performTextFinderAction(_ sender: Any?) {
+        guard let window = windowControllers.first?.window,
+              let page = chapterEditorPage
+        else {
+            NSSound.beep()
+            return
+        }
+        window.makeFirstResponder(page)
+        page.performTextFinderAction(sender)
+    }
 
     /// The project-wide scratchpad window (see `ProjectNotesView`). Created
     /// lazily the first time the user shows it, then kept alive across hide/show
@@ -367,6 +400,9 @@ final class InklingDocument: NSPersistentDocument {
                 menuItem.title = showing ? "Hide Project Notes" : "Show Project Notes"
             }
             return true
+        }
+        if item.action == #selector(performTextFinderAction(_:)) {
+            return chapterEditorPage?.validateUserInterfaceItem(item) ?? false
         }
         return super.validateUserInterfaceItem(item)
     }

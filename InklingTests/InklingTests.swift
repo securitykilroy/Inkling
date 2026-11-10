@@ -813,6 +813,47 @@ struct InklingTests {
         #expect(stored.flatMap(RichTextCodec.decode)?.string == "Keeping G laws in mind.")
     }
 
+    /// ⌘F with the chapter list focused used to beep: the find commands travel
+    /// the responder chain from the focused view, and nothing between the
+    /// sidebar and the document handled them. The document — the chain's last
+    /// stop for its window — now hands them to the chapter editor.
+    @Test @MainActor func findCommandsFromOutsideTheEditorReachTheChapterEditor() throws {
+        let document = InklingDocument()
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 900, height: 700),
+            styleMask: [.titled], backing: .buffered, defer: false
+        )
+        let container = NSView(frame: window.contentLayoutRect)
+        let sidebar = NSOutlineView(frame: NSRect(x: 0, y: 0, width: 200, height: 700))
+        let editor = PageStackView.makeScrollView()
+        editor.frame = NSRect(x: 200, y: 0, width: 700, height: 700)
+        container.addSubview(sidebar)
+        container.addSubview(editor)
+        window.contentView = container
+        document.addWindowController(NSWindowController(window: window))
+        defer { document.removeWindowController(document.windowControllers[0]) }
+        window.makeKeyAndOrderFront(nil)
+
+        let stack = try #require(editor.documentView as? PageStackView)
+        stack.setAttributedString(NSAttributedString(string: "Keeping Newton's laws in mind."))
+        stack.pageViews[0].setSelectedRange(NSRange(location: 8, length: 0))
+        #expect(window.makeFirstResponder(sidebar))
+
+        let find = NSMenuItem()
+        find.action = #selector(NSResponder.performTextFinderAction(_:))
+        find.tag = NSTextFinder.Action.showFindInterface.rawValue
+        #expect(document.validateUserInterfaceItem(find))
+        // AppKit's own leg — key window's responder chain, then its document —
+        // needs an active app, which a test host isn't; drive the document's
+        // end of it directly.
+        document.performTextFinderAction(find)
+
+        // The find bar is up in the editor's scroll view, and the caret wasn't
+        // disturbed on the way.
+        #expect(editor.isFindBarVisible)
+        #expect(stack.pageViews[0].selectedRange() == NSRange(location: 8, length: 0))
+    }
+
     @Test @MainActor func everyChapterStartsOnItsOwnPage() {
         let pageSize = NSSize(width: 360, height: 500)
         let chapters = [
