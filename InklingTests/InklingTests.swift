@@ -774,6 +774,45 @@ struct InklingTests {
         #expect(stored == original)
     }
 
+    /// The first edit after opening a project marks the document dirty, and
+    /// SwiftUI re-renders the editor *synchronously inside* the binding's
+    /// setter. If the coordinator hasn't yet recorded the data it is writing as
+    /// its own, that re-render looks like an outside change to the chapter and
+    /// reloads it — throwing the caret away mid-word, so the next keystrokes
+    /// land somewhere else entirely. Measured in the running app.
+    @Test @MainActor func aReentrantUpdateDuringAnEditDoesNotReloadTheChapter() throws {
+        let document = InklingDocument()
+        let context = try #require(document.managedObjectContext)
+        let chapter = Chapter(context: context)
+        var stored = RichTextCodec.encode(NSAttributedString(string: "Keeping Newton's laws in mind."))
+        let stack = PageStackView()
+        var coordinator: RichTextEditor.Coordinator?
+        let editor = RichTextEditor(
+            data: Binding(
+                get: { stored },
+                set: { newValue in
+                    stored = newValue
+                    // What SwiftUI's synchronous updateNSView does.
+                    coordinator?.loadStackIfChanged(stored, documentID: chapter.objectID, into: stack)
+                }
+            ),
+            documentID: chapter.objectID,
+            presentation: .paged
+        )
+        coordinator = editor.makeCoordinator()
+        let unwrapped = try #require(coordinator)
+        unwrapped.loadStack(stored, documentID: chapter.objectID, into: stack)
+        stack.pageDelegate = unwrapped
+
+        let page = try #require(stack.pageViews.first)
+        page.setSelectedRange(NSRange(location: 8, length: 8))   // "Newton's"
+        page.insertText("G", replacementRange: NSRange(location: NSNotFound, length: 0))
+
+        #expect(page.selectedRange() == NSRange(location: 9, length: 0))
+        #expect(stack.storage.string == "Keeping G laws in mind.")
+        #expect(stored.flatMap(RichTextCodec.decode)?.string == "Keeping G laws in mind.")
+    }
+
     @Test @MainActor func everyChapterStartsOnItsOwnPage() {
         let pageSize = NSSize(width: 360, height: 500)
         let chapters = [

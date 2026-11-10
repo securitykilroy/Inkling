@@ -282,8 +282,13 @@ struct RichTextEditor: NSViewRepresentable {
                 return
             }
             hasUnsavableEdits = false
-            parent.data = encoded
+            // Claim the data as our own *before* writing it. The write can
+            // re-render this view synchronously (the first edit after opening
+            // dirties the document, and SwiftUI updates inside the setter), and
+            // `loadIfChanged` must already see this as the editor's own edit —
+            // otherwise it reloads the chapter and the caret jumps away.
             loadedData = encoded
+            parent.data = encoded
             parent.onTextChange?(attributed)
         }
 

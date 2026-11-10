@@ -70,6 +70,13 @@ final class PageTextView: NSTextView {
     /// This view's index in the stack. Maintained by `PageStackView`.
     var pageIndex: Int = 0
 
+    /// True while NSTextView is tracking a mouse click or drag in this view.
+    /// Typewriter scrolling stands aside then: re-centering on the first click
+    /// of a double-click slid the text under the pointer, so the second click
+    /// hit a different line and selected the wrong word. The caret's line is
+    /// pinned again on the next keystroke.
+    private var isTrackingMouse = false
+
     convenience init(pageIndex: Int, container: NSTextContainer, layout: PagedEditorLayout) {
         self.init(frame: layout.paperRect(forPage: pageIndex), textContainer: container)
         self.pageIndex = pageIndex
@@ -294,6 +301,10 @@ final class PageTextView: NSTextView {
         if stack?.beginImageResize(at: point, windowPoint: event.locationInWindow, in: self) == true { return }
         if stack?.beginImageDrag(at: point, in: self) == true { return }
         stack?.clearImageSelection()
+        // NSTextView tracks the whole click (or drag, or double-click) inside
+        // super.mouseDown; every selection change it makes is mouse-driven.
+        isTrackingMouse = true
+        defer { isTrackingMouse = false }
         super.mouseDown(with: event)
     }
 
@@ -495,7 +506,7 @@ final class PageTextView: NSTextView {
         stillSelecting stillSelectingFlag: Bool
     ) {
         super.setSelectedRanges(ranges, affinity: affinity, stillSelecting: stillSelectingFlag)
-        guard !stillSelectingFlag else { return }
+        guard !stillSelectingFlag, !isTrackingMouse else { return }
         pageStack?.scrollCaretToTypewriterPosition()
     }
 

@@ -1731,6 +1731,64 @@ struct PageStackViewTests {
         #expect(abs(fraction - PageStackView.typewriterAnchorFraction) < 0.02)
     }
 
+    /// Re-centering on a click slid the text under the pointer between the two
+    /// halves of a double-click, so the second click landed on a different line
+    /// and selected the wrong word — the page "bounced" and a word could only be
+    /// selected by dragging. A click leaves the view where it is; the caret's
+    /// line is pinned again once the author types.
+    @Test func clickingWithTypewriterScrollingOnDoesNotScroll() throws {
+        let stack = Self.makeStack(paragraphs: 200)
+        let scrollView = Self.inCanvas(stack)
+        stack.isTypewriterScrollingEnabled = true
+        let window = try #require(scrollView.window)
+        window.makeKeyAndOrderFront(nil)
+
+        // Scroll to a page well down the document, then click near the top of
+        // the viewport — far from the anchor line, so a re-center would move.
+        let page = Self.characterRange(ofPage: 3, in: stack)
+        stack.revealCharacterRange(NSRange(location: page.location, length: 1))
+        let before = scrollView.contentView.bounds.origin.y
+        let target = try #require(stack.rect(forCharacterRange: NSRange(location: page.location + 2, length: 1)))
+        let point = NSPoint(x: target.midX, y: target.midY)
+        let view = try #require(stack.pageViews.first { $0.frame.contains(point) })
+        _ = window.makeFirstResponder(view)
+
+        func mouse(_ type: NSEvent.EventType) -> NSEvent {
+            NSEvent.mouseEvent(
+                with: type,
+                location: stack.convert(point, to: nil),
+                modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber,
+                context: nil,
+                eventNumber: 0,
+                clickCount: 1,
+                pressure: type == .leftMouseUp ? 0 : 1
+            )!
+        }
+        window.postEvent(mouse(.leftMouseUp), atStart: false)
+        view.mouseDown(with: mouse(.leftMouseDown))
+
+        #expect(abs(view.selectedRange().location - (page.location + 2)) <= 1, "the click placed the caret")
+        #expect(abs(scrollView.contentView.bounds.origin.y - before) < 0.5)
+    }
+
+    /// Typing still pins the caret: only the click is exempt.
+    @Test func typingWithTypewriterScrollingOnStillPinsTheCaret() throws {
+        let stack = Self.makeStack(paragraphs: 200)
+        let scrollView = Self.inCanvas(stack)
+        stack.isTypewriterScrollingEnabled = true
+
+        let page = Self.characterRange(ofPage: 3, in: stack)
+        stack.pageViews[0].setSelectedRange(NSRange(location: page.location + 20, length: 0))
+        stack.pageViews[0].insertText("x", replacementRange: NSRange(location: NSNotFound, length: 0))
+
+        let caret = try #require(stack.caretRectInStack())
+        let visible = scrollView.contentView.bounds
+        let fraction = (caret.midY - visible.minY) / visible.height
+        #expect(abs(fraction - PageStackView.typewriterAnchorFraction) < 0.02)
+    }
+
     @Test func typewriterScrollingDoesNothingWhenDisabled() throws {
         let stack = Self.makeStack(paragraphs: 200)
         let scrollView = Self.inCanvas(stack)
