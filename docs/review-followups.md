@@ -32,13 +32,23 @@ from reading the code and should be reproduced before it is fixed.
 - **Undoing Replace All says what it skipped** (`RichTextUndoNotice`, was
   item 3): a sheet on the project window, "Undo Replace All left 2 chapters as
   they are." Same on redo.
+- **⌘Z driven with real keystrokes** (was item 1, 16 Nov). In the running
+  app: rename in the title field, type in the chapter, click the title field,
+  ⌘Z. The rename is undone, the typed text stays, and the title field and the
+  chapter list agree after every Undo and Redo.
 
 ## Created by the fixes
 
-### 1. Drive ⌘Z with real keystrokes once
-Needs Accessibility and Screen Recording permission for the terminal
-(`screencapture` and System Events were both refused). Rename in the title
-field, type in the chapter, click the title field, ⌘Z.
+### 1. Renaming a chapter takes one ⌘Z per keystroke
+Seen in the running app (16 Nov): "Renamed" undoes to "Rename", "Renam", …
+Core Data groups undo by event, so each typed character is its own step. Make
+one editing session in the title field one undo step.
+
+### 2. Undoing New Chapter leaves its editor on screen
+Seen once in the running app (16 Nov), not reproduced in a test: ⌘Z right
+after New Chapter emptied the chapter list, but the detail pane kept showing
+the removed chapter's editor with an empty title instead of "No Chapter
+Selected".
 
 ### 4. Line endings are normalised on paste only
 `PasteStyling.normalizeLineEndings` runs in the two paste commands of the page
