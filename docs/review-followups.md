@@ -23,23 +23,22 @@ from reading the code and should be reproduced before it is fixed.
   (`RichTextCodec.wholeParagraphs`). Still inexact if the drift is longer than
   the paragraph it lands in, or an empty line sits at the callout's edge.
 
+- **The title field can't show a title the chapter doesn't have**
+  (`ChapterTitleField`, was item 2). Confirmed in a test, and worse than
+  noted: with focus still in the field, the *first* ⌘Z reverted the field and
+  left the stored title renamed. SwiftUI's field editor kept a private undo
+  stack; the title is now an AppKit field whose editor keeps none and sends
+  Undo and Redo to the document's undo manager.
+- **Undoing Replace All says what it skipped** (`RichTextUndoNotice`, was
+  item 3): a sheet on the project window, "Undo Replace All left 2 chapters as
+  they are." Same on redo.
+
 ## Created by the fixes
 
 ### 1. Drive ⌘Z with real keystrokes once
 Needs Accessibility and Screen Recording permission for the terminal
 (`screencapture` and System Events were both refused). Rename in the title
 field, type in the chapter, click the title field, ⌘Z.
-
-### 2. A second ⌘Z in the title field can show a stale title
-Seen in the in-process test, not confirmed in the running app: after one Undo
-in the title field has reverted a rename, a second Undo acts on the field
-editor's own undo stack and puts the new name back *in the field only*; the
-stored title stays the old one until the field is next edited. Predates the
-review. Chapter text is not involved.
-
-### 3. Undoing Replace All with a changed chapter open
-The undo skips any chapter edited since, silently. If some were skipped, say
-so ("2 chapters were changed after Replace All and were left as they are").
 
 ### 4. Line endings are normalised on paste only
 `PasteStyling.normalizeLineEndings` runs in the two paste commands of the page

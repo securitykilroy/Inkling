@@ -75,8 +75,8 @@ enum WordDocumentExporter {
 
         var written: [URL] = []
         for (index, chapter) in exportable.enumerated() {
-            let baseName = sanitizedFilename(chapter.title, fallback: "Chapter \(index + 1)")
-            let url = uniqueURL(in: folder, baseName: baseName, extension: "docx")
+            let baseName = ExportFilename.sanitized(chapter.title, fallback: "Chapter \(index + 1)")
+            let url = ExportFilename.uniqueURL(in: folder, baseName: baseName, extension: "docx")
             try docxData(for: chapter).write(to: url, options: .atomic)
             written.append(url)
         }
@@ -609,30 +609,6 @@ enum WordDocumentExporter {
             .replacingOccurrences(of: ">", with: "&gt;")
             .replacingOccurrences(of: "\"", with: "&quot;")
             .replacingOccurrences(of: "'", with: "&apos;")
-    }
-
-    private static func sanitizedFilename(_ value: String?, fallback: String) -> String {
-        let trimmed = (value ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let source = trimmed.isEmpty ? fallback : trimmed
-        let invalid = CharacterSet(charactersIn: "/:\\?%*|\"<>")
-            .union(.controlCharacters)
-        let clean = source
-            .components(separatedBy: invalid)
-            .joined(separator: "-")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return clean.isEmpty ? fallback : clean
-    }
-
-    private static func uniqueURL(in folder: URL, baseName: String, extension pathExtension: String) -> URL {
-        var candidate = folder.appendingPathComponent(baseName).appendingPathExtension(pathExtension)
-        var suffix = 2
-        while FileManager.default.fileExists(atPath: candidate.path) {
-            candidate = folder
-                .appendingPathComponent("\(baseName) \(suffix)")
-                .appendingPathExtension(pathExtension)
-            suffix += 1
-        }
-        return candidate
     }
 }
 

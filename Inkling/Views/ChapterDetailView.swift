@@ -34,9 +34,7 @@ struct ChapterDetailView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            TextField("Chapter Title", text: titleBinding)
-                .textFieldStyle(.plain)
-                .font(.largeTitle.bold())
+            ChapterTitleField(text: titleBinding)
                 .padding(.horizontal, 20)
                 .padding(.top, 16)
                 .padding(.bottom, 8)

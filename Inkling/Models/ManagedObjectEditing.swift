@@ -81,6 +81,28 @@ struct RichTextChange {
     let to: Data?
 }
 
+/// What to tell the author when undoing (or redoing) a bulk rewrite left some
+/// chapters alone because they had been edited in the meantime.
+struct RichTextUndoNotice: Equatable {
+    let skipped: Int
+    let actionName: String
+    let isRedo: Bool
+
+    var message: String {
+        let step = isRedo ? "Redo \(actionName)" : "Undo \(actionName)"
+        return skipped == 1
+            ? "\(step) left 1 chapter as it is."
+            : "\(step) left \(skipped) chapters as they are."
+    }
+
+    var explanation: String {
+        let since = isRedo ? "since \(actionName) was undone" : "after \(actionName)"
+        return skipped == 1
+            ? "1 chapter was changed \(since), so it was not touched. Nothing you wrote was rolled back."
+            : "\(skipped) chapters were changed \(since), so they were not touched. Nothing you wrote was rolled back."
+    }
+}
+
 /// Applies `changes` as a single undoable step — the way a bulk rewrite such
 /// as Replace All gets an Undo without going through Core Data's own, which
 /// can't be trusted with these blobs (see `RichTextUndoGuard`).
@@ -91,11 +113,16 @@ struct RichTextChange {
 /// while every chapter they haven't touched is restored. The inverse that
 /// gets registered covers only the changes actually applied, so a redo can't
 /// reach the skipped ones either.
+///
+/// Skipping is never silent on the way back: when an undo or redo leaves
+/// chapters as they are, `reportSkipped` is told how many (by default the
+/// document says so in a sheet; see `RichTextUndoNotice`).
 @MainActor
 func applyRichTextChanges(
     _ changes: [RichTextChange],
     actionName: String,
-    in context: NSManagedObjectContext
+    in context: NSManagedObjectContext,
+    reportSkipped: ((RichTextUndoNotice) -> Void)? = nil
 ) {
     let document = NSDocumentController.shared.documents
         .first { ($0 as? NSPersistentDocument)?.managedObjectContext === context }
@@ -103,12 +130,17 @@ func applyRichTextChanges(
     let undoManager = context.undoManager
 
     var applied: [RichTextChange] = []
+    // Still there, but no longer holding the text this step would replace.
+    var changedSince = 0
     context.processPendingChanges()
     undoManager?.disableUndoRegistration()
     for change in changes
     where !change.object.isDeleted && change.object.managedObjectContext != nil
-        && (change.object.value(forKey: change.key) as? Data) == change.from
         && change.from != change.to {
+        guard (change.object.value(forKey: change.key) as? Data) == change.from else {
+            changedSince += 1
+            continue
+        }
         change.object.setValue(change.to, forKey: change.key)
         undoGuard?.accept(change.to as NSData?, forKey: change.key, of: change.object)
         applied.append(change)
@@ -116,12 +148,25 @@ func applyRichTextChanges(
     context.processPendingChanges()
     undoManager?.enableUndoRegistration()
 
+    if changedSince > 0, let undoManager, undoManager.isUndoing || undoManager.isRedoing {
+        let notice = RichTextUndoNotice(
+            skipped: changedSince, actionName: actionName, isRedo: undoManager.isRedoing
+        )
+        if let reportSkipped {
+            reportSkipped(notice)
+        } else {
+            (document as? InklingDocument)?.present(notice)
+        }
+    }
+
     guard !applied.isEmpty, let undoManager else { return }
     let inverse = applied.map {
         RichTextChange(object: $0.object, key: $0.key, from: $0.to, to: $0.from)
     }
     undoManager.registerUndo(withTarget: context) { context in
-        applyRichTextChanges(inverse, actionName: actionName, in: context)
+        applyRichTextChanges(
+            inverse, actionName: actionName, in: context, reportSkipped: reportSkipped
+        )
     }
     undoManager.setActionName(actionName)
     // The registered action marks the document edited when its undo group

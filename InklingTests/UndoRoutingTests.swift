@@ -126,4 +126,73 @@ struct UndoRoutingTests {
         #expect(body(of: chapter) == "Opened. Typed since. More.")
         #expect(page.string == "Opened. Typed since. More.")
     }
+
+    /// A second Undo in the title field, after the first has reverted a
+    /// rename, must not leave the field showing a name the chapter doesn't have.
+    @Test func aSecondUndoInTheTitleFieldNeverShowsATitleTheChapterDoesNotHave() throws {
+        let document = InklingDocument()
+        let context = try #require(document.managedObjectContext)
+        let undoManager = try #require(context.undoManager)
+        NSDocumentController.shared.addDocument(document)
+        defer { document.close() }
+
+        undoManager.disableUndoRegistration()
+        let project = Project(context: context)
+        project.id = UUID()
+        project.title = "Project"
+        project.createdAt = Date()
+        let chapter = Chapter(context: context)
+        chapter.id = UUID()
+        chapter.title = "Old"
+        chapter.sortIndex = 0
+        chapter.createdAt = Date()
+        chapter.project = project
+        chapter.bodyData = RichTextCodec.encode(
+            NSAttributedString(string: "Opened.", attributes: [.font: TextStyle.body.font])
+        )
+        context.processPendingChanges()
+        undoManager.enableUndoRegistration()
+
+        document.makeWindowControllers()
+        let window = try #require(document.windowControllers.first?.window)
+        window.makeKeyAndOrderFront(nil)
+        spin(1.0)
+        let root = try #require(window.contentView)
+
+        let list = try #require(find(NSTableView.self, in: root), "chapter list")
+        if find(NSTextField.self, in: root, where: { $0.placeholderString == "Chapter Title" }) == nil {
+            list.selectRowIndexes([0], byExtendingSelection: false)
+            spin(0.8)
+        }
+        let title = try #require(
+            find(NSTextField.self, in: root) { $0.placeholderString == "Chapter Title" }, "title field"
+        )
+
+        #expect(window.makeFirstResponder(title))
+        let fieldEditor = try #require(window.firstResponder as? NSTextView)
+        fieldEditor.selectAll(nil)
+        fieldEditor.insertText("New", replacementRange: fieldEditor.selectedRange())
+        spin()
+        #expect(chapter.title == "New")
+
+        sendUndo(in: window)
+        spin()
+        #expect(chapter.title == "Old")
+        #expect(title.stringValue == "Old")
+
+        sendUndo(in: window)
+        spin()
+        // Nothing is left to undo; the field must not invent a title.
+        #expect(chapter.title == "Old")
+        #expect(title.stringValue == "Old")
+
+        // Redo puts the rename back, in the chapter and in the field alike.
+        let redo = Selector(("redo:"))
+        var responder = window.firstResponder
+        while let current = responder, !current.responds(to: redo) { responder = current.nextResponder }
+        responder?.perform(redo, with: nil)
+        spin()
+        #expect(chapter.title == "New")
+        #expect(title.stringValue == (chapter.title ?? ""), "the field shows the stored title")
+    }
 }

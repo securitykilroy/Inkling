@@ -556,6 +556,22 @@ final class InklingDocument: NSPersistentDocument {
         }
     }
 
+    // MARK: - Undo notices
+
+    /// Says, in a sheet on the project window, that an undo left some chapters
+    /// alone. Deferred a turn because it is called from inside the undo; with
+    /// no window (a document being driven without UI) there is nobody to tell.
+    func present(_ notice: RichTextUndoNotice) {
+        DispatchQueue.main.async { [weak self] in
+            guard let window = self?.windowControllers.first?.window else { return }
+            let alert = NSAlert()
+            alert.alertStyle = .informational
+            alert.messageText = notice.message
+            alert.informativeText = notice.explanation
+            alert.beginSheetModal(for: window)
+        }
+    }
+
     // MARK: - Plain text export
 
     @objc func exportProjectAsPlainText(_ sender: Any?) {
@@ -598,9 +614,32 @@ final class InklingDocument: NSPersistentDocument {
         }
     }
 
+    /// One `.txt` file per chapter, into a folder the author picks.
+    @objc func exportPlainTextChapters(_ sender: Any?) {
+        exportChapterFiles(
+            message: "Choose a folder for the plain text chapter files.",
+            kind: "plain text",
+            export: PlainTextExporter.exportChapters
+        )
+    }
+
     // MARK: - Word export
 
     @objc func exportWordChapters(_ sender: Any?) {
+        exportChapterFiles(
+            message: "Choose a folder for the Word chapter documents.",
+            kind: "Word",
+            export: WordDocumentExporter.exportChapters
+        )
+    }
+
+    /// Shared by the two per-chapter exports: check every chapter is readable,
+    /// ask for a folder, write one file per chapter with content, say how many.
+    private func exportChapterFiles(
+        message: String,
+        kind: String,
+        export: @escaping ([PrintableChapter], URL) throws -> [URL]
+    ) {
         let chapters = orderedChapters().map {
             PrintableChapter(title: $0.title, bodyData: $0.bodyData)
         }
@@ -621,13 +660,13 @@ final class InklingDocument: NSPersistentDocument {
         panel.canCreateDirectories = true
         panel.allowsMultipleSelection = false
         panel.prompt = "Export"
-        panel.message = "Choose a folder for the Word chapter documents."
+        panel.message = message
 
         let handle: (NSApplication.ModalResponse) -> Void = { [weak self] response in
             guard response == .OK, let folder = panel.url else { return }
             do {
-                let urls = try WordDocumentExporter.exportChapters(chapters, to: folder)
-                self?.presentWordExportSummary(count: urls.count, folder: folder)
+                let urls = try export(chapters, folder)
+                self?.presentChapterExportSummary(count: urls.count, kind: kind, folder: folder)
             } catch {
                 self?.presentError(error)
             }
@@ -640,10 +679,12 @@ final class InklingDocument: NSPersistentDocument {
         }
     }
 
-    private func presentWordExportSummary(count: Int, folder: URL) {
+    private func presentChapterExportSummary(count: Int, kind: String, folder: URL) {
         let alert = NSAlert()
         alert.alertStyle = .informational
-        alert.messageText = count == 1 ? "Exported 1 Word chapter." : "Exported \(count) Word chapters."
+        alert.messageText = count == 1
+            ? "Exported 1 \(kind) chapter."
+            : "Exported \(count) \(kind) chapters."
         alert.informativeText = folder.path
         if let window = windowControllers.first?.window {
             alert.beginSheetModal(for: window)

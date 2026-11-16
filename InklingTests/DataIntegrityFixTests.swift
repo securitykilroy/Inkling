@@ -414,6 +414,52 @@ struct DataIntegrityFixTests {
         #expect(untouched.bodyData == Data("replaced".utf8))
     }
 
+    /// Skipping a chapter is reported, with the count, on undo and on redo;
+    /// an undo that restores everything reports nothing.
+    @Test func undoingReplaceAllSaysHowManyChaptersItLeftAlone() throws {
+        let (document, context, undoManager) = try Self.document()
+        defer { NSDocumentController.shared.removeDocument(document) }
+        let typedIn = Self.chapter(in: context, undoManager: undoManager)
+        let untouched = Self.chapter(in: context, undoManager: undoManager)
+        var notices: [RichTextUndoNotice] = []
+
+        applyRichTextChanges(Self.replaceAllChanges([typedIn, untouched], to: "replaced"),
+                             actionName: "Replace All", in: context) { notices.append($0) }
+        #expect(notices.isEmpty)
+
+        undoManager.undo()
+        context.processPendingChanges()
+        #expect(notices.isEmpty, "nothing was skipped")
+        undoManager.redo()
+        context.processPendingChanges()
+        #expect(notices.isEmpty)
+
+        assignRichTextIfChanged(typedIn, \.bodyData, Data("replaced, then more typing".utf8))
+        undoManager.undo()
+        context.processPendingChanges()
+        #expect(notices == [RichTextUndoNotice(skipped: 1, actionName: "Replace All", isRedo: false)])
+        #expect(notices.first?.message == "Undo Replace All left 1 chapter as it is.")
+        #expect(untouched.bodyData == Data("as opened".utf8))
+
+        // The skipped chapter is no longer part of the step, so redoing it
+        // has nothing to skip; a chapter edited after the undo is.
+        assignRichTextIfChanged(untouched, \.bodyData, Data("as opened, then edited".utf8))
+        undoManager.redo()
+        context.processPendingChanges()
+        #expect(notices.last == RichTextUndoNotice(skipped: 1, actionName: "Replace All", isRedo: true))
+        #expect(notices.count == 2)
+        #expect(untouched.bodyData == Data("as opened, then edited".utf8))
+        #expect(typedIn.bodyData == Data("replaced, then more typing".utf8))
+    }
+
+    @Test func skippedUndoNoticeCountsChapters() {
+        let two = RichTextUndoNotice(skipped: 2, actionName: "Replace All", isRedo: false)
+        #expect(two.message == "Undo Replace All left 2 chapters as they are.")
+        #expect(two.explanation.hasPrefix("2 chapters were changed after Replace All"))
+        let redo = RichTextUndoNotice(skipped: 1, actionName: "Replace All", isRedo: true)
+        #expect(redo.message == "Redo Replace All left 1 chapter as it is.")
+    }
+
     /// Mixed with Core Data's own undo: a rename after Replace All undoes
     /// first and leaves the replaced text alone, then Replace All undoes.
     @Test func replaceAllUndoInterleavesWithARename() throws {

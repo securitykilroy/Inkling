@@ -102,6 +102,7 @@ enum MainMenu {
             item("Import Word Chapters…", "importWordChapters:", ""),
             exportWord,
             exportText,
+            item("Export Plain Text Chapters…", "exportPlainTextChapters:", ""),
         ])
     }
 

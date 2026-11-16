@@ -934,6 +934,63 @@ struct InklingTests {
         #expect(try PlainTextExporter.plainText(for: []) == "")
     }
 
+    private func temporaryFolder() throws -> URL {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("InklingTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        return folder
+    }
+
+    @Test func plainTextChapterExportWritesOneFilePerChapterWithContent() throws {
+        let folder = try temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+
+        let urls = try PlainTextExporter.exportChapters([
+            PrintableChapter(title: "Chapter One", bodyData: rtf("The beginning of it all.")),
+            PrintableChapter(title: "Empty", bodyData: nil),
+            PrintableChapter(title: "Who/What: Why?", bodyData: rtf("And then it continued.")),
+        ], to: folder)
+
+        #expect(urls.map(\.lastPathComponent) == ["Chapter One.txt", "Who-What- Why-.txt"])
+        #expect(try String(contentsOf: urls[0], encoding: .utf8)
+            == "Chapter One\n\nThe beginning of it all.\n")
+        #expect(try String(contentsOf: urls[1], encoding: .utf8)
+            == "Who/What: Why?\n\nAnd then it continued.\n")
+        #expect(try FileManager.default.contentsOfDirectory(atPath: folder.path).count == 2)
+    }
+
+    @Test func plainTextChapterExportNeverOverwritesAndNamesUntitledChapters() throws {
+        let folder = try temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let chapters = [
+            PrintableChapter(title: "Same", bodyData: rtf("First.")),
+            PrintableChapter(title: "Same", bodyData: rtf("Second.")),
+            PrintableChapter(title: " ", bodyData: rtf("Third.")),
+        ]
+
+        let urls = try PlainTextExporter.exportChapters(chapters, to: folder)
+        #expect(urls.map(\.lastPathComponent) == ["Same.txt", "Same 2.txt", "Chapter 3.txt"])
+        #expect(try String(contentsOf: urls[1], encoding: .utf8) == "Same\n\nSecond.\n")
+
+        // A second export into the same folder leaves the first one's files.
+        let again = try PlainTextExporter.exportChapters([chapters[0]], to: folder)
+        #expect(again.map(\.lastPathComponent) == ["Same 3.txt"])
+        #expect(try String(contentsOf: urls[0], encoding: .utf8) == "Same\n\nFirst.\n")
+    }
+
+    @Test func plainTextChapterExportWritesNothingIfAChapterIsUnreadable() throws {
+        let folder = try temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+
+        #expect(throws: PrintableChapter.ContentError.unreadableBody("Damaged")) {
+            try PlainTextExporter.exportChapters([
+                PrintableChapter(title: "Fine", bodyData: rtf("Readable.")),
+                PrintableChapter(title: "Damaged", bodyData: Data("not rich text".utf8)),
+            ], to: folder)
+        }
+        #expect(try FileManager.default.contentsOfDirectory(atPath: folder.path).isEmpty)
+    }
+
     @Test func plainTextExportRefusesToSilentlyOmitUnreadableStoredText() {
         let chapter = PrintableChapter(
             title: "Damaged",

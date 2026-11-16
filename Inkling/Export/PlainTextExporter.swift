@@ -2,7 +2,8 @@
 //  PlainTextExporter.swift
 //  Inkling
 //
-//  Flattens a project's chapters into a single plain-text manuscript. Reuses
+//  Flattens a project's chapters into a single plain-text manuscript, or into
+//  one file per chapter (`exportChapters`). Reuses
 //  PrintableChapter so export and print draw from the same chapter snapshot.
 //  Rich-text formatting and embedded images are dropped: each chapter becomes
 //  its title followed by the body's text, and image attachments (the U+FFFC
@@ -21,6 +22,28 @@ enum PlainTextExporter {
         let blocks = try chapters.map { try block(for: $0) }
         guard !blocks.isEmpty else { return "" }
         return blocks.joined(separator: "\n\n") + "\n"
+    }
+
+    /// Writes each chapter that has content as its own `.txt` file in `folder`,
+    /// named after the chapter, in the same form a chapter takes in the
+    /// whole-book export (title, blank line, text). Empty chapters are skipped
+    /// and existing files are never overwritten, as with the Word export.
+    nonisolated static func exportChapters(
+        _ chapters: [PrintableChapter], to folder: URL
+    ) throws -> [URL] {
+        let exportable = chapters.filter(\.hasContent)
+        // Read everything before writing anything, so an unreadable chapter
+        // can't leave a half-exported folder behind.
+        let texts = try exportable.map { try plainText(for: [$0]) }
+
+        var written: [URL] = []
+        for (index, chapter) in exportable.enumerated() {
+            let baseName = ExportFilename.sanitized(chapter.title, fallback: "Chapter \(index + 1)")
+            let url = ExportFilename.uniqueURL(in: folder, baseName: baseName, extension: "txt")
+            try texts[index].write(to: url, atomically: true, encoding: .utf8)
+            written.append(url)
+        }
+        return written
     }
 
     /// Title line, a blank line, then the body text. The body is included only
