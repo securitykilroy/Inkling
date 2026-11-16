@@ -951,7 +951,7 @@ struct InklingTests {
             PrintableChapter(title: "Who/What: Why?", bodyData: rtf("And then it continued.")),
         ], to: folder)
 
-        #expect(urls.map(\.lastPathComponent) == ["Chapter One.txt", "Who-What- Why-.txt"])
+        #expect(urls.map(\.lastPathComponent) == ["01 Chapter One.txt", "02 Who-What- Why-.txt"])
         #expect(try String(contentsOf: urls[0], encoding: .utf8)
             == "Chapter One\n\nThe beginning of it all.\n")
         #expect(try String(contentsOf: urls[1], encoding: .utf8)
@@ -969,13 +969,26 @@ struct InklingTests {
         ]
 
         let urls = try PlainTextExporter.exportChapters(chapters, to: folder)
-        #expect(urls.map(\.lastPathComponent) == ["Same.txt", "Same 2.txt", "Chapter 3.txt"])
+        #expect(urls.map(\.lastPathComponent) == ["01 Same.txt", "02 Same.txt", "03 Untitled Chapter.txt"])
         #expect(try String(contentsOf: urls[1], encoding: .utf8) == "Same\n\nSecond.\n")
 
         // A second export into the same folder leaves the first one's files.
         let again = try PlainTextExporter.exportChapters([chapters[0]], to: folder)
-        #expect(again.map(\.lastPathComponent) == ["Same 3.txt"])
+        #expect(again.map(\.lastPathComponent) == ["01 Same 2.txt"])
         #expect(try String(contentsOf: urls[0], encoding: .utf8) == "Same\n\nFirst.\n")
+    }
+
+    /// Past 99 chapters the prefix widens, so `100` still sorts after `099`.
+    @Test func plainTextChapterExportPadsNumbersToTheChapterCount() throws {
+        let folder = try temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let chapters = (1...100).map { PrintableChapter(title: "C", bodyData: rtf("Text \($0).")) }
+
+        let urls = try PlainTextExporter.exportChapters(chapters, to: folder)
+        let names = urls.map(\.lastPathComponent)
+        #expect(names.first == "001 C.txt")
+        #expect(names.last == "100 C.txt")
+        #expect(names.sorted() == names)
     }
 
     @Test func plainTextChapterExportWritesNothingIfAChapterIsUnreadable() throws {

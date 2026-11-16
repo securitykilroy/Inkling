@@ -25,8 +25,10 @@ enum PlainTextExporter {
     }
 
     /// Writes each chapter that has content as its own `.txt` file in `folder`,
-    /// named after the chapter, in the same form a chapter takes in the
-    /// whole-book export (title, blank line, text). Empty chapters are skipped
+    /// in the same form a chapter takes in the whole-book export (title, blank
+    /// line, text). Files are named `01 Title.txt`, `02 Title.txt`… so the
+    /// folder sorts in book order; the number is zero-padded to the width of
+    /// the count and counts exported chapters only. Empty chapters are skipped
     /// and existing files are never overwritten, as with the Word export.
     nonisolated static func exportChapters(
         _ chapters: [PrintableChapter], to folder: URL
@@ -36,9 +38,13 @@ enum PlainTextExporter {
         // can't leave a half-exported folder behind.
         let texts = try exportable.map { try plainText(for: [$0]) }
 
+        let digits = max(2, String(exportable.count).count)
         var written: [URL] = []
         for (index, chapter) in exportable.enumerated() {
-            let baseName = ExportFilename.sanitized(chapter.title, fallback: "Chapter \(index + 1)")
+            let number = String(index + 1)
+            let prefix = String(repeating: "0", count: digits - number.count) + number
+            let baseName = prefix + " "
+                + ExportFilename.sanitized(chapter.title, fallback: "Untitled Chapter")
             let url = ExportFilename.uniqueURL(in: folder, baseName: baseName, extension: "txt")
             try texts[index].write(to: url, atomically: true, encoding: .utf8)
             written.append(url)
