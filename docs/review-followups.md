@@ -39,12 +39,16 @@ from reading the code and should be reproduced before it is fixed.
 
 - **A rename is one undo step** (`renameChapter`, "Rename Chapter"). The
   title is written outside Core Data's undo and the first keystroke of a visit
-  to the title field registers one action. Checked in tests, not yet in the
-  running app.
+  to the title field registers one action. Typing at real speed in the
+  running app showed the first version splitting a rename ("Storm Warning"
+  undid to "St"): it judged where a rename begins from the title SwiftUI had
+  last drawn, which lags the keys. It now reads the stored title
+  (`storedText`). Confirmed in the running app: one ⌘Z, one ⇧⌘Z.
 - **A chapter that leaves the project takes its editor with it**
   (`ProjectRootView.dropSelectionIfRemoved`). Undoing New Chapter, or redoing
   a deletion, used to leave the removed chapter's editor on screen and
-  editable. Reproduced in a test (`undoingNewChapterClosesItsEditor`).
+  editable. Reproduced in a test (`undoingNewChapterClosesItsEditor`) and confirmed in the
+  running app.
 
 ## Created by the fixes
 

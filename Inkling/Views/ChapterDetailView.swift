@@ -34,7 +34,9 @@ struct ChapterDetailView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            ChapterTitleField(text: chapter.title ?? "") { title, startsNewEdit in
+            ChapterTitleField(
+                text: chapter.title ?? "", storedText: { chapter.title ?? "" }
+            ) { title, startsNewEdit in
                 renameChapter(chapter, to: title, startingUndoStep: startsNewEdit)
             }
                 .padding(.horizontal, 20)

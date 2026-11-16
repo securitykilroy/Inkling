@@ -22,6 +22,11 @@ import SwiftUI
 struct ChapterTitleField: NSViewRepresentable {
     /// The stored title.
     let text: String
+    /// Reads the stored title as it is right now. `text` is what SwiftUI last
+    /// rendered, which lags fast typing by a keystroke or two; deciding where
+    /// a rename begins from it split a quickly typed rename into several
+    /// undo steps.
+    let storedText: () -> String
     /// Called with each edit. `startsNewEdit` is true for the first change of
     /// a visit to the field, and for the first change after the title was set
     /// from elsewhere (an Undo, say); the keystrokes after it continue that
@@ -74,7 +79,7 @@ struct ChapterTitleField: NSViewRepresentable {
             let new = field.stringValue
             // The stored title no longer being what we wrote means something
             // else changed it, so this keystroke begins a fresh edit.
-            let startsNewEdit = lastWritten == nil || parent.text != lastWritten
+            let startsNewEdit = lastWritten == nil || parent.storedText() != lastWritten
             lastWritten = new
             parent.onEdit(new, startsNewEdit)
         }

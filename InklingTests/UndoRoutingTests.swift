@@ -10,6 +10,7 @@
 
 import AppKit
 import CoreData
+import SwiftUI
 import Testing
 @testable import Inkling
 
@@ -304,5 +305,44 @@ struct UndoRoutingTests {
         spin(0.8)
         #expect(document.managedObjectContext?.registeredObjects.compactMap { $0 as? Chapter }
             .filter { !$0.isDeleted }.count == 2)
+    }
+
+    /// Typed at real speed, keystrokes arrive before SwiftUI has redrawn the
+    /// field with the title the last one stored. The field must still see
+    /// them as one rename: only the first may start an undo step. (Found by
+    /// typing into the running app; a test that waits between keystrokes
+    /// never sees it.)
+    @Test func aQuicklyTypedRenameIsOneEdit() throws {
+        var stored = "Old"
+        var starts: [Bool] = []
+        // `text` stays "Old" throughout, as it does between redraws.
+        let field = ChapterTitleField(text: "Old", storedText: { stored }) { text, startsNewEdit in
+            stored = text
+            starts.append(startsNewEdit)
+        }
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 80),
+            styleMask: [.titled], backing: .buffered, defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(rootView: field)
+        window.makeKeyAndOrderFront(nil)
+        defer { window.close() }
+        spin(0.3)
+
+        let title = try #require(titleField(in: window))
+        #expect(window.makeFirstResponder(title))
+        let fieldEditor = try #require(window.firstResponder as? NSTextView)
+        fieldEditor.selectAll(nil)
+        for character in ["N", "e", "w"] {
+            fieldEditor.insertText(character, replacementRange: fieldEditor.selectedRange())
+        }
+        #expect(stored == "New")
+        #expect(starts == [true, false, false])
+
+        // The title changing underneath (an Undo) makes the next keystroke a new rename.
+        stored = "Old"
+        fieldEditor.insertText("!", replacementRange: fieldEditor.selectedRange())
+        #expect(starts.last == true)
     }
 }
