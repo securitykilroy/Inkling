@@ -42,7 +42,7 @@ final class InklingDocument: NSPersistentDocument {
     /// Stops Undo and Redo from rolling a chapter's text back. Installed with
     /// the document, not the window, so it covers every way an undo can
     /// arrive. See `RichTextUndoGuard`.
-    private var undoGuard: RichTextUndoGuard?
+    private(set) var undoGuard: RichTextUndoGuard?
 
     override init() {
         super.init()

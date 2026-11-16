@@ -53,6 +53,15 @@ struct ChapterSidebar: View {
         .onChange(of: chapters.map(\.objectID)) { _, _ in
             statistics.primeMissing(for: Array(chapters))
         }
+        // An undone or redone Replace All changes chapter bodies with no
+        // editor reporting it, so the counts are refreshed here. Cheap when
+        // nothing changed: `primeMissing` only recounts a body that differs.
+        .onReceive(NotificationCenter.default.publisher(for: .NSUndoManagerDidUndoChange)) { note in
+            refreshStatistics(afterUndoBy: note.object)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .NSUndoManagerDidRedoChange)) { note in
+            refreshStatistics(afterUndoBy: note.object)
+        }
         .safeAreaInset(edge: .bottom) {
             let words = statistics.totalWords(for: Array(chapters))
             let pages = statistics.totalPages(for: Array(chapters))
@@ -168,6 +177,13 @@ struct ChapterSidebar: View {
                 if isOpen { expanded.insert(id) } else { expanded.remove(id) }
             }
         )
+    }
+
+    private func refreshStatistics(afterUndoBy sender: Any?) {
+        guard let undoManager = viewModel.context.undoManager,
+              (sender as AnyObject?) === undoManager
+        else { return }
+        statistics.primeMissing(for: Array(chapters))
     }
 
     private func delete(_ toDelete: [Chapter]) {

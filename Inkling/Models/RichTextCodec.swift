@@ -222,8 +222,8 @@ enum RichTextCodec {
         }
         // Callouts have no attachment of their own to match against, so they
         // take the drift of the nearest attachment before them. Exact when
-        // the missing characters precede that attachment, which is the case
-        // this exists for; a callout past the last attachment can still be off.
+        // the missing characters precede that attachment; whatever is left
+        // over is taken up by `wholeParagraphs` when the callout is restored.
         let drifts = mapping.map { (offset: $0.key, drift: $0.key - $0.value) }
             .sorted { $0.offset < $1.offset }
         func moved(_ offset: Int) -> Int {
@@ -348,8 +348,44 @@ enum RichTextCodec {
             else { continue }
             let length = min(record.length, attributedString.length - record.location)
             guard length > 0 else { continue }
-            CalloutStyling.apply(kind, to: attributedString, range: NSRange(location: record.location, length: length))
+            let range = wholeParagraphs(
+                near: NSRange(location: record.location, length: length),
+                in: attributedString.string as NSString
+            )
+            CalloutStyling.apply(kind, to: attributedString, range: range)
         }
+    }
+
+    /// `range` pulled back onto paragraph boundaries.
+    ///
+    /// A callout is whole paragraphs by construction, so a record that starts
+    /// or ends mid-paragraph has drifted: characters ahead of it went missing
+    /// on the way through RTFD (see "Keeping sidecar offsets true"), leaving
+    /// its offsets too far along. `realign` corrects that from the nearest
+    /// attachment, but a callout has no attachment of its own, so a chapter
+    /// with none, or with the lost characters after its last one, still comes
+    /// through shifted — covering the tail of its own first paragraph and the
+    /// head of the one after. Characters are only ever lost, never gained, so
+    /// both ends move the same way: back to the start of the paragraph each
+    /// landed in. A record already on boundaries is returned unchanged.
+    ///
+    /// Exact while the drift is shorter than the paragraphs involved, which
+    /// covers a handful of lost line endings. A one-character paragraph (an
+    /// empty line) right at the callout's edge can still be taken in.
+    nonisolated static func wholeParagraphs(near range: NSRange, in string: NSString) -> NSRange {
+        guard range.length > 0, NSMaxRange(range) <= string.length else { return range }
+        func paragraphStart(_ index: Int) -> Int {
+            index >= string.length
+                ? string.length
+                : string.paragraphRange(for: NSRange(location: index, length: 0)).location
+        }
+        let start = paragraphStart(range.location)
+        var end = paragraphStart(NSMaxRange(range))
+        if end <= start {
+            // The whole record sat inside one paragraph: that paragraph.
+            end = NSMaxRange(string.paragraphRange(for: NSRange(location: start, length: 0)))
+        }
+        return NSRange(location: start, length: end - start)
     }
 
     /// Backfills the default paragraph spacing and body first-line indent onto

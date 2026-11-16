@@ -22,7 +22,9 @@
 //
 //  It follows that nothing which writes a blob can be undone through Core
 //  Data, so nothing should register one: Replace All and a project font
-//  change go through `assignRichTextIfChanged` as well.
+//  change write outside its undo as well. An operation that *should* be
+//  undoable registers its own action and tells the guard which values it
+//  means to change (`accept`); see `applyRichTextChanges`.
 //
 
 import AppKit
@@ -39,6 +41,8 @@ final class RichTextUndoGuard {
     private weak var document: NSPersistentDocument?
     private var observers: [NSObjectProtocol] = []
     private var held: [(object: NSManagedObject, values: [String: NSObject?])] = []
+    /// True between an undo manager's will- and did- notifications.
+    private var isHolding = false
 
     init(document: NSPersistentDocument) {
         self.document = document
@@ -78,9 +82,23 @@ final class RichTextUndoGuard {
         return blobs + (companionKeys[object.entity.name ?? ""] ?? [])
     }
 
+    /// Called by an explicit undo action, while it runs, for each blob it
+    /// changes on purpose: `value` is what that key should hold once the
+    /// undo or redo has finished. Without this the guard would put the old
+    /// value straight back. Does nothing outside an undo or redo.
+    func accept(_ value: NSObject?, forKey key: String, of object: NSManagedObject) {
+        guard isHolding else { return }
+        if let index = held.firstIndex(where: { $0.object === object }) {
+            held[index].values.updateValue(value, forKey: key)
+        } else {
+            held.append((object, [key: value]))
+        }
+    }
+
     private func capture(from sender: ObjectIdentifier?) {
         held.removeAll()
         guard let context = context(for: sender) else { return }
+        isHolding = true
         // Bring Core Data's own bookkeeping up to date first, so what is
         // noted here is what the undo is about to act on.
         context.processPendingChanges()
@@ -96,9 +114,10 @@ final class RichTextUndoGuard {
     }
 
     private func restore(from sender: ObjectIdentifier?) {
+        guard let context = context(for: sender), let undoManager = context.undoManager else { return }
         let noted = held
         held.removeAll()
-        guard let context = context(for: sender), let undoManager = context.undoManager else { return }
+        isHolding = false
 
         context.processPendingChanges()
         undoManager.disableUndoRegistration()

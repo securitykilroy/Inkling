@@ -353,6 +353,141 @@ struct DataIntegrityFixTests {
         #expect(project.bodyFontFamily == "Georgia")
     }
 
+    // MARK: - Replace All's own undo
+
+    private static func replaceAllChanges(_ chapters: [Chapter], to new: String) -> [RichTextChange] {
+        chapters.map {
+            RichTextChange(object: $0, key: "bodyData", from: $0.bodyData, to: Data(new.utf8))
+        }
+    }
+
+    @Test func replaceAllIsOneUndoableStepThatRedoes() throws {
+        let (document, context, undoManager) = try Self.document()
+        defer { NSDocumentController.shared.removeDocument(document) }
+        let first = Self.chapter(in: context, undoManager: undoManager)
+        let second = Self.chapter(in: context, undoManager: undoManager)
+
+        applyRichTextChanges(Self.replaceAllChanges([first, second], to: "replaced"),
+                             actionName: "Replace All", in: context)
+        #expect(first.bodyData == Data("replaced".utf8))
+        #expect(second.bodyData == Data("replaced".utf8))
+        #expect(undoManager.undoActionName == "Replace All")
+        #expect(document.isDocumentEdited)
+
+        undoManager.undo()
+        context.processPendingChanges()
+        #expect(first.bodyData == Data("as opened".utf8))
+        #expect(second.bodyData == Data("as opened".utf8))
+        #expect(!undoManager.canUndo)
+
+        undoManager.redo()
+        context.processPendingChanges()
+        #expect(first.bodyData == Data("replaced".utf8))
+        #expect(second.bodyData == Data("replaced".utf8))
+
+        undoManager.undo()
+        context.processPendingChanges()
+        #expect(first.bodyData == Data("as opened".utf8))
+    }
+
+    /// The point of the explicit undo: a chapter typed in after Replace All
+    /// keeps what was typed; the untouched one is restored. Redo can't reach
+    /// the skipped chapter either.
+    @Test func undoingReplaceAllLeavesAChapterEditedSinceAlone() throws {
+        let (document, context, undoManager) = try Self.document()
+        defer { NSDocumentController.shared.removeDocument(document) }
+        let typedIn = Self.chapter(in: context, undoManager: undoManager)
+        let untouched = Self.chapter(in: context, undoManager: undoManager)
+
+        applyRichTextChanges(Self.replaceAllChanges([typedIn, untouched], to: "replaced"),
+                             actionName: "Replace All", in: context)
+        assignRichTextIfChanged(typedIn, \.bodyData, Data("replaced, then more typing".utf8))
+
+        undoManager.undo()
+        context.processPendingChanges()
+        #expect(typedIn.bodyData == Data("replaced, then more typing".utf8))
+        #expect(untouched.bodyData == Data("as opened".utf8))
+
+        undoManager.redo()
+        context.processPendingChanges()
+        #expect(typedIn.bodyData == Data("replaced, then more typing".utf8))
+        #expect(untouched.bodyData == Data("replaced".utf8))
+    }
+
+    /// Mixed with Core Data's own undo: a rename after Replace All undoes
+    /// first and leaves the replaced text alone, then Replace All undoes.
+    @Test func replaceAllUndoInterleavesWithARename() throws {
+        let (document, context, undoManager) = try Self.document()
+        defer { NSDocumentController.shared.removeDocument(document) }
+        let chapter = Self.chapter(in: context, undoManager: undoManager)
+        // Two separate steps, as two user events are in the app. Left on,
+        // event grouping would wrap both in one group here: no run loop turns.
+        undoManager.groupsByEvent = false
+
+        undoManager.beginUndoGrouping()
+        applyRichTextChanges(Self.replaceAllChanges([chapter], to: "replaced"),
+                             actionName: "Replace All", in: context)
+        undoManager.endUndoGrouping()
+        undoManager.beginUndoGrouping()
+        chapter.title = "New title"
+        context.processPendingChanges()
+        undoManager.endUndoGrouping()
+
+        undoManager.undo()
+        context.processPendingChanges()
+        #expect(chapter.title == "Old title")
+        #expect(chapter.bodyData == Data("replaced".utf8))
+
+        undoManager.undo()
+        context.processPendingChanges()
+        #expect(chapter.bodyData == Data("as opened".utf8))
+        #expect(chapter.title == "Old title")
+    }
+
+    // MARK: - Callouts in a file saved with drifted offsets
+
+    @Test func aRangeAlreadyOnParagraphBoundariesIsUnchanged() {
+        let text = "One.\nTwo is the note.\nThree.\n\nFive." as NSString
+        #expect(RichTextCodec.wholeParagraphs(near: NSRange(location: 5, length: 17), in: text)
+            == NSRange(location: 5, length: 17))
+        #expect(RichTextCodec.wholeParagraphs(near: NSRange(location: 5, length: 24), in: text)
+            == NSRange(location: 5, length: 24))
+        // The last paragraph, with no newline after it.
+        #expect(RichTextCodec.wholeParagraphs(near: NSRange(location: 30, length: 5), in: text)
+            == NSRange(location: 30, length: 5))
+    }
+
+    @Test func aShiftedRangeSnapsBackToItsParagraphs() {
+        let text = "One.\nTwo is the note.\nThree.\n\nFive." as NSString
+        // Shifted two along: tail of "Two…" plus the head of "Three."
+        #expect(RichTextCodec.wholeParagraphs(near: NSRange(location: 7, length: 17), in: text)
+            == NSRange(location: 5, length: 17))
+        // Entirely inside one paragraph.
+        #expect(RichTextCodec.wholeParagraphs(near: NSRange(location: 8, length: 4), in: text)
+            == NSRange(location: 5, length: 17))
+    }
+
+    /// No attachment anywhere, so `realign` has nothing to go on: two lost
+    /// "\r" ahead of a callout used to leave it two characters along.
+    @Test func aDriftedCalloutWithNoAttachmentToAlignByIsRestoredToItsParagraph() throws {
+        let font: [NSAttributedString.Key: Any] = [.font: TextStyle.body.font]
+        let raw = NSMutableAttributedString(
+            string: "Pasted one\r\nPasted two.\r\nA note paragraph.\nAfter the note.", attributes: font
+        )
+        let callout = (raw.string as NSString).range(of: "A note paragraph.\n")
+        let wrapper = try #require(raw.rtfdFileWrapper(
+            from: NSRange(location: 0, length: raw.length), documentAttributes: [:]
+        ))
+        wrapper.addRegularFile(
+            withContents: try JSONSerialization.data(withJSONObject: [[
+                "location": callout.location, "length": callout.length, "kind": "note",
+            ]]),
+            preferredFilename: "__inkling_callouts.json"
+        )
+        let reopened = try #require(RichTextCodec.decode(try #require(wrapper.serializedRepresentation)))
+        #expect(Restored(reopened).calloutTexts == ["A note paragraph.\n"])
+    }
+
     // MARK: - 3. Opening a chapter
 
     /// Through the editor's real load path: a heading, an image on its own

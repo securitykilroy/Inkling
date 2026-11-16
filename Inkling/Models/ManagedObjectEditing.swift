@@ -71,3 +71,62 @@ func assignOutsideUndoIfChanged<Root: NSManagedObject, Value: Equatable>(
         .first { ($0 as? NSPersistentDocument)?.managedObjectContext === context }?
         .updateChangeCount(.changeDone)
 }
+
+/// One rich-text blob changing from one value to another, as part of an
+/// operation the author can undo as a whole.
+struct RichTextChange {
+    let object: NSManagedObject
+    let key: String
+    let from: Data?
+    let to: Data?
+}
+
+/// Applies `changes` as a single undoable step — the way a bulk rewrite such
+/// as Replace All gets an Undo without going through Core Data's own, which
+/// can't be trusted with these blobs (see `RichTextUndoGuard`).
+///
+/// A change is applied only where the blob still holds exactly `from`. That
+/// is what makes the undo safe: a chapter the author has typed in since no
+/// longer matches, so it is left as they wrote it rather than rolled back,
+/// while every chapter they haven't touched is restored. The inverse that
+/// gets registered covers only the changes actually applied, so a redo can't
+/// reach the skipped ones either.
+@MainActor
+func applyRichTextChanges(
+    _ changes: [RichTextChange],
+    actionName: String,
+    in context: NSManagedObjectContext
+) {
+    let document = NSDocumentController.shared.documents
+        .first { ($0 as? NSPersistentDocument)?.managedObjectContext === context }
+    let undoGuard = (document as? InklingDocument)?.undoGuard
+    let undoManager = context.undoManager
+
+    var applied: [RichTextChange] = []
+    context.processPendingChanges()
+    undoManager?.disableUndoRegistration()
+    for change in changes
+    where !change.object.isDeleted && change.object.managedObjectContext != nil
+        && (change.object.value(forKey: change.key) as? Data) == change.from
+        && change.from != change.to {
+        change.object.setValue(change.to, forKey: change.key)
+        undoGuard?.accept(change.to as NSData?, forKey: change.key, of: change.object)
+        applied.append(change)
+    }
+    context.processPendingChanges()
+    undoManager?.enableUndoRegistration()
+
+    guard !applied.isEmpty, let undoManager else { return }
+    let inverse = applied.map {
+        RichTextChange(object: $0.object, key: $0.key, from: $0.to, to: $0.from)
+    }
+    undoManager.registerUndo(withTarget: context) { context in
+        applyRichTextChanges(inverse, actionName: actionName, in: context)
+    }
+    undoManager.setActionName(actionName)
+    // The registered action marks the document edited when its undo group
+    // closes; say so now as well, so it never depends on that timing.
+    if !undoManager.isUndoing, !undoManager.isRedoing {
+        document?.updateChangeCount(.changeDone)
+    }
+}

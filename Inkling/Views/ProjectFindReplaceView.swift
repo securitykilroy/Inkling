@@ -111,12 +111,18 @@ struct ProjectFindReplaceView: View {
             in: searchableChapters(), query: query, replacement: replacement, caseSensitive: caseSensitive
         )
         var affected: [Chapter] = []
+        var changes: [RichTextChange] = []
         for chapter in chapters {
             guard let id = chapter.id, let newData = results[id] else { continue }
-            // Outside Core Data's undo, like every write to a chapter's text:
-            // see `RichTextUndoGuard`.
-            assignRichTextIfChanged(chapter, \.bodyData, newData)
+            changes.append(RichTextChange(
+                object: chapter, key: #keyPath(Chapter.bodyData), from: chapter.bodyData, to: newData
+            ))
             affected.append(chapter)
+        }
+        // One undoable step of its own, outside Core Data's undo like every
+        // write to a chapter's text: see `applyRichTextChanges`.
+        if let context = affected.first?.managedObjectContext {
+            applyRichTextChanges(changes, actionName: "Replace All", in: context)
         }
         statistics.primeMissing(for: affected)
         // Re-run so the list reflects the change (matches should now be gone,

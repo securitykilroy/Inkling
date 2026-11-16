@@ -9,33 +9,37 @@ order worth doing.
 "Confirmed" means it was reproduced in a test during the review. The rest is
 from reading the code and should be reproduced before it is fixed.
 
+## Done since
+
+- **Replace All has its own undo** (`applyRichTextChanges`,
+  `RichTextUndoGuard.accept`). It restores only chapters whose text is still
+  exactly what Replace All wrote, so text typed since is never rolled back.
+  A font change still can't be undone; pick the old font again.
+- **Undo routing checked through the real document window**
+  (`UndoRoutingTests`): from the title field and from the chapter list, the
+  rename is undone and the text is kept. Done in-process by sending `undo:` up
+  the responder chain; real keystrokes were not possible (see 1 below).
+- **Callouts in an already-damaged file** now snap back to whole paragraphs
+  (`RichTextCodec.wholeParagraphs`). Still inexact if the drift is longer than
+  the paragraph it lands in, or an empty line sits at the callout's edge.
+
 ## Created by the fixes
 
-### 1. Replace All and a font change can no longer be undone
-`RichTextUndoGuard` stops Undo from ever changing a chapter's text, so these two
-now write outside Core Data's undo (`ProjectFindReplaceView.replaceAll`,
-`ProjectSettingsView.applyFont`). Before, they were undoable only with focus
-outside the editor, and that undo discarded anything typed since.
+### 1. Drive ⌘Z with real keystrokes once
+Needs Accessibility and Screen Recording permission for the terminal
+(`screencapture` and System Events were both refused). Rename in the title
+field, type in the chapter, click the title field, ⌘Z.
 
-- Give Replace All an explicit undo: register an action on the document's undo
-  manager holding the old `bodyData` of each affected chapter, and restore a
-  chapter only if its body is still exactly what Replace All wrote.
-- The guard puts back whatever it noted before the undo, so that action has to
-  tell it the new value is intended. Add something like
-  `RichTextUndoGuard.accept(_:key:)` that updates the noted value.
-- A font change is cheap to redo by picking the old font, so it may not need one.
+### 2. A second ⌘Z in the title field can show a stale title
+Seen in the in-process test, not confirmed in the running app: after one Undo
+in the title field has reverted a rename, a second Undo acts on the field
+editor's own undo stack and puts the new name back *in the field only*; the
+stored title stays the old one until the field is next edited. Predates the
+review. Chapter text is not involved.
 
-### 2. The real app's Undo routing was not driven
-The guard is tested against the document's undo manager directly. Not checked
-in the running app: ⌘Z with focus in the chapter title field and in the chapter
-list, after rename → type. Expected: the rename is undone, the text is not.
-
-### 3. Callouts in an already-damaged file can still be off
-`RichTextCodec.realign` repairs images and sidebars exactly, by matching records
-to attachments. Callouts have no attachment, so they take the drift of the
-nearest attachment before them. A callout after the last attachment, with a
-dropped character in between, is still shifted. Only affects files saved before
-the fix. A fix would snap a shifted callout to whole paragraphs.
+### 3. Undoing Replace All with a changed chapter open
+The undo skips any chapter edited since, silently. If some were skipped, say
+so ("2 chapters were changed after Replace All and were left as they are").
 
 ### 4. Line endings are normalised on paste only
 `PasteStyling.normalizeLineEndings` runs in the two paste commands of the page
