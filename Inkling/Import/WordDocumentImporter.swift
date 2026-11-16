@@ -103,6 +103,9 @@ enum WordDocumentImporter {
             result.append(NSAttributedString(string: "\n"))
             uncaptionedImageLocations = imageLocations
         }
+        // Word gives a drawing a paragraph of its own; see `ImageOnlyLine`.
+        // Done here because opening a chapter no longer does it.
+        ImageOnlyLine.joinAll(in: result)
         return result
     }
 

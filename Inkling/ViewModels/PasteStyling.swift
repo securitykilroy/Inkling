@@ -85,6 +85,48 @@ enum PasteStyling {
         textView.didChangeText()
     }
 
+    /// Removes what an RTF round trip would drop from text just pasted into
+    /// `range` — the "\r" of a Windows line ending, and NUL — and returns the
+    /// range the paste occupies afterwards.
+    ///
+    /// `RichTextCodec.encode` strips these anyway, so nothing saved depends on
+    /// this. It keeps the text on screen the same length as the text on disk,
+    /// which is what offsets handed out by project-wide Find and the outline
+    /// are measured in.
+    @discardableResult
+    static func normalizeLineEndings(in textView: NSTextView, range: NSRange) -> NSRange {
+        guard let storage = textView.textStorage, range.length > 0 else { return range }
+        let bounded = NSIntersectionRange(range, NSRange(location: 0, length: storage.length))
+        guard bounded.length > 0 else { return range }
+
+        let string = storage.string as NSString
+        var doomed: [Int] = []
+        for index in bounded.location..<NSMaxRange(bounded) {
+            switch string.character(at: index) {
+            case 0x0D where index + 1 < string.length && string.character(at: index + 1) == 0x0A:
+                doomed.append(index)
+            case 0x00:
+                doomed.append(index)
+            default:
+                break
+            }
+        }
+        guard !doomed.isEmpty else { return bounded }
+
+        var removed = 0
+        for index in doomed.reversed() {
+            let target = NSRange(location: index, length: 1)
+            guard textView.shouldChangeText(in: target, replacementString: "") else { continue }
+            storage.replaceCharacters(in: target, with: "")
+            removed += 1
+        }
+        guard removed > 0 else { return bounded }
+        textView.didChangeText()
+        let result = NSRange(location: bounded.location, length: bounded.length - removed)
+        textView.setSelectedRange(NSRange(location: NSMaxRange(result), length: 0))
+        return result
+    }
+
     /// The range a paste just wrote, derived from where the caret sat before
     /// and after. NSTextView leaves the selection collapsed at the end of the
     /// inserted text, so the difference is the paste.

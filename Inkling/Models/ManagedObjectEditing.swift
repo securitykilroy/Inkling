@@ -38,6 +38,22 @@ func assignRichTextIfChanged<Root: NSManagedObject>(
     _ keyPath: ReferenceWritableKeyPath<Root, Data?>,
     _ value: Data?
 ) {
+    assignOutsideUndoIfChanged(root, keyPath, value)
+}
+
+/// Stores a value without registering it with the context's undo manager,
+/// then marks the owning document edited directly.
+///
+/// Every write to a rich-text blob goes through here, bulk rewrites (Replace
+/// All, a project font change) included, and so does anything written
+/// alongside one. See `RichTextUndoGuard` for why none of them may be on
+/// Core Data's undo stack.
+@MainActor
+func assignOutsideUndoIfChanged<Root: NSManagedObject, Value: Equatable>(
+    _ root: Root,
+    _ keyPath: ReferenceWritableKeyPath<Root, Value>,
+    _ value: Value
+) {
     guard root[keyPath: keyPath] != value else { return }
     guard let context = root.managedObjectContext,
           let undoManager = context.undoManager

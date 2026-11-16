@@ -73,14 +73,22 @@ final class SidebarTextView: NSTextView, NSTextFieldDelegate {
         super.paste(sender)
         PasteStyling.adoptDestinationStyle(
             in: self,
-            range: PasteStyling.pastedRange(from: before, to: selectedRange().location),
+            range: PasteStyling.normalizeLineEndings(
+                in: self,
+                range: PasteStyling.pastedRange(from: before, to: selectedRange().location)
+            ),
             font: font,
             paragraphStyle: paragraphStyle
         )
     }
 
     @objc func pasteWithFormatting(_ sender: Any?) {
+        let before = selectedRange().location
         super.paste(sender)
+        PasteStyling.normalizeLineEndings(
+            in: self,
+            range: PasteStyling.pastedRange(from: before, to: selectedRange().location)
+        )
     }
 
     static func make(width: CGFloat, fontFamilyName: String? = nil) -> SidebarTextView {

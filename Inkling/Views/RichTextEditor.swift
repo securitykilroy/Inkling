@@ -240,7 +240,8 @@ struct RichTextEditor: NSViewRepresentable {
                 decoded ?? (isProtectingUnreadableData ? Self.unreadableContentMessage : NSAttributedString())
             )
             stack.isContentEditable = !isProtectingUnreadableData
-            stack.prepareFloatingImages()
+            // Opening a chapter never rewrites its text: see `ImageOnlyLine`.
+            stack.prepareFloatingImages(joiningImageOnlyLines: false)
             stack.prepareSidebars()
             loadedID = documentID
             loadedData = data

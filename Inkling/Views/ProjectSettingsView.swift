@@ -79,8 +79,12 @@ struct ProjectSettingsView: View {
         }
     }
 
+    /// Written outside Core Data's undo throughout: an undo that reverted the
+    /// family but not the restyled text (or the reverse) would leave the two
+    /// disagreeing, and each click in the Font panel used to park a full copy
+    /// of every chapter on the undo stack. See `RichTextUndoGuard`.
     private func applyFont(familyName: String?) {
-        project.bodyFontFamily = familyName
+        assignOutsideUndoIfChanged(project, \.bodyFontFamily, familyName)
         let results = ProjectFontStyler.restyledChapters(
             chapters.compactMap { chapter in
                 guard let id = chapter.id else { return nil }
@@ -90,28 +94,28 @@ struct ProjectSettingsView: View {
         )
         for chapter in chapters {
             guard let id = chapter.id, let updated = results[id] else { continue }
-            chapter.bodyData = updated.bodyData
-            chapter.notesData = updated.notesData
+            assignRichTextIfChanged(chapter, \.bodyData, updated.bodyData)
+            assignRichTextIfChanged(chapter, \.notesData, updated.notesData)
         }
         statistics.primeMissing(for: Array(chapters))
 
         for entry in shelfEntries {
             guard let attributed = RichTextCodec.decode(entry.bodyData) else { continue }
-            entry.bodyData = RichTextCodec.dataForPersistence(
+            assignRichTextIfChanged(entry, \.bodyData, RichTextCodec.dataForPersistence(
                 encoded: RichTextCodec.encode(
                     ProjectFontStyler.restyled(attributed, familyName: familyName)
                 ),
                 previous: entry.bodyData
-            )
+            ))
         }
 
         if let notes = RichTextCodec.decode(project.projectNotesData) {
-            project.projectNotesData = RichTextCodec.dataForPersistence(
+            assignRichTextIfChanged(project, \.projectNotesData, RichTextCodec.dataForPersistence(
                 encoded: RichTextCodec.encode(
                     ProjectFontStyler.restyled(notes, familyName: familyName)
                 ),
                 previous: project.projectNotesData
-            )
+            ))
         }
     }
 

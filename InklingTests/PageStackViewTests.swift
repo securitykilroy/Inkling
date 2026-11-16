@@ -1006,9 +1006,10 @@ struct PageStackViewTests {
     /// Word puts a drawing on a line of its own, so a paste from Word arrives as
     /// "text\n<image>\ntext". Every image here draws as an overlay and leaves only
     /// a 0.1pt anchor behind, so that line is an *empty* one — the image floats
-    /// beside nothing. Ported from the retired single-container editor, which
-    /// collapsed those two newlines into spaces; the per-page editor never did.
-    @Test func animageOnItsOwnLineFromAWordPasteRejoinsTheTextFlow() {
+    /// beside nothing. The anchor joins the paragraph that introduced it; the
+    /// paragraph after it stays its own paragraph. (Both newlines used to
+    /// become spaces, which merged the two paragraphs around the image.)
+    @Test func animageOnItsOwnLineFromAWordPasteJoinsTheParagraphBeforeIt() {
         let stack = PageStackView()
         let body = NSMutableAttributedString(string: "and\n")
         body.append(NSAttributedString(attachment: Self.cellBackedAttachment()))
@@ -1017,7 +1018,7 @@ struct PageStackViewTests {
 
         stack.prepareFloatingImages()
 
-        #expect(stack.storage.string == "and \u{fffc} missing")
+        #expect(stack.storage.string == "and \u{fffc}\nmissing")
     }
 
     /// The collapse is deliberately narrow: an image that is merely at the start
@@ -1055,7 +1056,7 @@ struct PageStackViewTests {
         #expect(stack.storage.string == "and\n\u{fffc}\nmissing")
     }
 
-    /// The collapse has to happen before the chapter is encoded, or the rejoined
+    /// The join has to happen before the chapter is encoded, or the rejoined
     /// line would be a display-only illusion that reverts on the next open.
     @Test func theRejoinedLineIsWhatGetsSaved() throws {
         let stack = PageStackView()
@@ -1068,16 +1069,14 @@ struct PageStackViewTests {
 
         let encoded = try #require(RichTextCodec.encode(stack.storage))
         let reopened = try #require(RichTextCodec.decode(encoded))
-        #expect(reopened.string == "and \u{fffc} missing")
+        #expect(reopened.string == "and \u{fffc}\nmissing")
     }
 
-    /// Opening a chapter runs this over every stored image, so the collapse can
-    /// rewrite text the author never touched in this session. That must not post
-    /// a text-change notification: the editor's coordinator writes the binding
-    /// back on one, and `autosavesInPlace` is false, so a document would be
-    /// marked edited — and prompt to save on close — purely for having been
-    /// opened.
-    @Test func collapsingOnOpenDoesNotReportAnEdit() {
+    /// Opening a chapter must not rewrite it. The join used to run over every
+    /// stored image on every open, so an image the author had put between two
+    /// paragraphs was pulled out of place each time — unreported, and saved
+    /// with their next keystroke.
+    @Test func openingAChapterLeavesAnImageOnItsOwnLineAlone() {
         let stack = PageStackView()
         let spy = DelegateSpy()
         stack.pageDelegate = spy
@@ -1086,10 +1085,30 @@ struct PageStackViewTests {
         body.append(NSAttributedString(string: "\nmissing"))
         stack.setAttributedString(body)
 
+        stack.prepareFloatingImages(joiningImageOnlyLines: false)
+
+        #expect(stack.storage.string == "and\n\u{fffc}\nmissing")
+        #expect(stack.floatingAttachment(at: 4) != nil, "still converted to a floating image")
+        #expect(spy.changes == 0)
+    }
+
+    /// "Chapter One / image / first paragraph" used to become one paragraph
+    /// with the heading at its front, which also put the whole paragraph in
+    /// the sidebar outline as the heading's text.
+    @Test func animageUnderAHeadingIsNotJoinedToIt() {
+        let stack = PageStackView()
+        let body = NSMutableAttributedString(
+            string: "Chapter One\n", attributes: [.font: TextStyle.title.font]
+        )
+        body.append(NSAttributedString(attachment: Self.cellBackedAttachment()))
+        body.append(NSAttributedString(
+            string: "\nIt was a dark and stormy night.", attributes: [.font: TextStyle.body.font]
+        ))
+        stack.setAttributedString(body)
+
         stack.prepareFloatingImages()
 
-        #expect(stack.storage.string == "and \u{fffc} missing")
-        #expect(spy.changes == 0)
+        #expect(stack.storage.string == "Chapter One\n\u{fffc}\nIt was a dark and stormy night.")
     }
 
     /// A cell-backed attachment with zero bounds — what a Word paste and older

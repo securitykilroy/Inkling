@@ -161,7 +161,10 @@ final class PageTextView: NSTextView {
         super.paste(sender)
         PasteStyling.adoptDestinationStyle(
             in: self,
-            range: PasteStyling.pastedRange(from: before, to: selectedRange().location),
+            range: PasteStyling.normalizeLineEndings(
+                in: self,
+                range: PasteStyling.pastedRange(from: before, to: selectedRange().location)
+            ),
             font: font,
             paragraphStyle: paragraphStyle
         )
@@ -214,7 +217,12 @@ final class PageTextView: NSTextView {
     }
 
     @objc func pasteWithFormatting(_ sender: Any?) {
+        let before = selectedRange().location
         super.paste(sender)
+        PasteStyling.normalizeLineEndings(
+            in: self,
+            range: PasteStyling.pastedRange(from: before, to: selectedRange().location)
+        )
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -942,7 +950,7 @@ final class PageStackView: NSView, NSTextStorageDelegate {
         let stack = PageStackView(pageLayout: pageLayout)
         guard let attributed = RichTextCodec.decode(data) else { return 1 }
         stack.setAttributedString(NSMutableAttributedString(attributedString: attributed))
-        stack.prepareFloatingImages()
+        stack.prepareFloatingImages(joiningImageOnlyLines: false)
         stack.prepareSidebars()
         return max(1, stack.pageCount)
     }
@@ -1150,7 +1158,13 @@ extension PageStackView {
     /// Converts plain image attachments into `FloatingImageAttachment`s — a tiny
     /// inline anchor in the text plus an overlay drawn by the page view — then
     /// lays them out.
-    func prepareFloatingImages() {
+    ///
+    /// - Parameter joiningImageOnlyLines: whether an image alone on its line
+    ///   is joined to the paragraph before it (`ImageOnlyLine`). True for
+    ///   images arriving in an edit — a paste or a drop. Anything that merely
+    ///   *loads* stored text passes false, so opening a chapter changes
+    ///   nothing in it.
+    func prepareFloatingImages(joiningImageOnlyLines: Bool = true) {
         guard storage.length > 0 else { return }
 
         var replacements: [(NSRange, FloatingImageAttachment)] = []
@@ -1188,11 +1202,13 @@ extension PageStackView {
         }
 
         // Descending, so an earlier location can't be invalidated by work done
-        // at a later one. (`collapseImageOnlyLineBreaks` is length-preserving,
-        // but the ordering documents the intent and survives that changing.)
+        // at a later one. (The join is length-preserving, but the ordering
+        // documents the intent and survives that changing.)
         for (range, attachment) in replacements.sorted(by: { $0.0.location > $1.0.location }) {
             storage.addAttribute(.attachment, value: attachment, range: range)
-            collapseImageOnlyLineBreaks(around: range.location)
+            if joiningImageOnlyLines {
+                ImageOnlyLine.joinToPrecedingParagraph(in: storage, at: range.location)
+            }
         }
         if !replacements.isEmpty {
             rebuildFloatingImageLayout()
@@ -1216,38 +1232,6 @@ extension PageStackView {
             size = RichTextImageInserter.fittedSize(size, within: room)
         }
         return size
-    }
-
-    /// Pulls an image that landed alone on its own line back into the
-    /// surrounding text flow, by turning the newline on each side of it into a
-    /// space.
-    ///
-    /// Word puts a drawing on a line of its own, so that is what a paste from
-    /// Word produces. Here every image is drawn as an overlay and leaves only a
-    /// 0.1pt anchor in the character stream, so an image-only line is an
-    /// *empty* line: the image floats beside nothing and the text that
-    /// introduced it sits in a separate paragraph above, with a blank gap where
-    /// the image used to be inline. Rejoining the line puts the anchor back in
-    /// the sentence that mentions it, which is the position every other part of
-    /// the floating layout measures from.
-    ///
-    /// Both replacements are one character for one, so no location shifts and
-    /// nothing else in this pass needs re-indexing. Only attachments being
-    /// converted from plain to floating reach here — pasted, dropped, imported,
-    /// or just-decoded — so an image the author has since positioned is never
-    /// second-guessed.
-    private func collapseImageOnlyLineBreaks(around location: Int) {
-        guard location > 0, location + 1 < storage.length else { return }
-        let string = storage.string as NSString
-        guard string.substring(with: NSRange(location: location - 1, length: 1)) == "\n",
-              string.substring(with: NSRange(location: location + 1, length: 1)) == "\n"
-        else { return }
-
-        // One edit, so the layout manager never sees the half-collapsed string.
-        storage.beginEditing()
-        storage.replaceCharacters(in: NSRange(location: location + 1, length: 1), with: " ")
-        storage.replaceCharacters(in: NSRange(location: location - 1, length: 1), with: " ")
-        storage.endEditing()
     }
 
     /// Coalesces a floating-layout rebuild to the next run-loop pass, so a burst

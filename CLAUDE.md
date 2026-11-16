@@ -65,6 +65,12 @@ These decisions exist for specific reasons. Read the reason before "fixing" them
 
 - **SwiftUI bindings into Core Data go through `assignIfChanged`** (`Models/ManagedObjectEditing.swift`). A `TextField` writes its unchanged text back during layout, and Core Data counts even a same-value assignment as an edit — that made merely opening a project dirty it.
 
+- **Rich-text blobs are never on Core Data's undo stack, and Undo can't change one** (`Models/ManagedObjectEditing.swift`, `CoreData/RichTextUndoGuard.swift`). Core Data undoes an edit by restoring the *whole object* as it was then, so with typing kept off its stack, undoing an earlier rename or reorder put back the body from that moment. The guard notes every blob before an undo/redo and puts it back after. Consequence: anything that writes a blob must use `assignRichTextIfChanged` (Replace All and font changes included) and cannot be undone through Core Data — a registered blob write would become an Undo step that silently does nothing.
+
+- **Sidecar records are keyed by character offset, so saved text must round-trip exactly** (`RichTextCodec`, "Keeping sidecar offsets true"). RTF merges `\r\n` and drops NUL, U+FFFD and an attachment-less U+FFFC; one of those ahead of an image shifted every later record, losing image geometry and captions and, a save later, sidebar text. `encode` strips them first (`storable`); `decode` re-matches records to attachments when offsets miss (`realign`) and never drops a sidebar record. If you find another character RTF doesn't preserve, add it to `storable`.
+
+- **Opening a chapter must not rewrite its text.** Anything that loads stored text calls `prepareFloatingImages(joiningImageOnlyLines: false)`. Joining an image-only line to the paragraph before it (`Models/ImageOnlyLine.swift`) is for images arriving in an edit or an import only, changes one newline, and never joins to a heading.
+
 - **Lightweight migration is on** (`configurePersistentStoreCoordinator`), so files written by older model versions still open. The model is versioned (`Inkling.xcdatamodeld`); the current version is **Inkling 6** (2 added `Project.author`, 3 `Project.subtitle`, 4 `Project.bodyFontFamily`, 5 the `ShelfEntry` entity, 6 `Project.projectNotesData`). Schema changes must stay additive/optional so Core Data can infer the mapping — otherwise add a new model version, don't edit the current one in place.
 
 - **Entity is named `Chapter`, not `Section`** — `Section` collides with `SwiftUI.Section`.

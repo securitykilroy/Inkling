@@ -40,7 +40,7 @@ enum RichTextCodec {
     }
 
     private struct AttachmentSizeRecord: Codable {
-        let location: Int
+        var location: Int
         let width: Double
         let height: Double
         // Present only for images the user has positioned on a page. Optional so
@@ -59,8 +59,8 @@ enum RichTextCodec {
     /// carry the `.inklingCallout` attribute, so it rides in the sidecar and is
     /// re-applied (with its canonical styling) on decode.
     private struct CalloutRecord: Codable {
-        let location: Int
-        let length: Int
+        var location: Int
+        var length: Int
         let kind: String
     }
 
@@ -68,7 +68,7 @@ enum RichTextCodec {
     /// (RTF). The anchor character survives in the RTFD stream (the attachment
     /// carries a file wrapper); this record restores it to a full `SidebarAttachment`.
     private struct SidebarRecord: Codable {
-        let location: Int
+        var location: Int
         let width: Double
         let contentHeight: Double
         var page: Int?
@@ -90,11 +90,151 @@ enum RichTextCodec {
         // Parsed once for all three sidecars. Each used to re-parse the whole
         // RTFD package, image bytes included, so a decode cost four parses.
         let sidecars = FileWrapper(serializedRepresentation: data)?.fileWrappers ?? [:]
-        restoreAttachmentSizes(in: mutable, from: sidecars)
+        var sizes = records(AttachmentSizeRecord.self, named: attachmentMetadataFilename, in: sidecars)
+        var callouts = records(CalloutRecord.self, named: calloutMetadataFilename, in: sidecars)
+        var sidebars = records(SidebarRecord.self, named: sidebarMetadataFilename, in: sidecars)
+        realign(sizes: &sizes, callouts: &callouts, sidebars: &sidebars, to: mutable)
+        restoreAttachmentSizes(in: mutable, from: sizes)
         applyDefaultParagraphStyling(in: mutable)
-        restoreCallouts(in: mutable, from: sidecars)
-        restoreSidebars(in: mutable, from: sidecars)
+        restoreCallouts(in: mutable, from: callouts)
+        restoreSidebars(in: mutable, from: sidebars)
         return mutable
+    }
+
+    nonisolated private static func records<Record: Decodable>(
+        _ type: Record.Type,
+        named name: String,
+        in sidecars: [String: FileWrapper]
+    ) -> [Record] {
+        guard let metadata = sidecars[name]?.regularFileContents else { return [] }
+        return (try? JSONDecoder().decode([Record].self, from: metadata)) ?? []
+    }
+
+    // MARK: - Keeping sidecar offsets true
+    //
+    // Every sidecar record is keyed by a character offset, so the text that
+    // comes back from RTFD has to have exactly the characters that went in.
+    // It doesn't always: the RTF writer and reader between them merge "\r\n"
+    // into one character and drop NUL, U+FFFD and an object-replacement
+    // character that carries no attachment. One pasted Windows line ending
+    // therefore moved every later offset by one, and on the next open each
+    // image after it lost its size, position and caption, each callout covered
+    // the wrong characters, and each sidebar lost its record — and with it,
+    // on the following save, its text.
+    //
+    // Two defences. `storable` removes those characters before anything is
+    // measured, so what is saved round-trips exactly. `realign` repairs data
+    // saved before that existed (or shifted by a character not yet known to
+    // do this) by matching records to the attachments actually present.
+
+    /// `text` without the characters an RTFD round trip would drop or merge.
+    /// Returns `text` itself, uncopied, in the overwhelmingly common case that
+    /// it has none: this runs on every keystroke.
+    nonisolated static func storable(_ text: NSAttributedString) -> NSAttributedString {
+        let string = text.string as NSString
+        let suspects = CharacterSet(charactersIn: "\r\u{0}\u{fffd}\u{fffc}")
+        var doomed: [Int] = []
+        var search = NSRange(location: 0, length: string.length)
+        while search.length > 0 {
+            let found = string.rangeOfCharacter(from: suspects, options: [], range: search)
+            guard found.location != NSNotFound else { break }
+            let index = found.location
+            switch string.character(at: index) {
+            case 0x0D:
+                // A lone "\r" comes back as "\n", one for one. Only the pair shrinks.
+                if index + 1 < string.length, string.character(at: index + 1) == 0x0A {
+                    doomed.append(index)
+                }
+            case 0xFFFC:
+                if text.attribute(.attachment, at: index, effectiveRange: nil) == nil {
+                    doomed.append(index)
+                }
+            default:
+                doomed.append(index)
+            }
+            search = NSRange(location: index + 1, length: string.length - index - 1)
+        }
+        guard !doomed.isEmpty else { return text }
+        let mutable = NSMutableAttributedString(attributedString: text)
+        for index in doomed.reversed() {
+            mutable.deleteCharacters(in: NSRange(location: index, length: 1))
+        }
+        return mutable
+    }
+
+    /// Where each record offset's attachment really is, for records that no
+    /// longer land on one; nil when every record already does.
+    ///
+    /// Characters only ever go missing, so an attachment sits at or before its
+    /// recorded offset, and the shortfall never shrinks further down the
+    /// text. Each record, in order, therefore takes the nearest unclaimed
+    /// attachment at or before where the drift so far says it should be.
+    nonisolated static func alignedLocations(
+        of recordLocations: [Int],
+        toAttachmentsAt attachmentLocations: [Int]
+    ) -> [Int: Int]? {
+        let present = Set(attachmentLocations)
+        guard !recordLocations.allSatisfy(present.contains) else { return nil }
+
+        let attachments = attachmentLocations.sorted()
+        var mapping: [Int: Int] = [:]
+        var drift = 0
+        var next = 0
+        for record in Set(recordLocations).sorted() {
+            var chosen: Int?
+            var index = next
+            while index < attachments.count, attachments[index] <= record - drift {
+                chosen = index
+                index += 1
+            }
+            guard let chosen else { continue }
+            mapping[record] = attachments[chosen]
+            drift = record - attachments[chosen]
+            next = chosen + 1
+        }
+        return mapping
+    }
+
+    nonisolated private static func realign(
+        sizes: inout [AttachmentSizeRecord],
+        callouts: inout [CalloutRecord],
+        sidebars: inout [SidebarRecord],
+        to text: NSAttributedString
+    ) {
+        guard !sizes.isEmpty || !sidebars.isEmpty else { return }
+        var attachmentLocations: [Int] = []
+        text.enumerateAttribute(
+            .attachment, in: NSRange(location: 0, length: text.length)
+        ) { value, range, _ in
+            guard value != nil else { return }
+            attachmentLocations.append(contentsOf: range.location..<NSMaxRange(range))
+        }
+        guard let mapping = alignedLocations(
+            of: sizes.map(\.location) + sidebars.map(\.location),
+            toAttachmentsAt: attachmentLocations
+        ) else { return }
+
+        for index in sizes.indices {
+            sizes[index].location = mapping[sizes[index].location] ?? sizes[index].location
+        }
+        for index in sidebars.indices {
+            sidebars[index].location = mapping[sidebars[index].location] ?? sidebars[index].location
+        }
+        // Callouts have no attachment of their own to match against, so they
+        // take the drift of the nearest attachment before them. Exact when
+        // the missing characters precede that attachment, which is the case
+        // this exists for; a callout past the last attachment can still be off.
+        let drifts = mapping.map { (offset: $0.key, drift: $0.key - $0.value) }
+            .sorted { $0.offset < $1.offset }
+        func moved(_ offset: Int) -> Int {
+            offset - (drifts.last { $0.offset <= offset }?.drift ?? 0)
+        }
+        for index in callouts.indices {
+            let start = moved(callouts[index].location)
+            let end = moved(callouts[index].location + callouts[index].length)
+            callouts[index].location = start
+            callouts[index].length = max(0, end - start)
+        }
     }
 
     /// The stored text and its character attributes only, with none of the
@@ -133,23 +273,22 @@ enum RichTextCodec {
     /// Rebuilds a full `SidebarAttachment` (content + placement + width) at each
     /// recorded anchor. The generic attachment produced by RTFD decoding is
     /// replaced in place, carrying over the surrounding run's attributes.
+    ///
+    /// A record is never thrown away: it holds the only copy of the box's
+    /// text, and the next save writes records only for the sidebars it finds.
+    /// Damaged geometry falls back to the defaults, and a record whose anchor
+    /// can't be found gets a new anchor as near its old place as the text allows.
     nonisolated private static func restoreSidebars(
         in attributedString: NSMutableAttributedString,
-        from sidecars: [String: FileWrapper]
+        from records: [SidebarRecord]
     ) {
-        guard let metadata = sidecars[sidebarMetadataFilename]?.regularFileContents,
-              let records = try? JSONDecoder().decode([SidebarRecord].self, from: metadata)
-        else { return }
-
-        for record in records where record.location >= 0 && record.location < attributedString.length {
-            guard attributedString.attribute(.attachment, at: record.location, effectiveRange: nil) is NSTextAttachment,
-                  record.width.isFinite,
-                  record.contentHeight.isFinite,
-                  record.width > 0,
-                  record.contentHeight >= 0,
-                  record.width <= 10_000,
-                  record.contentHeight <= 10_000
-            else { continue }
+        var orphans: [(location: Int, sidebar: SidebarAttachment)] = []
+        for record in records {
+            let width = record.width.isFinite && record.width > 0 && record.width <= 10_000
+                ? CGFloat(record.width) : SidebarStyle.defaultWidth
+            let contentHeight = record.contentHeight.isFinite
+                && record.contentHeight >= 0 && record.contentHeight <= 10_000
+                ? CGFloat(record.contentHeight) : SidebarStyle.minContentHeight
             var position: FloatingImagePosition?
             if let page = record.page, let x = record.originX, let y = record.originY {
                 let candidate = FloatingImagePosition(page: page, origin: CGPoint(x: x, y: y))
@@ -157,16 +296,41 @@ enum RichTextCodec {
             }
             let sidebar = SidebarAttachment(
                 contentData: record.content,
-                width: CGFloat(record.width),
+                width: width,
                 position: position,
-                contentHeight: CGFloat(record.contentHeight)
+                contentHeight: contentHeight
             )
             sidebar.title = record.title ?? ""
+
+            let anchored = record.location >= 0 && record.location < attributedString.length
+                && attributedString.attribute(.attachment, at: record.location, effectiveRange: nil)
+                    is NSTextAttachment
+            guard anchored else {
+                orphans.append((record.location, sidebar))
+                continue
+            }
             attributedString.addAttribute(
                 .attachment,
                 value: sidebar,
                 range: NSRange(location: record.location, length: 1)
             )
+        }
+
+        // Back to front, so an insertion can't move a place still to be used.
+        for orphan in orphans.sorted(by: { $0.location > $1.location }) {
+            let location = min(max(0, orphan.location), attributedString.length)
+            let anchor = NSMutableAttributedString(attachment: orphan.sidebar)
+            if attributedString.length > 0 {
+                var attributes = attributedString.attributes(
+                    at: min(location, attributedString.length - 1), effectiveRange: nil
+                )
+                for key in [NSAttributedString.Key.attachment, .inklingFloatingImagePosition,
+                            .inklingImportedImagePlacementHint, .inklingImageCaption] {
+                    attributes[key] = nil
+                }
+                anchor.addAttributes(attributes, range: NSRange(location: 0, length: anchor.length))
+            }
+            attributedString.insert(anchor, at: location)
         }
     }
 
@@ -175,12 +339,8 @@ enum RichTextCodec {
     /// paragraphs get their reserved box padding rather than the default spacing.
     nonisolated private static func restoreCallouts(
         in attributedString: NSMutableAttributedString,
-        from sidecars: [String: FileWrapper]
+        from records: [CalloutRecord]
     ) {
-        guard let metadata = sidecars[calloutMetadataFilename]?.regularFileContents,
-              let records = try? JSONDecoder().decode([CalloutRecord].self, from: metadata)
-        else { return }
-
         for record in records {
             guard let kind = CalloutKind(storedRawValue: record.kind),
                   record.location >= 0,
@@ -248,7 +408,9 @@ enum RichTextCodec {
         return font.fontDescriptor.symbolicTraits.contains(.bold) && font.pointSize >= 17
     }
 
-    nonisolated static func encode(_ attributedString: NSAttributedString) -> Data? {
+    nonisolated static func encode(_ source: NSAttributedString) -> Data? {
+        // Before anything is measured: see "Keeping sidecar offsets true".
+        let attributedString = storable(source)
         let fullRange = NSRange(location: 0, length: attributedString.length)
         let sizeRecords = attachmentSizeRecords(in: attributedString)
         let calloutRecords = calloutRecords(in: attributedString)
@@ -383,12 +545,8 @@ enum RichTextCodec {
 
     nonisolated private static func restoreAttachmentSizes(
         in attributedString: NSMutableAttributedString,
-        from sidecars: [String: FileWrapper]
+        from records: [AttachmentSizeRecord]
     ) {
-        guard let metadata = sidecars[attachmentMetadataFilename]?.regularFileContents,
-              let records = try? JSONDecoder().decode([AttachmentSizeRecord].self, from: metadata)
-        else { return }
-
         for record in records where record.location >= 0 && record.location < attributedString.length {
             guard let attachment = attributedString.attribute(
                 .attachment,

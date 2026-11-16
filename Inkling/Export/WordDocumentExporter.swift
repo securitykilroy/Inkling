@@ -288,7 +288,7 @@ enum WordDocumentExporter {
     private static func laidOutStack(for text: NSAttributedString) -> PageStackView {
         let stack = PageStackView()
         stack.setAttributedString(text)
-        stack.prepareFloatingImages()
+        stack.prepareFloatingImages(joiningImageOnlyLines: false)
         stack.prepareSidebars()
         return stack
     }

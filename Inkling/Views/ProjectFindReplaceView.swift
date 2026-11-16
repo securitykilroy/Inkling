@@ -113,7 +113,9 @@ struct ProjectFindReplaceView: View {
         var affected: [Chapter] = []
         for chapter in chapters {
             guard let id = chapter.id, let newData = results[id] else { continue }
-            chapter.bodyData = newData
+            // Outside Core Data's undo, like every write to a chapter's text:
+            // see `RichTextUndoGuard`.
+            assignRichTextIfChanged(chapter, \.bodyData, newData)
             affected.append(chapter)
         }
         statistics.primeMissing(for: affected)

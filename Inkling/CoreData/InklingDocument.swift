@@ -39,6 +39,16 @@ final class InklingDocument: NSPersistentDocument {
         Self.sharedModel
     }
 
+    /// Stops Undo and Redo from rolling a chapter's text back. Installed with
+    /// the document, not the window, so it covers every way an undo can
+    /// arrive. See `RichTextUndoGuard`.
+    private var undoGuard: RichTextUndoGuard?
+
+    override init() {
+        super.init()
+        undoGuard = RichTextUndoGuard(document: self)
+    }
+
     /// Enable automatic lightweight migration so documents written by an older
     /// model (e.g. before `Project.author` existed) still open. The change is
     /// additive and optional, so Core Data can infer the mapping.
