@@ -34,7 +34,9 @@ struct ChapterDetailView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            ChapterTitleField(text: titleBinding)
+            ChapterTitleField(text: chapter.title ?? "") { title, startsNewEdit in
+                renameChapter(chapter, to: title, startingUndoStep: startsNewEdit)
+            }
                 .padding(.horizontal, 20)
                 .padding(.top, 16)
                 .padding(.bottom, 8)
@@ -135,10 +137,6 @@ struct ChapterDetailView: View {
             controller.scroll(to: target.range)
             navigator.target = nil
         }
-    }
-
-    private var titleBinding: Binding<String> {
-        Binding(get: { chapter.title ?? "" }, set: { assignIfChanged(chapter, \.title, $0) })
     }
 
     private var bodyBinding: Binding<Data?> {

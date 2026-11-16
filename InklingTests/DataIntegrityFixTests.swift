@@ -353,6 +353,54 @@ struct DataIntegrityFixTests {
         #expect(project.bodyFontFamily == "Georgia")
     }
 
+    // MARK: - A rename is one undo step
+
+    /// Each typed character of a rename is its own event, so Core Data would
+    /// make each its own undo step. Only the first keystroke registers one.
+    @Test func keystrokesAfterTheFirstAddNoUndoSteps() throws {
+        let (document, context, undoManager) = try Self.document()
+        defer { NSDocumentController.shared.removeDocument(document) }
+        let chapter = Self.chapter(in: context, undoManager: undoManager)
+        chapter.bodyData = nil
+
+        renameChapter(chapter, to: "N", startingUndoStep: true)
+        #expect(undoManager.undoActionName == "Rename Chapter")
+        renameChapter(chapter, to: "Ne", startingUndoStep: false)
+        renameChapter(chapter, to: "New", startingUndoStep: false)
+        #expect(chapter.title == "New")
+        #expect(document.isDocumentEdited)
+
+        undoManager.undo()
+        #expect(chapter.title == "Old title")
+        #expect(!undoManager.canUndo)
+        undoManager.redo()
+        #expect(chapter.title == "New", "redo restores the finished rename, not its first letter")
+        undoManager.undo()
+        #expect(chapter.title == "Old title")
+
+        // Registering anything empties Redo, so Redo surviving a keystroke
+        // shows that the keystroke registered nothing.
+        #expect(undoManager.canRedo)
+        renameChapter(chapter, to: "X", startingUndoStep: false)
+        #expect(chapter.title == "X")
+        #expect(undoManager.canRedo)
+    }
+
+    /// The rename's own undo must not disturb text typed since, the same
+    /// promise Core Data's undo needed `RichTextUndoGuard` to keep.
+    @Test func undoingAOneStepRenameKeepsTextTypedSince() throws {
+        let (document, context, undoManager) = try Self.document()
+        defer { NSDocumentController.shared.removeDocument(document) }
+        let chapter = Self.chapter(in: context, undoManager: undoManager)
+
+        renameChapter(chapter, to: "New title", startingUndoStep: true)
+        assignRichTextIfChanged(chapter, \.bodyData, Data("an hour of typing".utf8))
+        undoManager.undo()
+        context.processPendingChanges()
+        #expect(chapter.title == "Old title")
+        #expect(chapter.bodyData == Data("an hour of typing".utf8))
+    }
+
     // MARK: - Replace All's own undo
 
     private static func replaceAllChanges(_ chapters: [Chapter], to new: String) -> [RichTextChange] {

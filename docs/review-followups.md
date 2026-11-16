@@ -37,18 +37,16 @@ from reading the code and should be reproduced before it is fixed.
   ⌘Z. The rename is undone, the typed text stays, and the title field and the
   chapter list agree after every Undo and Redo.
 
+- **A rename is one undo step** (`renameChapter`, "Rename Chapter"). The
+  title is written outside Core Data's undo and the first keystroke of a visit
+  to the title field registers one action. Checked in tests, not yet in the
+  running app.
+- **A chapter that leaves the project takes its editor with it**
+  (`ProjectRootView.dropSelectionIfRemoved`). Undoing New Chapter, or redoing
+  a deletion, used to leave the removed chapter's editor on screen and
+  editable. Reproduced in a test (`undoingNewChapterClosesItsEditor`).
+
 ## Created by the fixes
-
-### 1. Renaming a chapter takes one ⌘Z per keystroke
-Seen in the running app (16 Nov): "Renamed" undoes to "Rename", "Renam", …
-Core Data groups undo by event, so each typed character is its own step. Make
-one editing session in the title field one undo step.
-
-### 2. Undoing New Chapter leaves its editor on screen
-Seen once in the running app (16 Nov), not reproduced in a test: ⌘Z right
-after New Chapter emptied the chapter list, but the detail pane kept showing
-the removed chapter's editor with an empty title instead of "No Chapter
-Selected".
 
 ### 4. Line endings are normalised on paste only
 `PasteStyling.normalizeLineEndings` runs in the two paste commands of the page

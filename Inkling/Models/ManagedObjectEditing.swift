@@ -72,6 +72,43 @@ func assignOutsideUndoIfChanged<Root: NSManagedObject, Value: Equatable>(
         .updateChangeCount(.changeDone)
 }
 
+/// Sets a chapter's title as part of a rename the author can undo as a whole.
+///
+/// Core Data groups undo by event, and each typed character is an event, so
+/// left to itself a rename took one Undo per keystroke. The title is written
+/// outside Core Data's undo instead, and one action of our own is registered
+/// when a rename starts (`startingUndoStep`), restoring the title from before
+/// it. Later keystrokes of the same rename register nothing.
+@MainActor
+func renameChapter(_ chapter: Chapter, to title: String?, startingUndoStep: Bool) {
+    let previous = chapter.title
+    guard previous != title, !chapter.isDeleted else { return }
+    guard let context = chapter.managedObjectContext, let undoManager = context.undoManager else {
+        chapter.title = title
+        return
+    }
+    context.processPendingChanges()
+    undoManager.disableUndoRegistration()
+    chapter.title = title
+    context.processPendingChanges()
+    undoManager.enableUndoRegistration()
+
+    let isReplaying = undoManager.isUndoing || undoManager.isRedoing
+    if startingUndoStep || isReplaying {
+        undoManager.registerUndo(withTarget: chapter) { chapter in
+            renameChapter(chapter, to: previous, startingUndoStep: true)
+        }
+        undoManager.setActionName("Rename Chapter")
+    }
+    // A keystroke that continues a rename registers nothing, so nothing else
+    // would mark the document edited (after a Save mid-rename, say).
+    if !isReplaying {
+        NSDocumentController.shared.documents
+            .first { ($0 as? NSPersistentDocument)?.managedObjectContext === context }?
+            .updateChangeCount(.changeDone)
+    }
+}
+
 /// One rich-text blob changing from one value to another, as part of an
 /// operation the author can undo as a whole.
 struct RichTextChange {

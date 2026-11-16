@@ -195,4 +195,114 @@ struct UndoRoutingTests {
         #expect(chapter.title == "New")
         #expect(title.stringValue == (chapter.title ?? ""), "the field shows the stored title")
     }
+
+    /// An open project window with one chapter selected.
+    private func openWindow() throws -> (InklingDocument, NSWindow, Chapter, UndoManager) {
+        let document = InklingDocument()
+        let context = try #require(document.managedObjectContext)
+        let undoManager = try #require(context.undoManager)
+        NSDocumentController.shared.addDocument(document)
+
+        undoManager.disableUndoRegistration()
+        let project = Project(context: context)
+        project.id = UUID()
+        project.title = "Project"
+        project.createdAt = Date()
+        let chapter = Chapter(context: context)
+        chapter.id = UUID()
+        chapter.title = "Old"
+        chapter.sortIndex = 0
+        chapter.createdAt = Date()
+        chapter.project = project
+        chapter.bodyData = RichTextCodec.encode(
+            NSAttributedString(string: "Opened.", attributes: [.font: TextStyle.body.font])
+        )
+        context.processPendingChanges()
+        undoManager.enableUndoRegistration()
+
+        document.makeWindowControllers()
+        let window = try #require(document.windowControllers.first?.window)
+        window.makeKeyAndOrderFront(nil)
+        spin(1.0)
+        let root = try #require(window.contentView)
+        if find(NSTextField.self, in: root, where: { $0.placeholderString == "Chapter Title" }) == nil,
+           let list = find(NSTableView.self, in: root) {
+            list.selectRowIndexes([0], byExtendingSelection: false)
+            spin(0.8)
+        }
+        return (document, window, chapter, undoManager)
+    }
+
+    private func titleField(in window: NSWindow) -> NSTextField? {
+        window.contentView.flatMap {
+            find(NSTextField.self, in: $0) { $0.placeholderString == "Chapter Title" }
+        }
+    }
+
+    /// A rename typed in the title field is an undo step of its own, named
+    /// for what it is, and the field follows the stored title through Undo
+    /// and Redo. (That later keystrokes add no further steps is checked on
+    /// `renameChapter` itself, in `DataIntegrityFixTests`: a test runs inside
+    /// one event, so it can't tell one undo group from several.)
+    @Test func renamingInTheTitleFieldIsAnUndoStepOfItsOwn() throws {
+        let (document, window, chapter, undoManager) = try openWindow()
+        defer { document.close() }
+        let title = try #require(titleField(in: window))
+
+        #expect(window.makeFirstResponder(title))
+        let fieldEditor = try #require(window.firstResponder as? NSTextView)
+        fieldEditor.selectAll(nil)
+        for character in ["N", "e", "w"] {
+            fieldEditor.insertText(character, replacementRange: fieldEditor.selectedRange())
+            spin(0.15)
+        }
+        #expect(chapter.title == "New")
+        #expect(undoManager.undoActionName == "Rename Chapter")
+        #expect(document.isDocumentEdited)
+
+        sendUndo(in: window)
+        spin()
+        #expect(chapter.title == "Old")
+        #expect(title.stringValue == "Old")
+        #expect(!undoManager.canUndo)
+
+        undoManager.redo()
+        spin()
+        #expect(chapter.title == "New")
+        #expect(title.stringValue == "New")
+
+        // Typing after an Undo is a new rename: it registers a step (which
+        // is what empties Redo) instead of riding on the one just undone.
+        undoManager.undo()
+        spin()
+        #expect(undoManager.canRedo)
+        fieldEditor.insertText("!", replacementRange: NSRange(location: 3, length: 0))
+        spin(0.15)
+        #expect(chapter.title == "Old!")
+        #expect(!undoManager.canRedo)
+        #expect(undoManager.undoActionName == "Rename Chapter")
+    }
+
+    /// Undoing New Chapter removes the chapter; its editor must go with it
+    /// rather than stay on screen, editable, over a chapter that is gone.
+    @Test func undoingNewChapterClosesItsEditor() throws {
+        let (document, window, _, undoManager) = try openWindow()
+        defer { document.close() }
+        let root = try #require(window.contentView)
+
+        document.newChapter(nil)
+        spin(0.8)
+        #expect(titleField(in: window)?.stringValue == "Untitled Chapter")
+
+        undoManager.undo()
+        spin(0.8)
+        #expect(titleField(in: window) == nil, "no title field for the removed chapter")
+        #expect(find(PageTextView.self, in: root) == nil, "and no editor")
+
+        // Redo brings the chapter back; nothing is selected until the author picks it.
+        undoManager.redo()
+        spin(0.8)
+        #expect(document.managedObjectContext?.registeredObjects.compactMap { $0 as? Chapter }
+            .filter { !$0.isDeleted }.count == 2)
+    }
 }

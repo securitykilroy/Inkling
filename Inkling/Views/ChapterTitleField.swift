@@ -11,16 +11,24 @@
 //  title the chapter didn't have (and a later Undo then appeared to do
 //  nothing). Here the field editor keeps no undo of its own and sends Undo to
 //  the window's undo manager, the document's. A rename is undone in one place
-//  only, Core Data's, and the field redraws from the stored title.
+//  only, the document's undo stack, and the field redraws from the stored
+//  title. It also reports where one rename ends and the next begins, so a
+//  rename is one undo step (`renameChapter`).
 //
 
 import AppKit
 import SwiftUI
 
 struct ChapterTitleField: NSViewRepresentable {
-    @Binding var text: String
+    /// The stored title.
+    let text: String
+    /// Called with each edit. `startsNewEdit` is true for the first change of
+    /// a visit to the field, and for the first change after the title was set
+    /// from elsewhere (an Undo, say); the keystrokes after it continue that
+    /// edit, so the whole rename can be one undo step.
+    let onEdit: (_ text: String, _ startsNewEdit: Bool) -> Void
 
-    func makeCoordinator() -> Coordinator { Coordinator(text: $text) }
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeNSView(context: Context) -> NSTextField {
         let field = TitleTextField()
@@ -44,7 +52,7 @@ struct ChapterTitleField: NSViewRepresentable {
     }
 
     func updateNSView(_ field: NSTextField, context: Context) {
-        context.coordinator.text = $text
+        context.coordinator.parent = self
         // Also while the field is being edited: this is how an Undo of the
         // rename reaches the screen.
         guard field.stringValue != text else { return }
@@ -55,13 +63,28 @@ struct ChapterTitleField: NSViewRepresentable {
     }
 
     final class Coordinator: NSObject, NSTextFieldDelegate {
-        var text: Binding<String>
+        var parent: ChapterTitleField
+        /// What this visit to the field last wrote; nil before its first edit.
+        private var lastWritten: String?
 
-        init(text: Binding<String>) { self.text = text }
+        init(_ parent: ChapterTitleField) { self.parent = parent }
 
         func controlTextDidChange(_ notification: Notification) {
             guard let field = notification.object as? NSTextField else { return }
-            text.wrappedValue = field.stringValue
+            let new = field.stringValue
+            // The stored title no longer being what we wrote means something
+            // else changed it, so this keystroke begins a fresh edit.
+            let startsNewEdit = lastWritten == nil || parent.text != lastWritten
+            lastWritten = new
+            parent.onEdit(new, startsNewEdit)
+        }
+
+        func controlTextDidBeginEditing(_ notification: Notification) {
+            lastWritten = nil
+        }
+
+        func controlTextDidEndEditing(_ notification: Notification) {
+            lastWritten = nil
         }
     }
 }

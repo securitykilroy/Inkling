@@ -69,9 +69,23 @@ struct ProjectRootView: View {
             }
         }
         .onChange(of: selection) { onSelectionChange(selection?.objectID) }
+        .onReceive(NotificationCenter.default.publisher(
+            for: .NSManagedObjectContextObjectsDidChange, object: viewModel.context
+        )) { note in dropSelectionIfRemoved(by: note) }
         .onAppear(perform: applyInitialSelection)
         .onDrop(of: InklingDocumentDrop.acceptedTypes, isTargeted: nil) { providers in
             InklingDocumentDrop.openFirstInklingDocument(from: providers)
+        }
+    }
+
+    /// A chapter can leave the project without going through the sidebar's
+    /// Delete: undoing New Chapter, or redoing a deletion. Its editor must not
+    /// stay on screen, accepting text for a chapter that no longer exists.
+    private func dropSelectionIfRemoved(by note: Notification) {
+        guard let chapter = selection else { return }
+        let deleted = note.userInfo?[NSDeletedObjectsKey] as? Set<NSManagedObject> ?? []
+        if deleted.contains(chapter) || chapter.isDeleted || chapter.managedObjectContext == nil {
+            selection = nil
         }
     }
 
