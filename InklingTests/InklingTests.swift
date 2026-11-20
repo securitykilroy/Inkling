@@ -3150,20 +3150,20 @@ struct LastEditPositionStoreTests {
         }
     }
 
-    /// Keying by file path means a renamed or moved document leaves an entry
-    /// behind that nothing will ever match again, so the store used to grow for
-    /// the life of the install. Saving now drops entries whose file is gone.
-    @Test func savingForgetsDocumentsThatNoLongerExist() {
+    /// A file the app can't see right now — on an unplugged drive, an
+    /// unmounted network volume, or outside the sandbox while closed — keeps
+    /// its position. Saving another document's position used to drop every
+    /// entry whose file `fileExists` couldn't find. The size cap (below) is
+    /// what bounds the store.
+    @Test func savingKeepsPositionsOfDocumentsThatCantBeSeenRightNow() {
         withIsolatedDefaults { url in
-            let vanished = URL(fileURLWithPath: "/tmp/Deleted \(UUID().uuidString).inkling")
-            LastEditPositionStore.save(LastEditPosition(chapterID: UUID(), caret: 1), for: vanished)
-            #expect(LastEditPositionStore.position(for: vanished) != nil)
+            let unreachable = URL(fileURLWithPath: "/Volumes/Unplugged \(UUID().uuidString)/Novel.inkling")
+            LastEditPositionStore.save(LastEditPosition(chapterID: UUID(), caret: 1), for: unreachable)
 
             LastEditPositionStore.save(LastEditPosition(chapterID: UUID(), caret: 2), for: url)
 
-            #expect(LastEditPositionStore.position(for: vanished) == nil)
-            // The document just saved survives even though it isn't on disk either.
-            #expect(LastEditPositionStore.position(for: url) != nil)
+            #expect(LastEditPositionStore.position(for: unreachable)?.caret == 1)
+            #expect(LastEditPositionStore.position(for: url)?.caret == 2)
         }
     }
 
@@ -3183,11 +3183,14 @@ struct LastEditPositionStoreTests {
             )
         }
 
-        // Nothing here is on disk, so `keeping` is what holds the kept entry in.
         let pruned = LastEditPositionStore.pruned(all, keeping: kept)
 
-        #expect(pruned.count == 1)
+        // Capped, with the just-saved entry kept despite being the oldest, and
+        // the rest the most recently saved.
+        #expect(pruned.count == LastEditPositionStore.maximumEntries)
         #expect(pruned[kept] != nil)
+        #expect(pruned["/tmp/Doc 0.inkling"] == nil)
+        #expect(pruned["/tmp/Doc \(LastEditPositionStore.maximumEntries + 19).inkling"] != nil)
     }
 
     @Test func positionsAreKeyedPerDocument() {

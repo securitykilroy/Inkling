@@ -88,7 +88,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             controller.addDocument(document)
             document.makeWindowControllers()
             document.showWindows()
-            (document as? InklingDocument)?.adoptRecoveredCopy(at: entry.url)
+            (document as? InklingDocument)?.adoptRecoveredCopy(at: entry.url, readFrom: scratch)
         } catch {
             NSAlert(error: error).runModal()
         }

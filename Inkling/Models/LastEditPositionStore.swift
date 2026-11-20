@@ -29,7 +29,9 @@ nonisolated enum LastEditPositionStore {
 
     /// Most documents to remember. Keying by file path means a renamed or moved
     /// document leaves its old entry behind with nothing left to match it, so
-    /// without a bound this grew for the life of the install.
+    /// without a bound this grew for the life of the install. The bound is the
+    /// only pruning: entries are never dropped for a file that seems missing
+    /// (see `pruned`).
     static let maximumEntries = 200
 
     /// One document's stored entry. Deliberately flat — the same keys the
@@ -62,8 +64,8 @@ nonisolated enum LastEditPositionStore {
     }
 
     /// Records `position` as the place to return to for the document at `url`,
-    /// then drops entries for files that no longer exist and, if the store is
-    /// still over its limit, the least recently saved ones.
+    /// then, if the store is over its limit, drops the least recently saved
+    /// entries.
     static func save(_ position: LastEditPosition, for url: URL) {
         var all = loadAll()
         all[url.path] = Entry(position, savedAt: Date())
@@ -77,17 +79,19 @@ nonisolated enum LastEditPositionStore {
         persist(all)
     }
 
-    /// Drops entries whose file has since been deleted, renamed, or moved, then
-    /// caps what's left at `maximumEntries`, oldest first. `keeping` is the
-    /// entry just written, which survives both passes even if the document
-    /// isn't on disk yet (an untitled document being saved for the first time).
+    /// Caps the store at `maximumEntries`, oldest first. `keeping` is the entry
+    /// just written, which is never the one evicted.
+    ///
+    /// This used to drop every entry whose file `fileExists` couldn't see.
+    /// That's also true of a document on an unplugged drive or an unmounted
+    /// network volume — and, in the App Sandbox, of any closed document outside
+    /// the container — so saving one document's position could wipe the
+    /// others'. The cap alone bounds the store.
     static func pruned(
         _ all: [String: Entry],
         keeping keptPath: String? = nil
     ) -> [String: Entry] {
-        var remaining = all.filter { path, _ in
-            path == keptPath || FileManager.default.fileExists(atPath: path)
-        }
+        var remaining = all
         guard remaining.count > maximumEntries else { return remaining }
 
         let evictable = remaining

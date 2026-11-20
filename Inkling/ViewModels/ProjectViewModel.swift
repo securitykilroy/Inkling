@@ -70,7 +70,23 @@ final class ProjectViewModel: ObservableObject {
     /// Deletes several chapters at once.
     func deleteChapters(_ chapters: [Chapter]) {
         chapters.forEach { context.delete($0) }
+        context.undoManager?.setActionName(chapters.count == 1 ? "Delete Chapter" : "Delete Chapters")
         objectWillChange.send()
+    }
+
+    /// Whether deleting `chapters` should be confirmed first: any of them has
+    /// text, an image or a sidebar in its body, or text in its notes. An empty
+    /// chapter — a stray New Chapter — goes without asking.
+    nonisolated static func needsDeleteConfirmation(_ chapters: [(bodyData: Data?, notesData: Data?)]) -> Bool {
+        chapters.contains { hasContent($0.bodyData) || hasContent($0.notesData) }
+    }
+
+    nonisolated private static func hasContent(_ data: Data?) -> Bool {
+        guard let data, !data.isEmpty else { return false }
+        // Unreadable data is still the author's: treat it as content.
+        guard let text = RichTextCodec.decode(data) else { return true }
+        // An attachment (image or sidebar) is U+FFFC, which isn't whitespace.
+        return text.string.contains { !$0.isWhitespace }
     }
 
     /// Reorders chapters by reassigning `sortIndex` to match the new order.

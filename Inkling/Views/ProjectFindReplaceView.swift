@@ -2,7 +2,7 @@
 //  ProjectFindReplaceView.swift
 //  Inkling
 //
-//  A sheet for finding and replacing text across every chapter in the
+//  An inspector panel for finding and replacing text across every chapter in the
 //  project, not just the one currently open in the editor. Search runs on
 //  demand (Find button / Return), showing every match with surrounding
 //  context before anything changes; clicking a match jumps to it in the
@@ -12,6 +12,9 @@
 //  editor picks up the change automatically (see RichTextEditor.Coordinator's
 //  loadedData tracking).
 //
+//  It sits beside the editor rather than over it, so the editor stays usable:
+//  click a match, fix it in place, click the next.
+//
 
 import SwiftUI
 import CoreData
@@ -20,8 +23,10 @@ struct ProjectFindReplaceView: View {
     @ObservedObject var navigator: OutlineNavigator
     @ObservedObject var statistics: StatisticsViewModel
     @Binding var selection: Chapter?
+    @Binding var isPresented: Bool
 
-    @Environment(\.dismiss) private var dismiss
+    @FocusState private var findFieldFocused: Bool
+    @EnvironmentObject private var commands: ProjectCommands
     @FetchRequest(sortDescriptors: [NSSortDescriptor(keyPath: \Chapter.sortIndex, ascending: true)])
     private var chapters: FetchedResults<Chapter>
 
@@ -43,15 +48,22 @@ struct ProjectFindReplaceView: View {
 
             Form {
                 TextField("Find", text: $query, prompt: Text("Text to find in every chapter"))
+                    .focused($findFieldFocused)
                     .onSubmit(find)
                 TextField("Replace", text: $replacement, prompt: Text("Leave blank to remove matches"))
                 Toggle("Case-sensitive", isOn: $caseSensitive)
             }
             .textFieldStyle(.roundedBorder)
+            // In an inspector a Form otherwise takes all the height it can,
+            // pushing the Find button halfway down the panel.
+            .fixedSize(horizontal: false, vertical: true)
 
             HStack {
+                // No `.keyboardShortcut(.defaultAction)`: in a panel that
+                // isn't modal it would take Return from the whole window, so
+                // pressing Return in the chapter would run Find. Return in the
+                // Find field searches (`onSubmit`).
                 Button("Find") { find() }
-                    .keyboardShortcut(.defaultAction)
                     .disabled(query.isEmpty)
                 Spacer()
                 if hasSearched {
@@ -60,22 +72,35 @@ struct ProjectFindReplaceView: View {
                 }
             }
 
-            List(matches) { match in
-                Button {
-                    jump(to: match)
-                } label: {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(match.chapterTitle)
-                            .font(.callout.weight(.semibold))
-                        Text(snippet(for: match))
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+            // A plain scrolling stack, not a List: a List takes the first
+            // click while the Find field has focus to focus itself, so the
+            // first match clicked after a search silently did nothing.
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(matches) { match in
+                        Button {
+                            jump(to: match)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(match.chapterTitle)
+                                    .font(.callout.weight(.semibold))
+                                Text(snippet(for: match))
+                                    .font(.callout)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.vertical, 5)
+                            .padding(.horizontal, 8)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        Divider()
                     }
                 }
-                .buttonStyle(.plain)
             }
-            .frame(minHeight: 160)
+            .background(.background.secondary, in: RoundedRectangle(cornerRadius: 6))
+            .frame(minHeight: 160, maxHeight: .infinity)
             .overlay {
                 if hasSearched && matches.isEmpty {
                     ContentUnavailableView.search
@@ -84,13 +109,20 @@ struct ProjectFindReplaceView: View {
 
             HStack {
                 Spacer()
-                Button("Close") { dismiss() }
+                Button("Close") { isPresented = false }
                 Button("Replace All") { replaceAll() }
                     .disabled(matches.isEmpty)
             }
         }
-        .padding(20)
-        .frame(width: 480, height: 420)
+        .padding(16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        // The editor keeps the keyboard while the inspector animates in, so
+        // focusing in `onAppear` alone was lost and typing went into the
+        // chapter. Ask again once the panel is up, and on every request.
+        .task(id: commands.findFocusRequests) {
+            try? await Task.sleep(for: .milliseconds(150))
+            findFieldFocused = true
+        }
     }
 
     private func find() {

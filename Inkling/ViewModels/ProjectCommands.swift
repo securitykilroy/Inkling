@@ -23,9 +23,13 @@ final class ProjectCommands: ObservableObject {
     /// Settings… menu item both raise this, so there is a single presentation.
     @Published var settingsPresented = false
 
-    /// Drives the project-wide Find & Replace sheet. The sidebar's magnifier
+    /// Drives the project-wide Find & Replace panel. The sidebar's magnifier
     /// button and the Find & Replace in Project… menu item both raise this.
     @Published var findReplacePresented = false
+
+    /// Bumped by every Find & Replace request, so a request while the panel
+    /// is already open still moves the keyboard to its Find field.
+    @Published var findFocusRequests = 0
 
     /// Bumped by the New Chapter command. A counter rather than a flag so each
     /// invocation registers as a change — even two in a row — letting the
@@ -34,7 +38,10 @@ final class ProjectCommands: ObservableObject {
 
     func presentSettings() { settingsPresented = true }
 
-    func presentFindReplace() { findReplacePresented = true }
+    func presentFindReplace() {
+        findReplacePresented = true
+        findFocusRequests += 1
+    }
 
     func requestNewChapter() { newChapterRequests += 1 }
 }

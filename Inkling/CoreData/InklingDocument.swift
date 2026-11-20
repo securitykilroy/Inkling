@@ -209,13 +209,24 @@ final class InklingDocument: NSPersistentDocument {
     /// Called when this document was opened from a safety copy left by a
     /// crash: it carries unsaved work, so treat it as edited (closing it must
     /// ask to save), and keep that copy until the writer decides.
-    func adoptRecoveredCopy(at url: URL) {
+    ///
+    /// `scratch` is the temporary copy this document was actually read from
+    /// (see `AppDelegate.openRecoveredCopy`). Its store may still be reading
+    /// it — a Save As migrates the store from there — so it is deleted on
+    /// close, not now. Nothing deleted it before, so one piled up in the temp
+    /// folder per recovery.
+    func adoptRecoveredCopy(at url: URL, readFrom scratch: URL? = nil) {
         if recovery == nil {
             recovery = DocumentRecovery(document: self)
         }
         recovery?.adopt(url)
+        recoveryScratchURL = scratch
         updateChangeCount(.changeDone)
     }
+
+    /// The temporary copy a recovered document was read from; see
+    /// `adoptRecoveredCopy`.
+    private(set) var recoveryScratchURL: URL?
 
     override func save(
         to url: URL,
@@ -435,6 +446,11 @@ final class InklingDocument: NSPersistentDocument {
         recovery?.stop()
         recovery?.discard()
         super.close()
+        // After `super.close()`, which takes the store off the scratch file.
+        if let scratch = recoveryScratchURL {
+            recoveryScratchURL = nil
+            try? FileManager.default.removeItem(at: scratch)
+        }
     }
 
     /// Remember the current chapter + caret so reopening this file jumps back

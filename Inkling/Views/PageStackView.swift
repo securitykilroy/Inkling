@@ -418,7 +418,7 @@ final class PageTextView: NSTextView {
         replacementString: String?
     ) -> Bool {
         // A non-nil replacement string rewrites the character range, which
-        // would take any floating-image anchor in it with it — whether that's a
+        // would take any floating image or sidebar anchor in it with it — a
         // deletion ("") or typing/pasting over a selection. Both are guarded.
         // A nil replacement is an attributes-only change (e.g. bold), which
         // leaves the anchor intact, so formatting a range that spans an image
@@ -427,7 +427,9 @@ final class PageTextView: NSTextView {
         // an accidental deletion: undoing a dropped image has to remove it.
         let isReplaying = undoManager?.isUndoing == true || undoManager?.isRedoing == true
         if replacementString != nil, !isReplaying,
-           stack?.containsProtectedFloatingImage(in: affectedCharRange) == true {
+           stack?.containsProtectedObject(in: affectedCharRange) == true {
+            // Say so: a keystroke that silently did nothing read as a hang.
+            NSSound.beep()
             return false
         }
         return super.shouldChangeText(
@@ -2003,21 +2005,29 @@ extension PageStackView {
         return found
     }
 
-    func containsProtectedFloatingImage(in range: NSRange) -> Bool {
+    /// Whether editing `range` would take a floating image or a sidebar box
+    /// with it. Such an edit is refused unless the range is exactly the one
+    /// object the author has selected — that's how an image or a box is
+    /// deliberately deleted. A box holds its own text, so sweeping it away by
+    /// typing over a selection that happened to span its anchor lost it.
+    func containsProtectedObject(in range: NSRange) -> Bool {
         guard range.location != NSNotFound,
               range.length > 0,
-              NSMaxRange(range) <= storage.length,
-              !(range.length == 1 && range.location == selectedImageLocation)
+              NSMaxRange(range) <= storage.length
         else { return false }
+        if range.length == 1 {
+            if range.location == selectedImageLocation { return false }
+            if let id = selectedSidebar, sidebarAnchorRange(for: id) == range { return false }
+        }
 
-        var containsImage = false
+        var containsObject = false
         storage.enumerateAttribute(.attachment, in: range) { value, _, stop in
-            if value is FloatingImageAttachment {
-                containsImage = true
+            if value is FloatingImageAttachment || value is SidebarAttachment {
+                containsObject = true
                 stop.pointee = true
             }
         }
-        return containsImage
+        return containsObject
     }
 
     /// Draws the vertical snap guide on the page currently being dragged over.
@@ -2861,6 +2871,7 @@ extension PageStackView {
     func endSidebarDrag() -> Bool {
         let session = sidebarMoveSession ?? sidebarResizeSession
         guard let session else { return false }
+        let actionName = sidebarResizeSession != nil ? "Resize Sidebar" : "Move Sidebar"
         sidebarMoveSession = nil
         sidebarResizeSession = nil
         activeSnapGuide = nil
@@ -2873,7 +2884,8 @@ extension PageStackView {
 
         applySidebarGeometry(
             id: session.id, position: sidebar.position, width: sidebar.width,
-            undoPosition: session.startPosition, undoWidth: session.startWidth
+            undoPosition: session.startPosition, undoWidth: session.startWidth,
+            actionName: actionName
         )
         return true
     }
@@ -2881,7 +2893,8 @@ extension PageStackView {
     private func applySidebarGeometry(
         id: ObjectIdentifier,
         position: FloatingImagePosition?, width: CGFloat,
-        undoPosition: FloatingImagePosition?, undoWidth: CGFloat
+        undoPosition: FloatingImagePosition?, undoWidth: CGFloat,
+        actionName: String
     ) {
         guard let sidebar = sidebarAttachments[id] else { return }
         sidebar.position = position
@@ -2889,10 +2902,11 @@ extension PageStackView {
         undoManager?.registerUndo(withTarget: self) { stack in
             stack.applySidebarGeometry(
                 id: id, position: undoPosition, width: undoWidth,
-                undoPosition: position, undoWidth: width
+                undoPosition: position, undoWidth: width,
+                actionName: actionName
             )
         }
-        undoManager?.setActionName("Move Sidebar")
+        undoManager?.setActionName(actionName)
         rebuildFloatingImageLayout()
         pageViews.first?.didChangeText()
     }

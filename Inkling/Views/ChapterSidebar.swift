@@ -20,6 +20,8 @@ struct ChapterSidebar: View {
 
     @EnvironmentObject private var commands: ProjectCommands
     @State private var expanded: Set<UUID> = []
+    /// Chapters waiting on the delete confirmation.
+    @State private var pendingDeletion: [Chapter] = []
 
     @FetchRequest(
         sortDescriptors: [NSSortDescriptor(keyPath: \Chapter.sortIndex, ascending: true)],
@@ -128,12 +130,21 @@ struct ChapterSidebar: View {
                 documentName: documentName
             )
         }
-        .sheet(isPresented: $commands.findReplacePresented) {
-            ProjectFindReplaceView(
-                navigator: navigator,
-                statistics: statistics,
-                selection: $selection
+        .alert(
+            deletionTitle,
+            isPresented: Binding(
+                get: { !pendingDeletion.isEmpty },
+                set: { if !$0 { pendingDeletion = [] } }
             )
+        ) {
+            Button("Delete", role: .destructive) {
+                let toDelete = pendingDeletion
+                pendingDeletion = []
+                performDelete(toDelete)
+            }
+            Button("Cancel", role: .cancel) { pendingDeletion = [] }
+        } message: {
+            Text(deletionMessage)
         }
         .overlay {
             if chapters.isEmpty {
@@ -186,7 +197,39 @@ struct ChapterSidebar: View {
         statistics.primeMissing(for: Array(chapters))
     }
 
+    /// Every delete route (Delete key, context menu, swipe) comes through
+    /// here. A chapter with anything in it asks first; Undo also restores it,
+    /// but an accidental keystroke shouldn't depend on noticing in time.
     private func delete(_ toDelete: [Chapter]) {
+        guard !toDelete.isEmpty else { return }
+        if ProjectViewModel.needsDeleteConfirmation(toDelete.map { ($0.bodyData, $0.notesData) }) {
+            pendingDeletion = toDelete
+        } else {
+            performDelete(toDelete)
+        }
+    }
+
+    private var deletionTitle: String {
+        if pendingDeletion.count == 1 {
+            let title = pendingDeletion[0].title.flatMap { $0.isEmpty ? nil : $0 } ?? "Untitled Chapter"
+            return "Delete “\(title)”?"
+        }
+        return "Delete \(pendingDeletion.count) chapters?"
+    }
+
+    private var deletionMessage: String {
+        let words = pendingDeletion.reduce(0) { $0 + statistics.wordCount(for: $1) }
+        let single = pendingDeletion.count == 1
+        let what = single ? "This chapter has" : "These chapters have"
+        let contents = switch words {
+        case 0: "images, sidebars or notes in \(single ? "it" : "them")"
+        case 1: "1 word"
+        default: "\(words.formatted()) words"
+        }
+        return "\(what) \(contents). You can get \(single ? "it" : "them") back with Edit ▸ Undo."
+    }
+
+    private func performDelete(_ toDelete: [Chapter]) {
         if let selected = selection, toDelete.contains(selected) {
             selection = nil
         }

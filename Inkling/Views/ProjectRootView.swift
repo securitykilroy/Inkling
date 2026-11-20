@@ -29,6 +29,7 @@ struct ProjectRootView: View {
     /// Core Data objects that stop being safe to touch at that point, so the
     /// whole tree is dropped rather than guarded field by field.
     @EnvironmentObject private var lifecycle: DocumentLifecycle
+    @EnvironmentObject private var commands: ProjectCommands
 
     init(context: NSManagedObjectContext,
          documentName: String = "",
@@ -67,6 +68,18 @@ struct ProjectRootView: View {
                     description: Text("Select a chapter from the sidebar, or add one.")
                 )
             }
+        }
+        // Find & Replace in Project is an inspector beside the editor, not a
+        // sheet: as a sheet it dimmed and blocked the editor, so a match it
+        // jumped to couldn't be seen or edited until the sheet was closed.
+        .inspector(isPresented: $commands.findReplacePresented) {
+            ProjectFindReplaceView(
+                navigator: navigator,
+                statistics: statistics,
+                selection: $selection,
+                isPresented: $commands.findReplacePresented
+            )
+            .inspectorColumnWidth(min: 300, ideal: 360, max: 520)
         }
         .onChange(of: selection) { onSelectionChange(selection?.objectID) }
         .onReceive(NotificationCenter.default.publisher(

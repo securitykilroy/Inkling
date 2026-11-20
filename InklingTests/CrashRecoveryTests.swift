@@ -229,6 +229,26 @@ struct CrashRecoveryTests {
         #expect(FileManager.default.fileExists(atPath: existing.path))
     }
 
+    /// The temporary copy a recovered document is read from goes when the
+    /// document closes. Nothing removed it before, so one was left in the temp
+    /// folder for every recovery.
+    @Test func closingARecoveredDocumentDeletesTheCopyItWasReadFrom() throws {
+        let directory = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let existing = directory.appendingPathComponent("left-by-crash.inkling")
+        let scratch = directory.appendingPathComponent("scratch.inkling")
+        try Data("scratch".utf8).write(to: scratch)
+        let document = InklingDocument()
+
+        document.adoptRecoveredCopy(at: existing, readFrom: scratch)
+        #expect(FileManager.default.fileExists(atPath: scratch.path))
+        document.recovery?.stop()
+        document.close()
+        document.recovery?.waitUntilIdle()
+
+        #expect(!FileManager.default.fileExists(atPath: scratch.path))
+    }
+
     /// A SwiftUI text field writes its unchanged text back through its
     /// binding while the window lays out. That must not count as an edit, or
     /// merely opening a project makes closing it ask to save — and starts
