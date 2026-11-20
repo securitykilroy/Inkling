@@ -71,6 +71,18 @@ nonisolated enum ImageAttachmentContent {
         return nil
     }
 
+    /// Whether a file may be pasted or dropped into a chapter: an image, or a
+    /// PDF (which `storedPayload` keeps as vector bytes). Anything else would
+    /// become an attachment the editor can only show as the file's icon — and
+    /// keep only as that icon, losing the file itself on the next save.
+    static func isAcceptableFile(_ url: URL) -> Bool {
+        guard !url.hasDirectoryPath else { return false }
+        let type = (try? url.resourceValues(forKeys: [.contentTypeKey]).contentType)
+            ?? UTType(filenameExtension: url.pathExtension)
+        guard let type else { return false }
+        return type.conforms(to: .image) || type.conforms(to: .pdf)
+    }
+
     /// The raw bytes an attachment carries, whichever way it was built.
     static func storedBytes(of attachment: NSTextAttachment) -> Data? {
         attachment.contents ?? attachment.fileWrapper?.regularFileContents

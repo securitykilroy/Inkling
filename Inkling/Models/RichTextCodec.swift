@@ -479,6 +479,11 @@ enum RichTextCodec {
         encoded ?? previous
     }
 
+    /// `position` if JSON can hold it, else nil (the object follows its text).
+    nonisolated private static func finitePosition(_ position: FloatingImagePosition) -> FloatingImagePosition? {
+        position.origin.x.isFinite && position.origin.y.isFinite ? position : nil
+    }
+
     /// One record per floating sidebar, capturing its anchor, geometry, and RTF.
     nonisolated private static func sidebarRecords(in attributedString: NSAttributedString) -> [SidebarRecord] {
         var records: [SidebarRecord] = []
@@ -487,13 +492,17 @@ enum RichTextCodec {
             in: NSRange(location: 0, length: attributedString.length)
         ) { value, range, _ in
             guard let sidebar = value as? SidebarAttachment else { return }
+            // Never drop a sidebar record — it holds the box's text. A value
+            // JSON can't hold is written as one `restoreSidebars` rejects, so
+            // the box comes back at its default size, or unpositioned.
+            let position = sidebar.position.flatMap(finitePosition)
             records.append(SidebarRecord(
                 location: range.location,
-                width: Double(sidebar.width),
-                contentHeight: Double(sidebar.contentHeight),
-                page: sidebar.position?.page,
-                originX: sidebar.position.map { Double($0.origin.x) },
-                originY: sidebar.position.map { Double($0.origin.y) },
+                width: sidebar.width.isFinite ? Double(sidebar.width) : 0,
+                contentHeight: sidebar.contentHeight.isFinite ? Double(sidebar.contentHeight) : -1,
+                page: position?.page,
+                originX: position.map { Double($0.origin.x) },
+                originY: position.map { Double($0.origin.y) },
                 content: sidebar.contentData,
                 title: sidebar.title.isEmpty ? nil : sidebar.title
             ))
@@ -537,7 +546,10 @@ enum RichTextCodec {
                   !(attachment is SidebarAttachment) else { return }
             let size = (attachment as? FloatingImageAttachment)?.displaySize
                 ?? attachment.bounds.size
-            guard size.width > 0, size.height > 0
+            // JSONEncoder throws on infinity and NaN, which used to drop the
+            // whole sidecar — every image's size, position and caption.
+            guard size.width.isFinite, size.height.isFinite,
+                  size.width > 0, size.height > 0
             else { return }
             // Only the editor and the printer build `FloatingImageAttachment`s.
             // Everything that rewrites a chapter offline — project-wide Replace
@@ -546,12 +558,12 @@ enum RichTextCodec {
             // attribute instead. Without this fallback that second round trip
             // dropped `page`/`originX`/`originY`, so every image the author had
             // dragged snapped back to its paragraph anchor.
-            let position = (attachment as? FloatingImageAttachment)?.position
+            let position = ((attachment as? FloatingImageAttachment)?.position
                 ?? attributedString.attribute(
                     .inklingFloatingImagePosition,
                     at: range.location,
                     effectiveRange: nil
-                ) as? FloatingImagePosition
+                ) as? FloatingImagePosition).flatMap(finitePosition)
             let importedPlacementHint = (attachment as? FloatingImageAttachment)?.importedPlacementHint
                 ?? attributedString.attribute(
                     .inklingImportedImagePlacementHint,
@@ -572,7 +584,7 @@ enum RichTextCodec {
                 page: position?.page,
                 originX: position.map { Double($0.origin.x) },
                 originY: position.map { Double($0.origin.y) },
-                importedPlacementHint: position == nil ? importedPlacementHint : nil,
+                importedPlacementHint: position == nil ? importedPlacementHint?.withFiniteOffsets : nil,
                 caption: ImageCaption.normalized(caption)
             ))
         }

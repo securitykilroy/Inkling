@@ -52,6 +52,14 @@ nonisolated struct ImportedImagePlacementHint: Codable, Equatable {
     var verticalReference: ImportedImageReference
     var verticalAlignment: ImportedImageAlignment?
     var verticalOffset: Double?
+
+    /// This hint with any offset JSON can't hold (infinity, NaN) dropped.
+    nonisolated var withFiniteOffsets: ImportedImagePlacementHint {
+        var copy = self
+        if copy.horizontalOffset?.isFinite == false { copy.horizontalOffset = nil }
+        if copy.verticalOffset?.isFinite == false { copy.verticalOffset = nil }
+        return copy
+    }
 }
 
 /// Which vertical guide a dragged image snapped to, for drawing the guide line.

@@ -365,9 +365,14 @@ enum WordDocumentExporter {
             case "\t":
                 flushBuffer()
                 content += "<w:tab/>"
-            case "\n", "\r":
+            case "\n", "\r", "\u{0B}":
+                // A vertical tab is how Word itself stores a manual line break.
                 flushBuffer()
                 content += "<w:br/>"
+            case "\u{0C}":
+                // ...and a form feed, a page break.
+                flushBuffer()
+                content += #"<w:br w:type="page"/>"#
             default:
                 buffer.append(scalar)
             }
@@ -602,13 +607,27 @@ enum WordDocumentExporter {
         attributed.string as NSString
     }
 
-    private static func escapeXML(_ value: String) -> String {
-        value
+    /// Escapes markup and drops the characters XML 1.0 forbids outright —
+    /// most C0 controls, U+FFFE and U+FFFF. One of those anywhere in a part
+    /// made Word reject the whole file as corrupt.
+    static func escapeXML(_ value: String) -> String {
+        var scalars = String.UnicodeScalarView()
+        scalars.append(contentsOf: value.unicodeScalars.lazy.filter(isAllowedInXML))
+        return String(scalars)
             .replacingOccurrences(of: "&", with: "&amp;")
             .replacingOccurrences(of: "<", with: "&lt;")
             .replacingOccurrences(of: ">", with: "&gt;")
             .replacingOccurrences(of: "\"", with: "&quot;")
             .replacingOccurrences(of: "'", with: "&apos;")
+    }
+
+    private static func isAllowedInXML(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar.value {
+        case 0x9, 0xA, 0xD: true
+        case 0x0..<0x20: false
+        case 0xFFFE, 0xFFFF: false
+        default: true
+        }
     }
 }
 

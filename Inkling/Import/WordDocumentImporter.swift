@@ -304,6 +304,7 @@ enum WordDocumentImporter {
               let cyString = extent.attribute(forName: "cy")?.stringValue,
               let cx = Double(cxString),
               let cy = Double(cyString),
+              cx.isFinite, cy.isFinite, // `Double("inf")` parses
               cx > 0,
               cy > 0
         else { return nil }
@@ -361,7 +362,8 @@ enum WordDocumentImporter {
     private static func offset(in position: XMLElement?) -> Double? {
         guard let value = position.flatMap({
             firstDescendant(of: $0, localName: "posOffset")?.stringValue
-        }).flatMap(Double.init)
+        }).flatMap(Double.init),
+              value.isFinite
         else { return nil }
         return value / 12_700
     }

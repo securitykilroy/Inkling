@@ -100,10 +100,32 @@ final class RichTextController: ObservableObject {
 
     private var bodyFont: NSFont { TextStyle.body.font(familyName: fontFamilyName) }
 
+    /// The sidebar box the author is typing in, if any. `textView` stays the
+    /// chapter's page view while a box is entered, so without this check the
+    /// toolbar formatted whatever was selected in the chapter behind the box.
+    private var enteredSidebar: SidebarTextView? {
+        (textView as? PageTextView)?.pageStack?.enteredSidebarTextView
+    }
+
+    /// Where character-level commands (bold, italic, bullets) apply: the
+    /// entered box, else the chapter.
+    private var characterTarget: NSTextView? { enteredSidebar ?? textView }
+
+    /// Where paragraph-level commands (styles, callouts, images, sidebars)
+    /// apply. A box can't hold those, so while one is entered there is no
+    /// target — the command beeps rather than reaching the chapter behind it.
+    private var paragraphTarget: NSTextView? {
+        guard enteredSidebar == nil else {
+            NSSound.beep()
+            return nil
+        }
+        return textView
+    }
+
     // MARK: - Images
 
     func chooseImage() {
-        guard let textView else { return }
+        guard let textView = paragraphTarget else { return }
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.image]
         panel.allowsMultipleSelection = false
@@ -137,7 +159,7 @@ final class RichTextController: ObservableObject {
         contentType: UTType? = nil,
         filename: String? = nil
     ) {
-        guard let textView else { return }
+        guard let textView = paragraphTarget else { return }
         let maximumWidth = (textView as? PageTextView)?.pageStack?.pageLayout.contentWidth
             ?? textView.textContainer?.containerSize.width
             ?? image.size.width
@@ -181,7 +203,7 @@ final class RichTextController: ObservableObject {
     func toggleItalic() { toggleSymbolicTrait(.italic) }
 
     private func toggleSymbolicTrait(_ trait: NSFontDescriptor.SymbolicTraits) {
-        guard let textView else { return }
+        guard let textView = characterTarget else { return }
         let range = textView.selectedRange()
 
         // No selection: flip the trait for newly typed text.
@@ -260,7 +282,7 @@ final class RichTextController: ObservableObject {
     }
 
     func applyStyle(_ style: TextStyle) {
-        guard let textView, let storage = textView.textStorage else { return }
+        guard let textView = paragraphTarget, let storage = textView.textStorage else { return }
         let paragraphRange = (textView.string as NSString).paragraphRange(for: textView.selectedRange())
         guard textView.shouldChangeText(in: paragraphRange, replacementString: nil) else { return }
 
@@ -318,7 +340,7 @@ final class RichTextController: ObservableObject {
     /// existing callout to a different kind). Operates on whole paragraphs, like
     /// `applyStyle`, so a callout is always a clean run of paragraphs.
     func applyCallout(_ kind: CalloutKind) {
-        guard let textView, let storage = textView.textStorage else { return }
+        guard let textView = paragraphTarget, let storage = textView.textStorage else { return }
         let range = (textView.string as NSString).paragraphRange(for: textView.selectedRange())
         guard range.length > 0, textView.shouldChangeText(in: range, replacementString: nil) else { return }
 
@@ -337,7 +359,7 @@ final class RichTextController: ObservableObject {
     /// Removes any callout covering the selection's paragraph(s), resetting them
     /// to plain body paragraphs.
     func removeCallout() {
-        guard let textView, let storage = textView.textStorage else { return }
+        guard let textView = paragraphTarget, let storage = textView.textStorage else { return }
         let range = (textView.string as NSString).paragraphRange(for: textView.selectedRange())
         guard range.length > 0, textView.shouldChangeText(in: range, replacementString: nil) else { return }
 
@@ -353,7 +375,7 @@ final class RichTextController: ObservableObject {
 
     /// Inserts a floating margin sidebar at the caret and enters it for typing.
     func insertSidebar() {
-        (textView as? PageTextView)?.pageStack?.insertSidebar()
+        (paragraphTarget as? PageTextView)?.pageStack?.insertSidebar()
     }
 
     // MARK: - Bullet list
@@ -362,7 +384,7 @@ final class RichTextController: ObservableObject {
     /// selection. Applied/removed uniformly: if all are already bulleted, it
     /// removes them; otherwise it adds them.
     func toggleBulletList() {
-        guard let textView, let storage = textView.textStorage else { return }
+        guard let textView = characterTarget, let storage = textView.textStorage else { return }
         let full = textView.string as NSString
         let selectionParagraphs = full.paragraphRange(for: textView.selectedRange())
         guard textView.shouldChangeText(in: selectionParagraphs, replacementString: nil) else { return }

@@ -195,10 +195,47 @@ final class PageTextView: NSTextView {
         return pboard.setData(data, forType: type)
     }
 
+    /// Whether `pboard` holds files a chapter can't keep — anything but images
+    /// and PDFs (see `ImageAttachmentContent.isAcceptableFile`). A file dropped
+    /// from Finder used to become an attachment the editor turned into a
+    /// floating picture of the file's *icon*, keeping only that icon, so the
+    /// file itself was gone after the next save. One such file refuses the
+    /// whole drop rather than quietly keeping part of it.
+    static func carriesUnacceptableFiles(_ pboard: NSPasteboard) -> Bool {
+        guard let urls = pboard.readObjects(forClasses: [NSURL.self], options: [
+            .urlReadingFileURLsOnly: true,
+        ]) as? [URL], !urls.isEmpty
+        else { return false }
+        return !urls.allSatisfy(ImageAttachmentContent.isAcceptableFile)
+    }
+
+    // A Finder drag inserts its files without necessarily going through
+    // `readSelection`, so the drag itself is refused too — which also shows
+    // the no-drop cursor instead of a drop that silently does nothing.
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        Self.carriesUnacceptableFiles(sender.draggingPasteboard) ? [] : super.draggingEntered(sender)
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        Self.carriesUnacceptableFiles(sender.draggingPasteboard) ? [] : super.draggingUpdated(sender)
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        guard !Self.carriesUnacceptableFiles(sender.draggingPasteboard) else { return false }
+        return super.performDragOperation(sender)
+    }
+
     override func readSelection(
         from pboard: NSPasteboard,
         type: NSPasteboard.PasteboardType
     ) -> Bool {
+        // Files on the pasteboard arrive under several types at once — the
+        // URL, the file's icon, its name — so check the files themselves
+        // whichever type AppKit picked.
+        if Self.carriesUnacceptableFiles(pboard) {
+            NSSound.beep()
+            return false
+        }
         guard type == .inklingRichText else {
             return super.readSelection(from: pboard, type: type)
         }
@@ -2738,6 +2775,12 @@ extension PageStackView {
             window?.makeFirstResponder(view)
         }
         needsDisplay = true
+    }
+
+    /// The box the author is typing in, if any. Formatting commands act on it
+    /// instead of the chapter text behind it.
+    var enteredSidebarTextView: SidebarTextView? {
+        enteredSidebar.flatMap { sidebarViews[$0] }
     }
 
     func exitSidebar() {
