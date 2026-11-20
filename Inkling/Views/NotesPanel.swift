@@ -17,9 +17,12 @@ struct NotesPanel: View {
     @Binding var data: Data?
     let documentID: NSManagedObjectID
     var fontFamilyName: String? = nil
+    /// Lets a project search jump select a match in the notes. Not a
+    /// formatting controller: the notes still have no toolbar.
+    var controller: RichTextController? = nil
 
     var body: some View {
-        RichTextEditor(data: $data, documentID: documentID, fontFamilyName: fontFamilyName)
+        RichTextEditor(data: $data, documentID: documentID, controller: controller, fontFamilyName: fontFamilyName)
             .background(Color(nsColor: .windowBackgroundColor))
     }
 }

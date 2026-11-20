@@ -1120,6 +1120,39 @@ final class PageStackView: NSView, NSTextStorageDelegate {
         revealCharacterRange(clamped)
     }
 
+    /// Scrolls to the sidebar box anchored at `anchor`, enters it and selects
+    /// `range` in its own text — a project search match inside the box. The
+    /// box can be parked on another page from its anchor, so this scrolls to
+    /// the box, not the anchor. Does nothing if no box is anchored there any
+    /// more (the text changed since the search).
+    func revealSidebar(anchor: Int, selecting range: NSRange) {
+        guard anchor >= 0, anchor < storage.length,
+              let sidebar = storage.attribute(.attachment, at: anchor, effectiveRange: nil) as? SidebarAttachment
+        else { return }
+        let id = ObjectIdentifier(sidebar)
+        enterSidebar(id)
+        guard let view = sidebarViews[id] else { return }
+        let length = (view.string as NSString).length
+        let location = min(max(0, range.location), length)
+        view.setSelectedRange(NSRange(location: location, length: min(range.length, length - location)))
+        view.scrollToVisible(view.bounds)
+    }
+
+    /// Scrolls to the floating image anchored at `anchor` and selects it — a
+    /// project search match in its caption. Like a box, the image can be
+    /// drawn on another page from its anchor.
+    func revealImage(at anchor: Int) {
+        guard let host = pageViews.first(where: { page in
+            page.floatingImages.contains { $0.location == anchor }
+        }),
+              let item = host.floatingImages.first(where: { $0.location == anchor })
+        else { return }
+        exitSidebar()
+        window?.makeFirstResponder(host)
+        selectImage(at: anchor, in: host)
+        host.scrollToVisible(host.viewRect(forFloating: item.rect).insetBy(dx: 0, dy: -40))
+    }
+
     /// The character range `page` displays.
     func characterRange(ofPage page: Int) -> NSRange {
         guard page >= 0, page < pageViews.count,

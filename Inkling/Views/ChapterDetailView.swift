@@ -27,6 +27,8 @@ struct ChapterDetailView: View {
     /// document can remember this chapter + caret for reopening.
     var onCaretChange: (Int) -> Void = { _ in }
     @StateObject private var controller = RichTextController()
+    /// Drives the notes editor only for project search jumps into the notes.
+    @StateObject private var notesController = RichTextController()
     @State private var laidOutPageCount = 1
     @AppStorage("showSidePanel") private var showSidePanel = true
     @AppStorage("sidePanelMode") private var sidePanelMode = SidePanelMode.notes
@@ -100,7 +102,10 @@ struct ChapterDetailView: View {
 
                         switch sidePanelMode {
                         case .notes:
-                            NotesPanel(data: notesBinding, documentID: chapter.objectID, fontFamilyName: project.bodyFontFamily)
+                            NotesPanel(
+                                data: notesBinding, documentID: chapter.objectID,
+                                fontFamilyName: project.bodyFontFamily, controller: notesController
+                            )
                         case .shelf:
                             ShelfView(project: project)
                         }
@@ -135,9 +140,38 @@ struct ChapterDetailView: View {
     /// editor is showing this chapter. Deferred so the text view has loaded.
     private func applyPendingJump() {
         guard let target = navigator.target, target.chapterID == chapter.id else { return }
-        DispatchQueue.main.async {
-            controller.scroll(to: target.range)
+        if target.place == .notes {
+            // The notes editor may not exist yet: show it, then wait for it.
+            showSidePanel = true
+            sidePanelMode = .notes
             navigator.target = nil
+            revealInNotes(target.range, attemptsLeft: 20)
+            return
+        }
+        DispatchQueue.main.async {
+            switch target.place {
+            case .body, .notes:
+                controller.scroll(to: target.range)
+            case .sidebar(let anchor, _):
+                controller.revealSidebar(anchor: anchor, selecting: target.range)
+            case .caption(let anchor):
+                controller.revealImage(at: anchor)
+            }
+            navigator.target = nil
+        }
+    }
+
+    /// Selects `range` in the notes once the notes editor is showing this
+    /// chapter's notes. Polls briefly: the panel is created, then loads, on
+    /// later passes than the one that asked for it.
+    private func revealInNotes(_ range: NSRange, attemptsLeft: Int) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            if let textView = notesController.textView,
+               (textView.string as NSString).length >= NSMaxRange(range) {
+                notesController.scroll(to: range)
+            } else if attemptsLeft > 0 {
+                revealInNotes(range, attemptsLeft: attemptsLeft - 1)
+            }
         }
     }
 

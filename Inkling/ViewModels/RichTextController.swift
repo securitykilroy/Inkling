@@ -197,6 +197,17 @@ final class RichTextController: ObservableObject {
         textView.window?.makeFirstResponder(textView)
     }
 
+    /// Jumps to a project search match inside a sidebar box (`range` is in the
+    /// box's own text).
+    func revealSidebar(anchor: Int, selecting range: NSRange) {
+        (textView as? PageTextView)?.pageStack?.revealSidebar(anchor: anchor, selecting: range)
+    }
+
+    /// Jumps to a project search match in an image's caption.
+    func revealImage(at anchor: Int) {
+        (textView as? PageTextView)?.pageStack?.revealImage(at: anchor)
+    }
+
     // MARK: - Character formatting
 
     func toggleBold() { toggleSymbolicTrait(.bold) }

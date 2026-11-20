@@ -12,7 +12,10 @@ import Foundation
 
 struct OutlineJumpTarget: Equatable {
     let chapterID: UUID
+    /// Relative to the text of `place`: the body, the notes, a sidebar box's
+    /// own text, or (ignored) a caption.
     let range: NSRange
+    var place: SearchPlace = .body
 }
 
 @MainActor

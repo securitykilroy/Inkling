@@ -7,8 +7,9 @@
 //  demand (Find button / Return), showing every match with surrounding
 //  context before anything changes; clicking a match jumps to it in the
 //  editor via the same OutlineNavigator jump-target mechanism the sidebar's
-//  heading list already uses. Replace All rewrites every affected chapter's
-//  bodyData directly — including chapters not currently open — and the
+//  heading list already uses. It searches each chapter's body, notes, sidebar
+//  boxes and captions (see `ProjectSearch`). Replace All rewrites every affected chapter's
+//  bodyData/notesData directly — including chapters not currently open — and the
 //  editor picks up the change automatically (see RichTextEditor.Coordinator's
 //  loadedData tracking).
 //
@@ -82,8 +83,16 @@ struct ProjectFindReplaceView: View {
                             jump(to: match)
                         } label: {
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(match.chapterTitle)
-                                    .font(.callout.weight(.semibold))
+                                HStack(spacing: 4) {
+                                    Text(match.chapterTitle)
+                                        .font(.callout.weight(.semibold))
+                                    if let label = match.place.label {
+                                        Text("· \(label)")
+                                            .font(.callout)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                                .lineLimit(1)
                                 Text(snippet(for: match))
                                     .font(.callout)
                                     .foregroundStyle(.secondary)
@@ -145,10 +154,17 @@ struct ProjectFindReplaceView: View {
         var affected: [Chapter] = []
         var changes: [RichTextChange] = []
         for chapter in chapters {
-            guard let id = chapter.id, let newData = results[id] else { continue }
-            changes.append(RichTextChange(
-                object: chapter, key: #keyPath(Chapter.bodyData), from: chapter.bodyData, to: newData
-            ))
+            guard let id = chapter.id, let result = results[id] else { continue }
+            if let body = result.bodyData {
+                changes.append(RichTextChange(
+                    object: chapter, key: #keyPath(Chapter.bodyData), from: chapter.bodyData, to: body
+                ))
+            }
+            if let notes = result.notesData {
+                changes.append(RichTextChange(
+                    object: chapter, key: #keyPath(Chapter.notesData), from: chapter.notesData, to: notes
+                ))
+            }
             affected.append(chapter)
         }
         // One undoable step of its own, outside Core Data's undo like every
@@ -166,13 +182,16 @@ struct ProjectFindReplaceView: View {
     private func jump(to match: SearchMatch) {
         guard let chapter = chapters.first(where: { $0.id == match.chapterID }) else { return }
         selection = chapter
-        navigator.target = OutlineJumpTarget(chapterID: match.chapterID, range: match.range)
+        navigator.target = OutlineJumpTarget(chapterID: match.chapterID, range: match.range, place: match.place)
     }
 
     private func searchableChapters() -> [SearchableChapter] {
         chapters.compactMap { chapter in
             guard let id = chapter.id else { return nil }
-            return SearchableChapter(id: id, title: chapter.title ?? "Untitled Chapter", bodyData: chapter.bodyData)
+            return SearchableChapter(
+                id: id, title: chapter.title ?? "Untitled Chapter",
+                bodyData: chapter.bodyData, notesData: chapter.notesData
+            )
         }
     }
 

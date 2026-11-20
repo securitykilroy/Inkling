@@ -1694,7 +1694,7 @@ struct InklingTests {
             )],
             query: "beta", replacement: "gamma", caseSensitive: true
         )
-        let decoded = try #require(RichTextCodec.decode(try #require(results[id])))
+        let decoded = try #require(RichTextCodec.decode(try #require(results[id]?.bodyData)))
         #expect(decoded.string.hasPrefix("alpha gamma"))
         #expect(decoded.attribute(
             .inklingFloatingImagePosition, at: 12, effectiveRange: nil
@@ -2691,9 +2691,9 @@ struct InklingTests {
         #expect(results.count == 2)
         #expect(results[idTwo] == nil)
 
-        let decodedOne = try #require(RichTextCodec.decode(results[idOne]))
+        let decodedOne = try #require(RichTextCodec.decode(results[idOne]?.bodyData))
         #expect(decodedOne.string == "The dog sat on the dog mat.")
-        let decodedThree = try #require(RichTextCodec.decode(results[idThree]))
+        let decodedThree = try #require(RichTextCodec.decode(results[idThree]?.bodyData))
         #expect(decodedThree.string == "One dog here.")
     }
 
@@ -2786,7 +2786,7 @@ struct InklingTests {
             in: chapters, query: "cat", replacement: "dog", caseSensitive: true
         )
 
-        let decoded = try #require(RichTextCodec.decode(results[id]))
+        let decoded = try #require(RichTextCodec.decode(results[id]?.bodyData))
         #expect(decoded.string == "before dog after")
         let range = (decoded.string as NSString).range(of: "dog")
         let font = try #require(decoded.attribute(.font, at: range.location, effectiveRange: nil) as? NSFont)
