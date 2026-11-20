@@ -1580,6 +1580,52 @@ struct PageStackViewTests {
         #expect(manager.calloutBoxes(forGlyphRange: tail) == second)
     }
 
+    /// Where a callout breaks across pages, each page's share of the box stays
+    /// inside that page's text area. The continuation used to reserve room for
+    /// the label it doesn't draw, plus padding, starting 26pt up in the top
+    /// margin — on screen and on paper, which draws with the same manager.
+    @Test func aCalloutCrossingAPageBreakStaysInsideEachPagesTextArea() throws {
+        let stack = PageStackView()
+        stack.setAttributedString(Self.filler(paragraphs: 200))
+        let boundary = NSMaxRange(Self.characterRange(ofPage: 0, in: stack))
+        let calloutRange = NSRange(location: max(0, boundary - 150), length: 300)
+        stack.storage.addAttribute(.inklingCallout, value: CalloutKind.note.rawValue, range: calloutRange)
+        stack.rebuildPages()
+
+        let manager = stack.sharedLayoutManager
+        let container0 = try #require(stack.pageViews[0].textContainer)
+        let container1 = try #require(stack.pageViews[1].textContainer)
+        let first = try #require(manager.calloutBoxes(forGlyphRange: manager.glyphRange(for: container0)).first)
+        let second = try #require(manager.calloutBoxes(forGlyphRange: manager.glyphRange(for: container1)).first)
+
+        #expect(first.rect.maxY <= container0.size.height, "\(first.rect) in \(container0.size)")
+        #expect(second.rect.minY >= 0, "\(second.rect)")
+        // ...while the start of the box keeps the room above for its label.
+        let firstLine = manager.lineFragmentUsedRect(
+            forGlyphAt: manager.glyphIndexForCharacter(at: calloutRange.location), effectiveRange: nil
+        )
+        #expect(first.rect.minY == firstLine.minY - CalloutStyling.innerVerticalPad - CalloutStyling.labelHeight)
+    }
+
+    /// A callout that begins at the top of a page still keeps its box, label
+    /// included, inside that page's text area.
+    @Test func aCalloutStartingAtTheTopOfAPageStaysInsideIt() throws {
+        let stack = PageStackView()
+        stack.setAttributedString(Self.filler(paragraphs: 200))
+        let pageStart = Self.characterRange(ofPage: 1, in: stack).location
+        let paragraph = (stack.storage.string as NSString).paragraphRange(for: NSRange(location: pageStart, length: 0))
+        CalloutStyling.apply(.note, to: stack.storage, range: paragraph)
+        stack.rebuildPages()
+
+        let manager = stack.sharedLayoutManager
+        let calloutGlyph = manager.glyphIndexForCharacter(at: paragraph.location)
+        let container = try #require(manager.textContainer(forGlyphAt: calloutGlyph, effectiveRange: nil))
+        let box = try #require(manager.calloutBoxes(forGlyphRange: manager.glyphRange(for: container)).first {
+            $0.showsLabel
+        })
+        #expect(box.rect.minY >= 0, "\(box.rect)")
+    }
+
     @Test func aCalloutSpanningAPageBreakStaysLaidOutOnBothPages() throws {
         let stack = PageStackView()
         let text = NSMutableAttributedString(attributedString: Self.filler(paragraphs: 200))

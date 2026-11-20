@@ -69,6 +69,28 @@ nonisolated enum HorizontalGuide: Equatable {
 
 enum FloatingImagePlacement {
 
+    /// `natural` scaled down, keeping its shape, until the image *and* its
+    /// caption fit on one page's text area. Never scales up. Shared by the
+    /// editor and the printer so an image prints at the size it's shown.
+    /// `captionHeight` gives the caption's height at a given image width
+    /// (0 for none); narrowing an image can add caption lines, hence the
+    /// second pass.
+    static func fittedSize(
+        _ natural: CGSize,
+        within page: CGSize,
+        captionHeight: (CGFloat) -> CGFloat
+    ) -> CGSize {
+        var size = RichTextImageInserter.fittedSize(natural, within: page)
+        guard size.width > 0 else { return size }
+        for _ in 0..<2 {
+            let caption = captionHeight(size.width)
+            guard caption > 0, size.height + caption > page.height else { break }
+            let room = CGSize(width: page.width, height: max(32, page.height - caption))
+            size = RichTextImageInserter.fittedSize(size, within: room)
+        }
+        return size
+    }
+
     static func approximatedOrigin(
         for hint: ImportedImagePlacementHint,
         anchorLineRect: CGRect,

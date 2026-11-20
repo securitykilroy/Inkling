@@ -247,6 +247,14 @@ final class ManuscriptPrintView: NSView {
         }
     }
 
+    /// Sidebar box rectangles in printable-content coordinates. Exposed for
+    /// geometry regression tests.
+    func sidebarFootprints(onPage physicalPage: Int) -> [NSRect] {
+        let bodyPage = physicalPage - titlePageCount
+        guard bodyPage >= 1, pages.indices.contains(bodyPage - 1) else { return [] }
+        return pages[bodyPage - 1].sidebars.map(\.contentRect)
+    }
+
     /// 1 when a leading title page is present, 0 otherwise. Body pages are
     /// shifted by this so the title page occupies physical page 1 on its own.
     private var titlePageCount: Int { titlePage == nil ? 0 : 1 }
@@ -343,8 +351,16 @@ final class ManuscriptPrintView: NSView {
             ) { value, range, _ in
                 guard let attachment = value as? NSTextAttachment,
                       !(attachment is SidebarAttachment),
-                      let size = Self.displaySize(of: attachment)
+                      let stored = Self.displaySize(of: attachment)
                 else { return }
+                // The editor fits an oversized image to the page; a stored
+                // size it never fitted (a chapter printed before it was
+                // opened, a Word extent wider than this text area) printed
+                // past the paper's edge.
+                let size = FloatingImagePlacement.fittedSize(stored, within: pageSize) { width in
+                    Self.captionHeight(at: range.location, in: baseText, width: width)
+                }
+                guard size.width > 0, size.height > 0 else { return }
                 var anchor = attachment
                 // A cell-backed attachment lays out at its image's full size
                 // and ignores `bounds`, so its "near nothing" glyph would
@@ -540,20 +556,36 @@ final class ManuscriptPrintView: NSView {
         text.enumerateAttribute(
             .attachment, in: NSRange(location: 0, length: text.length)
         ) { value, _, _ in
-            guard let sidebar = value as? SidebarAttachment, let position = sidebar.position else { return }
-            let contentRect = FloatingImagePlacement.contentRect(
-                origin: position.origin,
-                imageSize: sidebar.displaySize,
-                leftMargin: leftMargin,
-                topMargin: topMargin
-            )
+            guard let sidebar = value as? SidebarAttachment else { return }
+            let page: Int
+            let contentRect: NSRect
+            if let position = sidebar.position {
+                page = position.page
+                contentRect = FloatingImagePlacement.contentRect(
+                    origin: position.origin,
+                    imageSize: sidebar.displaySize,
+                    leftMargin: leftMargin,
+                    topMargin: topMargin
+                )
+            } else {
+                // Same fallback as the editor (`PageStackView.layoutSidebars`):
+                // a box with no usable saved position — its record failed
+                // validation on load — sits at the top right of the first
+                // page. Leaving it out dropped it from print and PDF.
+                let size = sidebar.displaySize
+                page = 0
+                contentRect = NSRect(
+                    x: max(0, pageSize.width - size.width), y: 0,
+                    width: size.width, height: size.height
+                )
+            }
             let content = NSMutableAttributedString()
             if let decoded = RichTextCodec.decode(sidebar.contentData) {
                 content.append(decoded)
                 content.addAttribute(.foregroundColor, value: NSColor.black,
                                      range: NSRange(location: 0, length: content.length))
             }
-            byPage[position.page, default: []].append(
+            byPage[page, default: []].append(
                 PlacedSidebar(
                     contentRect: contentRect, content: content, title: sidebar.displayTitle
                 )

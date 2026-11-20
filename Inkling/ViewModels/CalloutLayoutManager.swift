@@ -10,7 +10,53 @@
 
 import AppKit
 
-final class CalloutLayoutManager: NSLayoutManager {
+final class CalloutLayoutManager: NSLayoutManager, NSLayoutManagerDelegate {
+
+    override init() {
+        super.init()
+        // Its own delegate, so the editor and the printer get the same callout
+        // geometry without each having to remember to install it.
+        delegate = self
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        delegate = self
+    }
+
+    /// TextKit drops `paragraphSpacingBefore` for a line at the top of a
+    /// container, so a callout starting at the top of a page lost the room
+    /// reserved for its label and top padding, and its box was drawn up in
+    /// the page margin. Put that room back. (The outer gap isn't needed with
+    /// nothing above it.) A callout continuing from the previous page never
+    /// had any, so it gets the top padding here too.
+    func layoutManager(
+        _ layoutManager: NSLayoutManager,
+        shouldSetLineFragmentRect lineFragmentRect: UnsafeMutablePointer<NSRect>,
+        lineFragmentUsedRect: UnsafeMutablePointer<NSRect>,
+        baselineOffset: UnsafeMutablePointer<CGFloat>,
+        in textContainer: NSTextContainer,
+        forGlyphRange glyphRange: NSRange
+    ) -> Bool {
+        guard lineFragmentRect.pointee.minY < 0.5,
+              let storage = textStorage,
+              glyphRange.length > 0
+        else { return false }
+        let location = characterIndexForGlyph(at: glyphRange.location)
+        guard location < storage.length,
+              storage.attribute(.inklingCallout, at: location, effectiveRange: nil) != nil
+        else { return false }
+        let startsCallout = location == 0
+            || storage.attribute(.inklingCallout, at: location - 1, effectiveRange: nil) == nil
+
+        // A continuation from the previous page gets only the top padding, so
+        // its first line doesn't sit against the box's edge.
+        let room = CalloutStyling.innerVerticalPad + (startsCallout ? CalloutStyling.labelHeight : 0)
+        lineFragmentRect.pointee.size.height += room
+        lineFragmentUsedRect.pointee.origin.y += room
+        baselineOffset.pointee += room
+        return true
+    }
 
     /// One callout box to draw: a callout's share of one page.
     struct CalloutBox: Equatable {
@@ -64,12 +110,22 @@ final class CalloutLayoutManager: NSLayoutManager {
             }
             guard let fragments, container.size.width > 0 else { return }
 
-            let top = fragments.minY - CalloutStyling.innerVerticalPad - CalloutStyling.labelHeight
-            let bottom = fragments.maxY + CalloutStyling.innerVerticalPad
+            // Where the callout breaks across pages, the box runs to the edge
+            // of the text area at the break instead of padding past it. Only
+            // the start gets room for the label (which only it draws); a
+            // continuation reserving that room began 26pt up in the margin.
+            let startsHere = drawGlyphs.location == calloutGlyphs.location
+            let endsHere = NSMaxRange(drawGlyphs) == NSMaxRange(calloutGlyphs)
+            let top = startsHere
+                ? fragments.minY - CalloutStyling.innerVerticalPad - CalloutStyling.labelHeight
+                : max(0, fragments.minY - CalloutStyling.innerVerticalPad)
+            let bottom = endsHere
+                ? fragments.maxY + CalloutStyling.innerVerticalPad
+                : min(container.size.height, fragments.maxY + CalloutStyling.innerVerticalPad)
             boxes.append(CalloutBox(
                 kind: kind,
                 rect: NSRect(x: 0, y: top, width: container.size.width, height: bottom - top),
-                showsLabel: drawGlyphs.location == calloutGlyphs.location
+                showsLabel: startsHere
             ))
         }
         return boxes

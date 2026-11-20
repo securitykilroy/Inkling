@@ -1259,16 +1259,10 @@ extension PageStackView {
     /// fit is re-checked once after shrinking.
     private func fittedFloatingSize(_ natural: NSSize, caption: String?, at location: Int) -> NSSize {
         let page = NSSize(width: pageLayout.contentWidth, height: pageLayout.contentHeight)
-        var size = RichTextImageInserter.fittedSize(natural, within: page)
-        guard let caption, size.width > 0 else { return size }
         let font = captionFont(at: location)
-        for _ in 0..<2 {
-            let captionHeight = ImageCaption.height(of: caption, width: size.width, font: font)
-            guard size.height + captionHeight > page.height else { break }
-            let room = NSSize(width: page.width, height: max(32, page.height - captionHeight))
-            size = RichTextImageInserter.fittedSize(size, within: room)
+        return FloatingImagePlacement.fittedSize(natural, within: page) { width in
+            caption.map { ImageCaption.height(of: $0, width: width, font: font) } ?? 0
         }
-        return size
     }
 
     /// Coalesces a floating-layout rebuild to the next run-loop pass, so a burst
